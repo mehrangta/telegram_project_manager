@@ -1,0 +1,20 @@
+[project]
+name = "telegram-project-manager"
+version = "0.1.0"
+description = "Lean Telegram project manager bot platform with a GitHub commit manager."
+requires-python = ">=3.11"
+dependencies = [
+  "telethon>=1.36.0",
+]
+
+[project.scripts]
+telegram-project-manager = "telegram_project_manager.main:main"
+tpm = "telegram_project_manager.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+

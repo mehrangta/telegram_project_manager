@@ -1,0 +1,2 @@
+"""GitHub commit manager bot."""
+
