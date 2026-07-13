@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
+
+from langchain_openai import ChatOpenAI
 
 from telegram_project_manager.platform.config import normalize_config_value
 from telegram_project_manager.platform.secrets import SecretStore
@@ -30,37 +30,27 @@ class OpenAICompatibleClient:
         if not model:
             raise LlmError("OpenAI model is not configured. Admin: /config set openai_model <model>")
         api_key = self.secrets.require("OPENAI_API_KEY")
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }
-        request = urllib.request.Request(
-            f"{base_url}/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise LlmError(f"LLM HTTP {exc.code}: {details[:500]}") from exc
-        except OSError as exc:
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.1,
+                timeout=90,
+                max_retries=2,
+            ).bind(response_format={"type": "json_object"})
+            response = llm.invoke(
+                [
+                    ("system", system_prompt),
+                    ("human", user_prompt),
+                ]
+            )
+        except Exception as exc:
             raise LlmError(f"LLM request failed: {exc}") from exc
 
-        try:
-            content = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LlmError("LLM response missing message content") from exc
+        content = response.content
+        if not isinstance(content, str):
+            raise LlmError("LLM response missing text content")
         return parse_json_object(content)
 
 

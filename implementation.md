@@ -667,7 +667,7 @@ Manual tests:
 - Python implementation.
 - `uv` for Python dependency management and execution.
 - Telegram Bot API long polling for connectivity.
-- `httpx` for OpenAI-compatible API calls.
+- `langchain-openai` and `ChatOpenAI` for OpenAI-compatible API calls.
 - `gh` CLI for GitHub operations.
 - `pydantic` for LLM output validation.
 - SQLite for local persistence.

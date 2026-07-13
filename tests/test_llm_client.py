@@ -5,20 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
+from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.secrets import SecretStore
 from telegram_project_manager.platform.storage.db import Database
-
-
-class FakeResponse:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        return False
-
-    def read(self):
-        return b'{"choices":[{"message":{"content":"{}"}}]}'
 
 
 class LlmClientTests(unittest.TestCase):
@@ -43,15 +32,42 @@ class LlmClientTests(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, {"OPENAI_API_KEY": "", "OPENAI_BASE_URL": ""}),
-                patch("urllib.request.urlopen", return_value=FakeResponse()) as urlopen,
+                patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai,
             ):
+                bound = chat_openai.return_value.bind.return_value
+                bound.invoke.return_value.content = "{}"
                 self.assertEqual(client.chat_json("system", "user"), {})
 
-            request = urlopen.call_args.args[0]
-            self.assertEqual(
-                request.full_url,
-                "https://provider.example.test/v1/chat/completions",
+            chat_openai.assert_called_once_with(
+                model="test-model",
+                api_key="test-key",
+                base_url="https://provider.example.test/v1",
+                temperature=0.1,
+                timeout=90,
+                max_retries=2,
             )
+            chat_openai.return_value.bind.assert_called_once_with(response_format={"type": "json_object"})
+            bound.invoke.assert_called_once_with(
+                [
+                    ("system", "system"),
+                    ("human", "user"),
+                ]
+            )
+
+    def test_wraps_langchain_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db = Database(root / "bot.db")
+            db.initialize()
+            db.set_setting("openai_model", "test-model")
+            secrets_path = root / "secrets.json"
+            secrets_path.write_text(json.dumps({"OPENAI_API_KEY": "test-key"}), encoding="utf-8")
+            client = OpenAICompatibleClient(db, SecretStore(secrets_path))
+
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                chat_openai.return_value.bind.return_value.invoke.side_effect = RuntimeError("provider unavailable")
+                with self.assertRaisesRegex(LlmError, "provider unavailable"):
+                    client.chat_json("system", "user")
 
 
 if __name__ == "__main__":
