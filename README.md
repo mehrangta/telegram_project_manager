@@ -16,6 +16,8 @@ Lean Telegram bot platform for project-management bots. The first bot is a GitHu
 uv sync
 uv run telegram-project-manager init-db
 uv run telegram-project-manager admin add <telegram_user_id>
+uv run telegram-project-manager config set openai_base_url https://api.openai.com/v1
+uv run telegram-project-manager config set openai_model <model>
 uv run telegram-project-manager run
 ```
 
@@ -53,4 +55,4 @@ gh auth status
 ```
 
 Normal configuration is stored in SQLite. Secrets are not stored in SQLite.
-
+Configuration can be changed from either the CLI or the Telegram `/config set` command.

@@ -5,6 +5,7 @@ from telegram_project_manager.bots.commit_manager.planner import CommitPlanner
 from telegram_project_manager.bots.commit_manager.schemas import PlanValidationError, validate_repo
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
+from telegram_project_manager.platform.config import normalize_config_value
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import bullet_list, truncate
@@ -144,14 +145,10 @@ Commands:
             return admin_error
         if len(parts) == 3 and parts[0] == "set":
             key, value = parts[1], parts[2]
-            if key not in {
-                "openai_base_url",
-                "openai_model",
-                "max_files_per_commit",
-                "max_bytes_per_commit",
-                "require_confirmation",
-            }:
-                return "Unsupported config key."
+            try:
+                value = normalize_config_value(key, value)
+            except ValueError as exc:
+                return str(exc)
             self.db.set_setting(key, value)
             return f"Config set: {key}"
         return "Usage: /config show | /config set <key> <value>"
@@ -266,4 +263,3 @@ def split_command(text: str) -> tuple[str, str]:
     first, _, rest = stripped.partition(" ")
     command = first.split("@", 1)[0].lower()
     return command, rest.strip()
-
