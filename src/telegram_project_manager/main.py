@@ -13,6 +13,7 @@ from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
 from telegram_project_manager.platform.router import TelegramRouter
 from telegram_project_manager.platform.secrets import SecretStore
 from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.telegram_bot import TelegramBotApi, run_polling
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,14 +84,7 @@ def main() -> None:
 
 
 async def run_bot(db: Database) -> None:
-    try:
-        from telethon import TelegramClient, events
-    except ImportError as exc:
-        raise SystemExit("Telethon is not installed. Run: uv sync") from exc
-
     secrets = SecretStore(Path("data/secrets.json"))
-    api_id = secrets.require_int("TELEGRAM_API_ID")
-    api_hash = secrets.require("TELEGRAM_API_HASH")
     bot_token = secrets.require("TELEGRAM_BOT_TOKEN")
 
     llm = OpenAICompatibleClient(db, secrets)
@@ -98,17 +92,4 @@ async def run_bot(db: Database) -> None:
     commit_executor = GhCommitExecutor(gh)
     manager = CommitManager(db=db, llm=llm, gh=gh, executor=commit_executor)
     router = TelegramRouter(db=db, handlers=[manager])
-
-    client = TelegramClient("data/telegram_project_manager", api_id, api_hash)
-    await client.start(bot_token=bot_token)
-    me = await client.get_me()
-    router.set_bot_username(getattr(me, "username", None) or "")
-
-    @client.on(events.NewMessage)
-    async def on_message(event):  # type: ignore[no-untyped-def]
-        response = await router.handle_event(event)
-        if response:
-            await event.reply(response)
-
-    logging.info("bot running as @%s", router.bot_username)
-    await client.run_until_disconnected()
+    await run_polling(TelegramBotApi(bot_token), router)

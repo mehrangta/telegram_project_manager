@@ -6,7 +6,6 @@ Lean Telegram bot platform for project-management bots. The first bot is a GitHu
 
 - Python 3.11+
 - `uv`
-- Telethon
 - GitHub CLI (`gh`) installed and authenticated
 - SQLite database at `./data/bot.db` by default
 
@@ -25,12 +24,12 @@ Secrets come from environment variables or `./data/secrets.json`:
 
 ```json
 {
-  "TELEGRAM_API_ID": "12345",
-  "TELEGRAM_API_HASH": "...",
   "TELEGRAM_BOT_TOKEN": "...",
   "OPENAI_API_KEY": "..."
 }
 ```
+
+Only the bot token from BotFather is required. Telegram API ID and API hash are not used.
 
 GitHub auth is handled by `gh`, not by the bot:
 

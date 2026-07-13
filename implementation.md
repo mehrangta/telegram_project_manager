@@ -18,7 +18,7 @@ Runtime constraints:
 
 - Use Python.
 - Use `uv` for dependency management, lockfiles, and running the app.
-- Use Telethon for Telegram connectivity.
+- Use Telegram Bot API long polling with only a bot token.
 - Keep the application lean enough to run on a weak VPS.
 - Avoid heavy frameworks unless they clearly remove more complexity than they add.
 
@@ -159,7 +159,7 @@ Comment: https://github.com/owner/repository/commit/abc1234#commitcomment-...
 
 ## Telegram Interaction Model
 
-Telegram connectivity should use Telethon. The bot can start with long polling through Telethon instead of requiring a public webhook URL. This keeps VPS setup simpler and avoids needing a reverse proxy or TLS certificate during the first version.
+Telegram connectivity should use Bot API long polling with a BotFather token. It should not require a Telegram API ID or API hash, public webhook URL, reverse proxy, or TLS certificate.
 
 The bot should respond only when:
 
@@ -456,8 +456,6 @@ Admin commands should manage these settings over time:
 Only secrets should come from process environment or a local secret file outside git:
 
 ```env
-TELEGRAM_API_ID=
-TELEGRAM_API_HASH=
 TELEGRAM_BOT_TOKEN=
 OPENAI_API_KEY=
 ```
@@ -667,7 +665,7 @@ Manual tests:
 
 - Python implementation.
 - `uv` for Python dependency management and execution.
-- Telethon for Telegram bot connectivity.
+- Telegram Bot API long polling for connectivity.
 - `httpx` for OpenAI-compatible API calls.
 - `gh` CLI for GitHub operations.
 - `pydantic` for LLM output validation.
@@ -689,6 +687,6 @@ The bot should be designed for low memory and low CPU usage:
 - Minimal dependencies.
 - Simple logging to stdout and rotating file logs if needed.
 - SQLite database stored on disk.
-- Polling-based Telegram connection through Telethon.
+- Polling-based Telegram connection using only a BotFather token.
 
 The first version should favor simple, predictable operations over complex infrastructure. GitHub API calls and LLM calls should happen only when a valid Telegram command requires them.

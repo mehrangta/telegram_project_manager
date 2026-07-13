@@ -29,18 +29,6 @@ class TelegramRouter:
     def set_bot_username(self, username: str) -> None:
         self.bot_username = username.lstrip("@")
 
-    async def handle_event(self, event) -> str | None:  # type: ignore[no-untyped-def]
-        sender = await event.get_sender()
-        text = event.raw_text or ""
-        message = IncomingMessage(
-            chat_id=int(event.chat_id),
-            user_id=int(sender.id),
-            username=getattr(sender, "username", None) or "",
-            text=text.strip(),
-            is_private=bool(getattr(event, "is_private", False)),
-        )
-        return await self.handle_message(message)
-
     async def handle_message(self, message: IncomingMessage) -> str | None:
         if not self._should_handle(message.text, message.is_private):
             return None
