@@ -458,6 +458,7 @@ Only secrets should come from process environment or a local secret file outside
 ```env
 TELEGRAM_BOT_TOKEN=
 OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 The database path should use a simple default such as `./data/bot.db`. It can be overridden by a CLI flag later if needed, but it should not require a `.env` file.

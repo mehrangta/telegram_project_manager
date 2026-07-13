@@ -20,12 +20,13 @@ uv run telegram-project-manager config set openai_model <model>
 uv run telegram-project-manager run
 ```
 
-Secrets come from environment variables or `./data/secrets.json`:
+Runtime credentials and provider settings can come from environment variables or `./data/secrets.json`:
 
 ```json
 {
   "TELEGRAM_BOT_TOKEN": "...",
-  "OPENAI_API_KEY": "..."
+  "OPENAI_API_KEY": "...",
+  "OPENAI_BASE_URL": "https://api.openai.com/v1"
 }
 ```
 
@@ -55,3 +56,4 @@ gh auth status
 
 Normal configuration is stored in SQLite. Secrets are not stored in SQLite.
 Configuration can be changed from either the CLI or the Telegram `/config set` command.
+When set, `OPENAI_BASE_URL` from the environment or secrets file overrides the SQLite value.
