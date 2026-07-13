@@ -6,6 +6,7 @@ import uuid
 from telegram_project_manager.bots.commit_manager.prompts import SYSTEM_PROMPT, build_user_prompt
 from telegram_project_manager.bots.commit_manager.schemas import CommitPlan
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
+from telegram_project_manager.platform.llm.memory import memory_session_id
 from telegram_project_manager.platform.storage.db import Database
 
 
@@ -37,6 +38,7 @@ class CommitPlanner:
                 max_files=max_files,
                 max_bytes=max_bytes,
             ),
+            memory_key=memory_session_id(chat_id),
         )
         plan = CommitPlan.from_llm(raw, fallback_repo=repo, fallback_branch=base_branch, target_branch=target_branch)
         plan.validate(max_files=max_files, max_bytes=max_bytes)
@@ -58,4 +60,3 @@ class CommitPlanner:
         )
         self.db.audit("plan.create", "ok", {"repo": repo, "target_branch": target_branch}, plan_id)
         return plan_id, plan
-

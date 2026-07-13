@@ -7,6 +7,7 @@ from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
 from telegram_project_manager.platform.config import normalize_config_value
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
+from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, memory_session_id
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import bullet_list, truncate
 from telegram_project_manager.platform.router import IncomingMessage
@@ -36,6 +37,8 @@ class CommitManager:
             return self.repos()
         if command == "/config":
             return self.config(message, rest)
+        if command == "/memory":
+            return self.memory(message, rest)
         if command == "/admin":
             return self.admin(message, rest)
         if command == "/branch":
@@ -62,6 +65,9 @@ Commands:
 /config show
 /config set openai_base_url <url>
 /config set openai_model <model>
+/config set llm_memory_max_messages <count>
+/memory status
+/memory clear
 """
 
     def status(self, message: IncomingMessage) -> str:
@@ -152,6 +158,21 @@ Commands:
             self.db.set_setting(key, value)
             return f"Config set: {key}"
         return "Usage: /config show | /config set <key> <value>"
+
+    def memory(self, message: IncomingMessage, rest: str) -> str:
+        action = rest.strip().lower() or "status"
+        session_id = memory_session_id(message.chat_id)
+        limit = int(self.db.get_setting("llm_memory_max_messages", str(DEFAULT_MEMORY_MAX_MESSAGES)))
+        if action in {"status", "show"}:
+            count = self.db.count_llm_messages(session_id)
+            return f"LLM memory: {count}/{limit} messages for this chat."
+        if action == "clear":
+            admin_error = self.permissions.require_admin(message.user_id)
+            if admin_error:
+                return admin_error
+            self.db.clear_llm_messages(session_id)
+            return "LLM memory cleared for this chat."
+        return "Usage: /memory status | /memory clear"
 
     def admin(self, message: IncomingMessage, rest: str) -> str:
         admin_error = self.permissions.require_admin(message.user_id)

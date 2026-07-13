@@ -22,6 +22,13 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absolute HTTP or HTTPS URL"):
             normalize_config_value("openai_base_url", "llm.example.test/v1")
 
+    def test_validates_llm_memory_limit(self):
+        self.assertEqual(normalize_config_value("llm_memory_max_messages", " 8 "), "8")
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            normalize_config_value("llm_memory_max_messages", "1")
+        with self.assertRaisesRegex(ValueError, "even number"):
+            normalize_config_value("llm_memory_max_messages", "3")
+
     def test_cli_sets_openai_base_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "bot.db"

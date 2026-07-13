@@ -53,9 +53,13 @@ gh auth status
 /config show
 /config set openai_base_url <url>
 /config set openai_model <model>
+/config set llm_memory_max_messages <count>
+/memory status
+/memory clear
 ```
 
 Normal configuration is stored in SQLite. Secrets are not stored in SQLite.
 Configuration can be changed from either the CLI or the Telegram `/config set` command.
 When set, `OPENAI_BASE_URL` from the environment or secrets file overrides the SQLite value.
 LLM requests use LangChain's `langchain-openai` integration in JSON mode.
+LangChain message history is stored in SQLite per Telegram chat. The latest 12 messages are retained by default; admins can change the limit or clear the current chat's memory.

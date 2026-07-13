@@ -82,6 +82,17 @@ class Database:
                     details_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS llm_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_llm_messages_session_id_id
+                ON llm_messages (session_id, id);
                 """
             )
 
@@ -134,6 +145,59 @@ class Database:
         with self.session() as conn:
             rows = conn.execute("SELECT key, value FROM settings ORDER BY key").fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def list_llm_messages(self, session_id: str, limit: int) -> list[dict[str, str]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content
+                FROM (
+                    SELECT id, role, content
+                    FROM llm_messages
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                ORDER BY id
+                """,
+                (session_id, limit),
+            ).fetchall()
+        return [{"role": str(row["role"]), "content": str(row["content"])} for row in rows]
+
+    def add_llm_messages(self, session_id: str, messages: list[tuple[str, str]], limit: int) -> None:
+        if not messages:
+            return
+        now = int(time.time())
+        with self.session() as conn:
+            conn.executemany(
+                "INSERT INTO llm_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                [(session_id, role, content, now) for role, content in messages],
+            )
+            conn.execute(
+                """
+                DELETE FROM llm_messages
+                WHERE session_id = ?
+                  AND id NOT IN (
+                      SELECT id
+                      FROM llm_messages
+                      WHERE session_id = ?
+                      ORDER BY id DESC
+                      LIMIT ?
+                  )
+                """,
+                (session_id, session_id, limit),
+            )
+
+    def clear_llm_messages(self, session_id: str) -> None:
+        with self.session() as conn:
+            conn.execute("DELETE FROM llm_messages WHERE session_id = ?", (session_id,))
+
+    def count_llm_messages(self, session_id: str) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM llm_messages WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return int(row["count"]) if row else 0
 
     def set_chat_repo(self, chat_id: int, repo: str | None, user_id: int, default_branch: str = "main") -> None:
         now = int(time.time())

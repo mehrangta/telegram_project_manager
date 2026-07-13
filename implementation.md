@@ -285,6 +285,7 @@ The bot should support any OpenAI-compatible API. Normal model configuration sho
 ```text
 /config set openai_base_url https://api.openai.com/v1
 /config set openai_model gpt-5-mini
+/config set llm_memory_max_messages 12
 ```
 
 Only the API key should be treated as a secret and loaded from process environment or `./data/secrets.json`:
@@ -302,6 +303,8 @@ LLM usage:
 - Telegram response formatting.
 
 The LLM should not directly execute actions. It should return structured JSON. Local code validates the JSON and performs GitHub actions.
+
+Use LangChain `BaseChatMessageHistory` and message types with a bounded SQLite-backed history per Telegram chat. Admins should be able to inspect the message count and clear a chat's memory.
 
 Suggested response schema:
 
