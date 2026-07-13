@@ -288,11 +288,15 @@ The bot should support any OpenAI-compatible API. Normal model configuration sho
 /config set llm_memory_max_messages 12
 ```
 
-Only the API key should be treated as a secret and loaded from process environment or `./data/secrets.json`:
+Only the Telegram bot token should be loaded from `./data/secrets.json`. OpenAI credentials and model settings should be managed by an admin through private bot commands and stored in a separate SQLite secrets table:
 
-```env
-OPENAI_API_KEY=...
+```text
+/config set openai_api_key <key>
+/config set openai_base_url https://api.openai.com/v1
+/config set openai_model gpt-5-mini
 ```
+
+Never return stored secret values from `/config show`, and reject API-key configuration in group chats.
 
 LLM usage:
 
@@ -447,6 +451,7 @@ Admin commands should manage these settings over time:
 /config show
 /config set openai_base_url <url>
 /config set openai_model <model>
+/config set openai_api_key <key>
 /config set max_files_per_commit <number>
 /config set max_bytes_per_commit <number>
 /config set require_confirmation true|false
@@ -456,12 +461,12 @@ Admin commands should manage these settings over time:
 /repo disallow owner/repository
 ```
 
-Only secrets should come from process environment or a local secret file outside git:
+Only the Telegram bot token should live in the local secret file outside git:
 
-```env
-TELEGRAM_BOT_TOKEN=
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://api.openai.com/v1
+```json
+{
+  "TELEGRAM_BOT_TOKEN": "..."
+}
 ```
 
 The database path should use a simple default such as `./data/bot.db`. It can be overridden by a CLI flag later if needed, but it should not require a `.env` file.

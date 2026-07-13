@@ -47,6 +47,32 @@ class ConfigTests(unittest.TestCase):
             db = Database(db_path)
             self.assertEqual(db.get_setting("openai_base_url"), "https://llm.example.test/v1")
 
+    def test_cli_stores_api_key_separately_and_redacts_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            set_argv = [
+                "telegram-project-manager",
+                "--db",
+                str(db_path),
+                "config",
+                "set",
+                "openai_api_key",
+                "secret-value",
+            ]
+            with patch.object(sys, "argv", set_argv), redirect_stdout(io.StringIO()):
+                main()
+
+            output = io.StringIO()
+            show_argv = ["telegram-project-manager", "--db", str(db_path), "config", "show"]
+            with patch.object(sys, "argv", show_argv), redirect_stdout(output):
+                main()
+
+            db = Database(db_path)
+            self.assertEqual(db.get_secret("openai_api_key"), "secret-value")
+            self.assertNotIn("openai_api_key", db.all_settings())
+            self.assertIn("openai_api_key=<set>", output.getvalue())
+            self.assertNotIn("secret-value", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

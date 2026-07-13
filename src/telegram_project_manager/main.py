@@ -8,7 +8,7 @@ from pathlib import Path
 from telegram_project_manager.bots.commit_manager.commands import CommitManager
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.runner import GhRunner
-from telegram_project_manager.platform.config import SUPPORTED_CONFIG_KEYS, normalize_config_value
+from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, SUPPORTED_CONFIG_KEYS, normalize_config_value
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
 from telegram_project_manager.platform.router import TelegramRouter
 from telegram_project_manager.platform.secrets import SecretStore
@@ -63,19 +63,20 @@ def main() -> None:
     if args.command == "config":
         if args.config_command == "show":
             settings = db.all_settings()
-            if not settings:
-                print("Config: no settings stored.")
-                return
             print("Config:")
             for key, value in settings.items():
                 print(f"- {key}={value}")
+            print(f"- openai_api_key={'<set>' if db.has_secret('openai_api_key') else '<not set>'}")
             return
         if args.config_command == "set":
             try:
                 value = normalize_config_value(args.key, args.value)
             except ValueError as exc:
                 raise SystemExit(str(exc)) from exc
-            db.set_setting(args.key, value)
+            if args.key in SECRET_CONFIG_KEYS:
+                db.set_secret(args.key, value)
+            else:
+                db.set_setting(args.key, value)
             print(f"Config set: {args.key}")
             return
 
@@ -87,7 +88,7 @@ async def run_bot(db: Database) -> None:
     secrets = SecretStore(Path("data/secrets.json"))
     bot_token = secrets.require("TELEGRAM_BOT_TOKEN")
 
-    llm = OpenAICompatibleClient(db, secrets)
+    llm = OpenAICompatibleClient(db)
     gh = GhRunner()
     commit_executor = GhCommitExecutor(gh)
     manager = CommitManager(db=db, llm=llm, gh=gh, executor=commit_executor)

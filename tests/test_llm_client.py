@@ -1,5 +1,3 @@
-import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,34 +7,21 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
-from telegram_project_manager.platform.secrets import SecretStore
 from telegram_project_manager.platform.storage.db import Database
 
 
 class LlmClientTests(unittest.TestCase):
-    def test_secrets_file_base_url_overrides_database(self):
+    def test_database_credentials_configure_langchain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             db = Database(root / "bot.db")
             db.initialize()
             db.set_setting("openai_model", "test-model")
             db.set_setting("openai_base_url", "https://database.example.test/v1")
-            secrets_path = root / "secrets.json"
-            secrets_path.write_text(
-                json.dumps(
-                    {
-                        "OPENAI_API_KEY": "test-key",
-                        "OPENAI_BASE_URL": "https://provider.example.test/v1/",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            client = OpenAICompatibleClient(db, SecretStore(secrets_path))
+            db.set_secret("openai_api_key", "test-key")
+            client = OpenAICompatibleClient(db)
 
-            with (
-                patch.dict(os.environ, {"OPENAI_API_KEY": "", "OPENAI_BASE_URL": ""}),
-                patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai,
-            ):
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
                 bound = chat_openai.return_value.bind.return_value
                 bound.invoke.return_value.content = "{}"
                 self.assertEqual(client.chat_json("system", "user"), {})
@@ -44,7 +29,7 @@ class LlmClientTests(unittest.TestCase):
             chat_openai.assert_called_once_with(
                 model="test-model",
                 api_key="test-key",
-                base_url="https://provider.example.test/v1",
+                base_url="https://database.example.test/v1",
                 temperature=0.1,
                 timeout=90,
                 max_retries=2,
@@ -63,9 +48,8 @@ class LlmClientTests(unittest.TestCase):
             db = Database(root / "bot.db")
             db.initialize()
             db.set_setting("openai_model", "test-model")
-            secrets_path = root / "secrets.json"
-            secrets_path.write_text(json.dumps({"OPENAI_API_KEY": "test-key"}), encoding="utf-8")
-            client = OpenAICompatibleClient(db, SecretStore(secrets_path))
+            db.set_secret("openai_api_key", "test-key")
+            client = OpenAICompatibleClient(db)
 
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
                 chat_openai.return_value.bind.return_value.invoke.side_effect = RuntimeError("provider unavailable")
@@ -78,9 +62,8 @@ class LlmClientTests(unittest.TestCase):
             db = Database(root / "bot.db")
             db.initialize()
             db.set_setting("openai_model", "test-model")
-            secrets_path = root / "secrets.json"
-            secrets_path.write_text(json.dumps({"OPENAI_API_KEY": "test-key"}), encoding="utf-8")
-            client = OpenAICompatibleClient(db, SecretStore(secrets_path))
+            db.set_secret("openai_api_key", "test-key")
+            client = OpenAICompatibleClient(db)
             prompts = []
             responses = iter(['{"turn":1}', '{"turn":2}'])
 
@@ -102,6 +85,14 @@ class LlmClientTests(unittest.TestCase):
                     ("human", "second"),
                 ],
             )
+
+    def test_requires_bot_managed_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.set_setting("openai_model", "test-model")
+            with self.assertRaisesRegex(LlmError, "private chat"):
+                OpenAICompatibleClient(db).chat_json("system", "user")
 
 
 if __name__ == "__main__":

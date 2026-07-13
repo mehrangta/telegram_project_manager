@@ -3,8 +3,11 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 
+SECRET_CONFIG_KEYS = frozenset({"openai_api_key"})
+
 SUPPORTED_CONFIG_KEYS = frozenset(
     {
+        "openai_api_key",
         "openai_base_url",
         "openai_model",
         "max_files_per_commit",

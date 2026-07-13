@@ -54,6 +54,12 @@ class Database:
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS secrets (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS allowed_repos (
                     repo TEXT PRIMARY KEY,
                     added_by_user_id INTEGER,
@@ -145,6 +151,28 @@ class Database:
         with self.session() as conn:
             rows = conn.execute("SELECT key, value FROM settings ORDER BY key").fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def set_secret(self, key: str, value: str) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO secrets (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, now),
+            )
+
+    def get_secret(self, key: str, default: str = "") -> str:
+        with self.session() as conn:
+            row = conn.execute("SELECT value FROM secrets WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def has_secret(self, key: str) -> bool:
+        with self.session() as conn:
+            row = conn.execute("SELECT 1 FROM secrets WHERE key = ?", (key,)).fetchone()
+        return bool(row)
 
     def list_llm_messages(self, session_id: str, limit: int) -> list[dict[str, str]]:
         with self.session() as conn:

@@ -5,7 +5,7 @@ from telegram_project_manager.bots.commit_manager.planner import CommitPlanner
 from telegram_project_manager.bots.commit_manager.schemas import PlanValidationError, validate_repo
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
-from telegram_project_manager.platform.config import normalize_config_value
+from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, normalize_config_value
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, memory_session_id
 from telegram_project_manager.platform.permissions import PermissionService
@@ -63,6 +63,7 @@ Commands:
 /confirm <plan_id>
 /cancel <plan_id>
 /config show
+/config set openai_api_key <key> (private chat only)
 /config set openai_base_url <url>
 /config set openai_model <model>
 /config set llm_memory_max_messages <count>
@@ -141,21 +142,27 @@ Commands:
 
     def config(self, message: IncomingMessage, rest: str) -> str:
         parts = rest.split(maxsplit=2)
-        if not parts or parts[0] == "show":
-            settings = self.db.all_settings()
-            if not settings:
-                return "Config: no settings stored."
-            return "Config:\n" + bullet_list(f"{key}={value}" for key, value in settings.items())
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
+        if not parts or parts[0] == "show":
+            settings = self.db.all_settings()
+            items = [f"{key}={value}" for key, value in settings.items()]
+            key_status = "<set>" if self.db.has_secret("openai_api_key") else "<not set>"
+            items.append(f"openai_api_key={key_status}")
+            return "Config:\n" + bullet_list(items)
         if len(parts) == 3 and parts[0] == "set":
             key, value = parts[1], parts[2]
             try:
                 value = normalize_config_value(key, value)
             except ValueError as exc:
                 return str(exc)
-            self.db.set_setting(key, value)
+            if key in SECRET_CONFIG_KEYS:
+                if not message.is_private:
+                    return "OpenAI API key must be set in a private chat with the bot."
+                self.db.set_secret(key, value)
+            else:
+                self.db.set_setting(key, value)
             return f"Config set: {key}"
         return "Usage: /config show | /config set <key> <value>"
 

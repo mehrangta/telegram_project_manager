@@ -8,7 +8,6 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from telegram_project_manager.platform.config import normalize_config_value
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, SQLiteChatMessageHistory
-from telegram_project_manager.platform.secrets import SecretStore
 from telegram_project_manager.platform.storage.db import Database
 
 
@@ -17,14 +16,11 @@ class LlmError(RuntimeError):
 
 
 class OpenAICompatibleClient:
-    def __init__(self, db: Database, secrets: SecretStore) -> None:
+    def __init__(self, db: Database) -> None:
         self.db = db
-        self.secrets = secrets
 
     def chat_json(self, system_prompt: str, user_prompt: str, memory_key: str | None = None) -> dict:
-        configured_base_url = self.secrets.get("OPENAI_BASE_URL") or self.db.get_setting(
-            "openai_base_url", "https://api.openai.com/v1"
-        )
+        configured_base_url = self.db.get_setting("openai_base_url", "https://api.openai.com/v1")
         try:
             base_url = normalize_config_value("openai_base_url", configured_base_url)
         except ValueError as exc:
@@ -32,7 +28,11 @@ class OpenAICompatibleClient:
         model = self.db.get_setting("openai_model", "")
         if not model:
             raise LlmError("OpenAI model is not configured. Admin: /config set openai_model <model>")
-        api_key = self.secrets.require("OPENAI_API_KEY")
+        api_key = self.db.get_secret("openai_api_key")
+        if not api_key:
+            raise LlmError(
+                "OpenAI API key is not configured. Admin private chat: /config set openai_api_key <key>"
+            )
         history = None
         try:
             llm = ChatOpenAI(
