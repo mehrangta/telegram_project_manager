@@ -26,6 +26,8 @@ class IncomingMessage:
     media_group_id: str | None = None
     thread_id: int | None = None
     reply_to_draft_id: str | None = None
+    reply_to_issue_ref: str | None = None
+    reply_to_code_job_id: str | None = None
 
 
 class BotHandler(Protocol):
@@ -57,6 +59,8 @@ class TelegramRouter:
             media_group_id=message.media_group_id,
             thread_id=message.thread_id,
             reply_to_draft_id=message.reply_to_draft_id,
+            reply_to_issue_ref=message.reply_to_issue_ref,
+            reply_to_code_job_id=message.reply_to_code_job_id,
         )
         for handler in self.handlers:
             response = await handler.handle(message)
@@ -68,7 +72,7 @@ class TelegramRouter:
         text = message.text
         if message.is_private:
             return True
-        if message.reply_to_draft_id:
+        if message.reply_to_draft_id or message.reply_to_issue_ref or message.reply_to_code_job_id:
             return True
         if text.startswith("/"):
             return True

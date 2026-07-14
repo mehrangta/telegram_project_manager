@@ -7,6 +7,7 @@ Lean Telegram bot platform for project-management bots. The first bot is a GitHu
 - Python 3.11+
 - `uv`
 - LangChain `ChatOpenAI`
+- OpenAI Codex SDK for `/code` planning and implementation
 - GitHub CLI (`gh`) installed and authenticated
 - SQLite database at `./data/bot.db` by default
 
@@ -36,6 +37,8 @@ Telegram API ID and API hash are not used. After startup, message the bot privat
 ```
 
 The API key is stored separately in SQLite and never returned by `/config show`. Setting it in group chats is blocked.
+The `/code` workflow reuses this key with the official OpenAI Codex SDK. Unlike
+the other LLM workflows, it does not use `openai_base_url` or `openai_model`.
 
 GitHub auth is handled by `gh`, not by the bot:
 
@@ -105,6 +108,44 @@ caption. JPEG, PNG, and GIF are supported, up to 10 images, 10 MB each, and
 draft preview with feedback, images, or both. Text feedback regenerates the
 draft using fresh repository context; new images are appended. Each successful
 edit keeps the same draft ID, records a revision, and renews the one-hour expiry.
+
+### Code workflow
+
+`/code` operates on an existing, open GitHub issue in an allowed repository. By
+default, Codex clones the configured branch, inspects the repository in a
+read-only sandbox, and publishes its structured plan as the first commit and
+body of a draft pull request. The Telegram progress message updates as Codex
+changes phases, runs commands, and touches files; raw model reasoning is never
+shown.
+
+Reply `approve` to the progress message to implement the plan. Reply with any
+other text to revise the plan on the same draft pull request, or reply `discard`
+to close the pull request and delete its branch. After approval, Codex works in
+a workspace-write sandbox, must report a successful validation command, removes
+the temporary plan file, pushes the implementation, and marks the pull request
+ready for review.
+
+```text
+/code #123                         Plan an issue in this chat's active repo
+/code owner/repository#123         Plan an issue in another allowed repo
+/code <GitHub issue URL>           Plan from a full issue URL
+/code #123 --skip-plan             Implement immediately, then open a PR
+/code approve <c-job_id>           Approve a published plan
+/code edit <c-job_id> <feedback>   Revise the plan on the same draft PR
+/code discard <c-job_id>           Close the draft PR and delete its branch
+/code retry <c-job_id>             Retry a failed or interrupted phase
+/code status [c-job_id]            Show one job or recent jobs in this chat
+```
+
+You can also reply `/code` to the bot's `Issue created` message. Plan controls
+may be sent by the requester or any registered admin. At most two Codex jobs run
+concurrently and ten may wait in the queue. Service restarts mark active turns
+as interrupted so an admin can explicitly retry or discard them.
+
+The bot blocks changes to `.env*`, private-key files, and
+`.github/workflows/*`, and rejects more than 100 changed files or 5 MB of
+changes. GitHub CLI credentials must be configured for the service account with
+permission to clone, push branches, and manage pull requests.
 
 ### Configuration
 

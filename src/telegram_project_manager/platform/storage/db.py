@@ -146,6 +146,56 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_issue_draft_revisions_draft_number
                 ON issue_draft_revisions (draft_id, revision_number);
+
+                CREATE TABLE IF NOT EXISTS code_jobs (
+                    id TEXT PRIMARY KEY,
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER,
+                    telegram_message_id INTEGER,
+                    repo TEXT NOT NULL,
+                    issue_number INTEGER NOT NULL,
+                    issue_title TEXT NOT NULL,
+                    issue_url TEXT NOT NULL,
+                    issue_context_json TEXT NOT NULL,
+                    base_branch TEXT NOT NULL,
+                    base_sha TEXT,
+                    target_branch TEXT NOT NULL,
+                    workspace_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    resume_phase TEXT NOT NULL,
+                    skip_plan INTEGER NOT NULL DEFAULT 0,
+                    plan_json TEXT,
+                    plan_revision INTEGER NOT NULL DEFAULT 0,
+                    feedback_json TEXT NOT NULL DEFAULT '[]',
+                    codex_thread_id TEXT,
+                    pull_request_number INTEGER,
+                    pull_request_url TEXT,
+                    latest_activity TEXT NOT NULL DEFAULT '',
+                    result_json TEXT,
+                    error TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_code_jobs_active_issue
+                ON code_jobs (repo, issue_number)
+                WHERE status NOT IN ('ready', 'discarded');
+
+                CREATE INDEX IF NOT EXISTS idx_code_jobs_status_updated
+                ON code_jobs (status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS code_job_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES code_jobs(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_code_job_events_job_id_id
+                ON code_job_events (job_id, id);
                 """
             )
 
@@ -590,3 +640,183 @@ class Database:
                 """,
                 (plan_id, action, status, json.dumps(details, separators=(",", ":")), now),
             )
+
+    def create_code_job(self, job: dict[str, Any]) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO code_jobs (
+                    id, telegram_chat_id, telegram_user_id, telegram_thread_id,
+                    repo, issue_number, issue_title, issue_url, issue_context_json,
+                    base_branch, target_branch, workspace_path, status, resume_phase,
+                    skip_plan, feedback_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+                """,
+                (
+                    job["id"],
+                    job["telegram_chat_id"],
+                    job["telegram_user_id"],
+                    job.get("telegram_thread_id"),
+                    job["repo"],
+                    job["issue_number"],
+                    job["issue_title"],
+                    job["issue_url"],
+                    json.dumps(job["issue_context_json"], separators=(",", ":")),
+                    job["base_branch"],
+                    job["target_branch"],
+                    job["workspace_path"],
+                    job["status"],
+                    job["resume_phase"],
+                    int(bool(job.get("skip_plan"))),
+                    now,
+                    now,
+                ),
+            )
+
+    def get_code_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute("SELECT * FROM code_jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._decode_code_job(row)
+
+    def get_active_code_job(self, repo: str, issue_number: int) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM code_jobs
+                WHERE repo = ? AND issue_number = ?
+                  AND status NOT IN ('ready', 'discarded')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (repo, issue_number),
+            ).fetchone()
+        return self._decode_code_job(row)
+
+    def list_code_jobs(self, *, chat_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            if chat_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM code_jobs ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM code_jobs
+                    WHERE telegram_chat_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, limit),
+                ).fetchall()
+        return [job for row in rows if (job := self._decode_code_job(row)) is not None]
+
+    def count_queued_code_jobs(self) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM code_jobs
+                WHERE status IN ('queued_plan', 'queued_plan_edit', 'queued_code')
+                """
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def update_code_job(
+        self,
+        job_id: str,
+        values: dict[str, Any],
+        *,
+        allowed_statuses: tuple[str, ...] | None = None,
+    ) -> bool:
+        allowed_columns = {
+            "telegram_message_id",
+            "base_sha",
+            "status",
+            "resume_phase",
+            "plan_json",
+            "plan_revision",
+            "feedback_json",
+            "codex_thread_id",
+            "pull_request_number",
+            "pull_request_url",
+            "latest_activity",
+            "result_json",
+            "error",
+        }
+        unknown = set(values) - allowed_columns
+        if unknown:
+            raise ValueError(f"unsupported code job columns: {sorted(unknown)}")
+        if not values:
+            return False
+        encoded = dict(values)
+        for key in ("plan_json", "feedback_json", "result_json"):
+            if key in encoded and encoded[key] is not None and not isinstance(encoded[key], str):
+                encoded[key] = json.dumps(encoded[key], separators=(",", ":"))
+        encoded["updated_at"] = int(time.time())
+        assignments = ", ".join(f"{key} = ?" for key in encoded)
+        params = list(encoded.values())
+        query = f"UPDATE code_jobs SET {assignments} WHERE id = ?"
+        params.append(job_id)
+        if allowed_statuses:
+            placeholders = ",".join("?" for _ in allowed_statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(allowed_statuses)
+        with self.session() as conn:
+            cursor = conn.execute(query, params)
+        return cursor.rowcount == 1
+
+    def add_code_job_event(self, job_id: str, event_type: str, summary: dict[str, Any]) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO code_job_events (job_id, event_type, summary_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    event_type,
+                    json.dumps(summary, separators=(",", ":")),
+                    int(time.time()),
+                ),
+            )
+
+    def mark_running_code_jobs_interrupted(self) -> int:
+        running = (
+            "preparing",
+            "planning",
+            "editing_plan",
+            "coding",
+            "validating",
+            "pushing",
+        )
+        placeholders = ",".join("?" for _ in running)
+        with self.session() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE code_jobs
+                SET status = 'interrupted',
+                    error = 'Bot restarted during an active Codex turn.',
+                    latest_activity = 'Interrupted by service restart',
+                    updated_at = ?
+                WHERE status IN ({placeholders})
+                """,
+                (int(time.time()), *running),
+            )
+        return cursor.rowcount
+
+    @staticmethod
+    def _decode_code_job(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        job = dict(row)
+        for key, default in (
+            ("issue_context_json", {}),
+            ("plan_json", None),
+            ("feedback_json", []),
+            ("result_json", None),
+        ):
+            value = job.get(key)
+            job[key] = json.loads(str(value)) if value else default
+        job["skip_plan"] = bool(job["skip_plan"])
+        return job

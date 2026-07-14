@@ -100,6 +100,13 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(bot_reply.reply_to_draft_id, "i-abcdef12")
         self.assertIsNone(user_reply.reply_to_draft_id)
 
+    def test_extracts_issue_and_code_job_from_bot_reply(self):
+        issue = incoming_message_from_update({"message": {"message_id": 30, "from": {"id": 1}, "chat": {"id": 2, "type": "supergroup"}, "text": "/code", "reply_to_message": {"from": {"id": 99, "is_bot": True}, "text": "Issue created.\nRepo: owner/repo\nIssue: #123\nhttps://github.com/owner/repo/issues/123"}}})
+        job = incoming_message_from_update({"message": {"message_id": 31, "from": {"id": 1}, "chat": {"id": 2, "type": "supergroup"}, "text": "approve", "reply_to_message": {"from": {"id": 99, "is_bot": True}, "text": "Codex code job\nCode Job ID: c-abcdef12\nStatus: awaiting approval"}}})
+        assert issue is not None and job is not None
+        self.assertEqual(issue.reply_to_issue_ref, "owner/repo#123")
+        self.assertEqual(job.reply_to_code_job_id, "c-abcdef12")
+
     def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
         class Handler:
             async def handle(self, message):

@@ -61,6 +61,8 @@ Commands:
 /repo show
 /commit <request>
 /issue <prompt> (text or photo/album caption)
+/code #123 [--skip-plan]
+/code approve|edit|discard|retry|status <code_job_id>
 /confirm <plan_id>
 /cancel <plan_id>
 /config show
@@ -86,6 +88,7 @@ Commands:
                     f"Default branch: {chat.get('default_branch') or 'main'}",
                     f"Admins: {', '.join(admins) if admins else 'none'}",
                     f"OpenAI model: {self.db.get_setting('openai_model', 'not set')}",
+                    f"Codex SDK auth: {'configured' if self.db.has_secret('openai_api_key') else 'not configured'}",
                 ]
             )
         )

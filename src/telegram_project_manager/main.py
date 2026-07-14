@@ -6,6 +6,11 @@ import logging
 from pathlib import Path
 
 from telegram_project_manager.bots.commit_manager.commands import CommitManager
+from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter
+from telegram_project_manager.bots.code_manager.commands import CodeManager
+from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
+from telegram_project_manager.bots.code_manager.service import CodeJobService
+from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, GitWorkspaceService
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
@@ -101,5 +106,24 @@ async def run_bot(db: Database) -> None:
     issue_planner = IssuePlanner(db, llm, RepositoryContextService(gh))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))
     issue_manager = IssueManager(db, issue_planner, issue_execution)
-    router = TelegramRouter(db=db, handlers=[issue_manager, commit_manager])
-    await run_polling(bot, router)
+    code_github = CodeGitHubService(gh)
+    code_reporter = CodeProgressReporter(db, bot)
+    code_service = CodeJobService(
+        db=db,
+        codex=CodexSdkAdapter(lambda: db.get_secret("openai_api_key")),
+        workspaces=GitWorkspaceService(),
+        github=code_github,
+        reporter=code_reporter,
+    )
+    code_manager = CodeManager(
+        db=db,
+        service=code_service,
+        github=code_github,
+        reporter=code_reporter,
+    )
+    router = TelegramRouter(db=db, handlers=[issue_manager, code_manager, commit_manager])
+    await code_service.recover()
+    try:
+        await run_polling(bot, router)
+    finally:
+        await code_service.shutdown()

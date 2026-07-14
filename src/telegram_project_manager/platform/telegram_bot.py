@@ -12,6 +12,9 @@ from telegram_project_manager.platform.router import IncomingAttachment, Incomin
 
 
 DRAFT_ID_PATTERN = re.compile(r"(?m)^Draft ID:\s*(i-[0-9a-f]{8})\s*$")
+CODE_JOB_ID_PATTERN = re.compile(r"(?m)^Code Job ID:\s*(c-[0-9a-f]{8})\s*$")
+ISSUE_REPO_PATTERN = re.compile(r"(?m)^Repo:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$")
+ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
 
 
 class TelegramBotApiError(RuntimeError):
@@ -61,11 +64,22 @@ class TelegramBotApi:
             raise TelegramBotApiError("Telegram image exceeds the size limit")
         return content
 
-    def send_message(self, chat_id: int, text: str, message_thread_id: int | None = None) -> None:
+    def send_message(
+        self, chat_id: int, text: str, message_thread_id: int | None = None
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if message_thread_id is not None:
             payload["message_thread_id"] = message_thread_id
-        self._call("sendMessage", payload)
+        result = self._call("sendMessage", payload)
+        if not isinstance(result, dict) or not isinstance(result.get("message_id"), int):
+            raise TelegramBotApiError("Telegram Bot API sendMessage returned invalid data")
+        return result
+
+    def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+        self._call(
+            "editMessageText",
+            {"chat_id": chat_id, "message_id": message_id, "text": text},
+        )
 
     def _call(self, method: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> Any:
         request = urllib.request.Request(
@@ -115,6 +129,8 @@ def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | No
         media_group_id=str(message["media_group_id"]) if message.get("media_group_id") is not None else None,
         thread_id=message.get("message_thread_id") if isinstance(message.get("message_thread_id"), int) else None,
         reply_to_draft_id=_reply_to_draft_id(message),
+        reply_to_issue_ref=_reply_to_issue_ref(message),
+        reply_to_code_job_id=_reply_to_code_job_id(message),
     )
 
 
@@ -138,10 +154,43 @@ def incoming_message_from_updates(updates: list[dict[str, Any]]) -> IncomingMess
         reply_to_draft_id=next(
             (item.reply_to_draft_id for item in messages if item.reply_to_draft_id), None
         ),
+        reply_to_issue_ref=next(
+            (item.reply_to_issue_ref for item in messages if item.reply_to_issue_ref), None
+        ),
+        reply_to_code_job_id=next(
+            (item.reply_to_code_job_id for item in messages if item.reply_to_code_job_id), None
+        ),
     )
 
 
 def _reply_to_draft_id(message: dict[str, Any]) -> str | None:
+    text = _replied_bot_text(message)
+    if text is None:
+        return None
+    match = DRAFT_ID_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
+def _reply_to_code_job_id(message: dict[str, Any]) -> str | None:
+    text = _replied_bot_text(message)
+    if text is None:
+        return None
+    match = CODE_JOB_ID_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
+def _reply_to_issue_ref(message: dict[str, Any]) -> str | None:
+    text = _replied_bot_text(message)
+    if text is None:
+        return None
+    repo = ISSUE_REPO_PATTERN.search(text)
+    number = ISSUE_NUMBER_PATTERN.search(text)
+    if not repo or not number:
+        return None
+    return f"{repo.group(1)}#{number.group(1)}"
+
+
+def _replied_bot_text(message: dict[str, Any]) -> str | None:
     replied = message.get("reply_to_message")
     if not isinstance(replied, dict):
         return None
@@ -149,10 +198,7 @@ def _reply_to_draft_id(message: dict[str, Any]) -> str | None:
     if not isinstance(sender, dict) or sender.get("is_bot") is not True:
         return None
     text = replied.get("text") if isinstance(replied.get("text"), str) else replied.get("caption")
-    if not isinstance(text, str):
-        return None
-    match = DRAFT_ID_PATTERN.search(text)
-    return match.group(1) if match else None
+    return text if isinstance(text, str) else None
 
 
 def _attachments_from_message(message: dict[str, Any]) -> tuple[IncomingAttachment, ...]:
