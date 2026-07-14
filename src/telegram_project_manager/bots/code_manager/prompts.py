@@ -78,7 +78,8 @@ Approved plan:
 Requirements:
 - Implement the complete issue with focused, production-quality changes.
 - Run the relevant repository tests or validation commands.
-- Leave the temporary plan file `{plan_path}` untouched; the trusted host application removes it.
+- Do not inspect, validate, modify, or remove the temporary plan file `{plan_path}`; the trusted
+  host application owns it. Its presence or absence is not a validation result.
 - Do not commit, push, create or edit a pull request; the host application owns Git operations.
 - Return only JSON matching the supplied coding-result schema with a concise conventional
   commit message and every validation command attempted.

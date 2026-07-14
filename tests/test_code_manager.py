@@ -8,6 +8,7 @@ from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.codex_sdk import _codex_config, _safe_progress
+from telegram_project_manager.bots.code_manager.prompts import coding_prompt
 from telegram_project_manager.bots.code_manager.schemas import CodeJobValidationError, CodeResult
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import (
@@ -204,6 +205,15 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodeSafetyTests(unittest.TestCase):
+    def test_coding_prompt_excludes_plan_from_model_validation(self):
+        prompt = coding_prompt(
+            {"title": "Issue", "body": "Body", "comments": []},
+            PLAN,
+            ".codex/plans/c-test.md",
+        )
+        self.assertIn("Do not inspect, validate, modify, or remove", prompt)
+        self.assertIn("not a validation result", prompt)
+
     def test_trusted_host_removes_only_workspace_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir)
