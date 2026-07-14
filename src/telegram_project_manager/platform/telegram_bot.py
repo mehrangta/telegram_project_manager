@@ -379,6 +379,8 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         if callback is None:
             return
         incoming = callback.message
+        if not router.is_admin(incoming.user_id):
+            return
         data = callback.data
         if data == "cancel_deploy":
             await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Deployment cancelled")

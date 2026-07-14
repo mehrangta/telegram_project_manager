@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import OutgoingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -39,13 +40,19 @@ class BotHandler(Protocol):
 class TelegramRouter:
     def __init__(self, db: Database, handlers: list[BotHandler]) -> None:
         self.db = db
+        self.permissions = PermissionService(db)
         self.handlers = handlers
         self.bot_username = ""
 
     def set_bot_username(self, username: str) -> None:
         self.bot_username = username.lstrip("@")
 
+    def is_admin(self, user_id: int) -> bool:
+        return self.permissions.is_admin(user_id)
+
     async def handle_message(self, message: IncomingMessage) -> str | OutgoingMessage | None:
+        if not self.is_admin(message.user_id):
+            return None
         if not self._should_handle(message):
             return None
         cleaned = self._strip_mention(message.text)

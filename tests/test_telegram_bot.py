@@ -192,7 +192,12 @@ class TelegramBotTests(unittest.TestCase):
             async def handle(self, message):
                 return f"edited {message.reply_to_draft_id}"
 
-        router = TelegramRouter(None, [Handler()])
+        class Database:
+            @staticmethod
+            def get_user(user_id):
+                return {"role": "admin"} if user_id == 2 else None
+
+        router = TelegramRouter(Database(), [Handler()])
         response = asyncio.run(
             router.handle_message(
                 IncomingMessage(
@@ -202,6 +207,29 @@ class TelegramBotTests(unittest.TestCase):
             )
         )
         self.assertEqual(response, "edited i-abcdef12")
+
+    def test_non_admin_message_is_silently_ignored_before_handlers(self):
+        class Database:
+            @staticmethod
+            def get_user(user_id):
+                return None
+
+        class Handler:
+            called = False
+
+            async def handle(self, message):
+                self.called = True
+                return "should not be sent"
+
+        handler = Handler()
+        router = TelegramRouter(Database(), [handler])
+
+        response = asyncio.run(
+            router.handle_message(IncomingMessage(1, 999, "stranger", "/start", is_private=True))
+        )
+
+        self.assertIsNone(response)
+        self.assertFalse(handler.called)
 
 
 class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
@@ -236,24 +264,28 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             self.markup_edits.append((chat_id, message_id, reply_markup))
 
     class Router:
-        def __init__(self):
+        def __init__(self, admin_ids=None):
             self.commands = []
             self.bot_username = ""
+            self.admin_ids = {30} if admin_ids is None else set(admin_ids)
 
         def set_bot_username(self, username):
             self.bot_username = username
+
+        def is_admin(self, user_id):
+            return user_id in self.admin_ids
 
         async def handle_message(self, message):
             self.commands.append(message.text)
             return "Action queued"
 
     @staticmethod
-    def callback(update_id, query_id, data, message_id=20):
+    def callback(update_id, query_id, data, message_id=20, user_id=30):
         return {
             "update_id": update_id,
             "callback_query": {
                 "id": query_id,
-                "from": {"id": 30, "username": "admin"},
+                "from": {"id": user_id, "username": "admin"},
                 "data": data,
                 "message": {
                     "message_id": message_id,
@@ -295,6 +327,21 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             bot.markup_edits,
             [(40, 21, {"inline_keyboard": []})],
         )
+
+    async def test_non_admin_callback_is_silently_ignored(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "command:/status", user_id=99),
+            self.callback(2, "query-2", "cancel_deploy", user_id=99),
+        ])
+        router = self.Router()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, [])
+        self.assertEqual(bot.answers, [])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.markup_edits, [])
 
 
 if __name__ == "__main__":
