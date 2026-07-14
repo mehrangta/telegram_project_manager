@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 TELEGRAM_TEXT_LIMIT = 4096
 COPY_TEXT_LIMIT = 256
+CALLBACK_DATA_LIMIT = 64
 URL_RE = re.compile(r"https://[^\s<>]+")
 PRIMARY_ID_RE = re.compile(r"(?m)^(Code Job ID|Draft ID|Plan ID):\s*([^\s]+)\s*$")
 COMMAND_RE = re.compile(r"(/[a-z][a-z0-9_]*(?:\s+[^\n]+)?)", re.IGNORECASE)
@@ -19,19 +20,25 @@ class InlineButton:
     label: str
     copy_text: str | None = None
     url: str | None = None
+    callback_data: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.copy_text is None) == (self.url is None):
+        actions = (self.copy_text, self.url, self.callback_data)
+        if sum(action is not None for action in actions) != 1:
             raise ValueError("Inline buttons require exactly one action")
         if self.copy_text is not None and not 1 <= len(self.copy_text) <= COPY_TEXT_LIMIT:
             raise ValueError("Telegram copy text must be between 1 and 256 characters")
+        if self.callback_data is not None and not 1 <= len(self.callback_data.encode("utf-8")) <= CALLBACK_DATA_LIMIT:
+            raise ValueError("Telegram callback data must be between 1 and 64 bytes")
 
     def to_api(self) -> dict[str, object]:
         payload: dict[str, object] = {"text": self.label}
         if self.copy_text is not None:
             payload["copy_text"] = {"text": self.copy_text}
-        else:
+        elif self.url is not None:
             payload["url"] = self.url
+        else:
+            payload["callback_data"] = self.callback_data
         return payload
 
 
@@ -91,6 +98,10 @@ def url_button(label: str, url: str) -> InlineButton:
     return InlineButton(label=label, url=url)
 
 
+def callback_button(label: str, data: str) -> InlineButton:
+    return InlineButton(label=label, callback_data=data)
+
+
 def rows(buttons: Sequence[InlineButton], width: int = 2) -> tuple[tuple[InlineButton, ...], ...]:
     return tuple(tuple(buttons[index : index + width]) for index in range(0, len(buttons), width))
 
@@ -109,12 +120,19 @@ def keyboard_for_text(text: str) -> tuple[tuple[InlineButton, ...], ...]:
         match = COMMAND_RE.search(line)
         if not match:
             continue
-        command = match.group(1).strip()
+        raw_command = match.group(1).strip()
+        command = raw_command
         command = re.sub(r"\s+<[^>]+>$", "", command).rstrip()
         if identifier not in command or command in seen or len(command) > COPY_TEXT_LIMIT:
             continue
         seen.add(command)
-        buttons.append(copy_button(f"📋 {_command_action(command)}", command))
+        action = _command_action(command)
+        if "<" in raw_command:
+            buttons.append(copy_button(f"📋 {action}", command))
+        elif command.lower().startswith("/deploy "):
+            buttons.append(callback_button(f"🚀 {action}", f"confirm_deploy:{identifier}"))
+        else:
+            buttons.append(callback_button(_command_label(action), f"command:{command}"))
     buttons.extend(_url_buttons(text))
     return rows(buttons)
 
@@ -152,6 +170,19 @@ def _command_action(command: str) -> str:
     else:
         action = parts[0].lstrip("/")
     return action.replace("_", " ").title()
+
+
+def _command_label(action: str) -> str:
+    icon = {
+        "Approve": "✅",
+        "Cancel": "✖️",
+        "Confirm": "✅",
+        "Discard": "🗑",
+        "Rebase": "🔄",
+        "Retry": "🔁",
+        "Status": "ℹ️",
+    }.get(action, "▶️")
+    return f"{icon} {action}"
 
 
 def _render_html(text: str, *, expandable_prefixes: tuple[str, ...]) -> str:

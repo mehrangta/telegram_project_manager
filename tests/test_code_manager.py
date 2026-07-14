@@ -300,7 +300,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("✅ <b>Code job ready</b>", self.bot.sent[-1][1])
         self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
         self.assertIn(
-            f"/deploy {job_id}",
+            f"confirm_deploy:{job_id}",
             str(self.bot.sent_options[-1]["reply_markup"]),
         )
 

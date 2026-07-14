@@ -4,8 +4,10 @@ import unittest
 from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
 from telegram_project_manager.platform.telegram_bot import (
     TelegramBotApi,
+    callback_action_from_update,
     incoming_message_from_update,
     incoming_message_from_updates,
+    run_polling,
 )
 
 
@@ -162,6 +164,29 @@ class TelegramBotTests(unittest.TestCase):
         assert message is not None
         self.assertEqual(message.reply_to_code_job_id, "c-abcdef12")
 
+    def test_builds_callback_action_from_button_press(self):
+        action = callback_action_from_update(
+            {
+                "callback_query": {
+                    "id": "query-1",
+                    "from": {"id": 30, "username": "admin"},
+                    "data": "command:/code rebase c-abcdef12",
+                    "message": {
+                        "message_id": 20,
+                        "message_thread_id": 7,
+                        "chat": {"id": 40, "type": "supergroup"},
+                    },
+                }
+            }
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.query_id, "query-1")
+        self.assertEqual(action.message.chat_id, 40)
+        self.assertEqual(action.message.user_id, 30)
+        self.assertEqual(action.message.thread_id, 7)
+
     def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
         class Handler:
             async def handle(self, message):
@@ -177,6 +202,99 @@ class TelegramBotTests(unittest.TestCase):
             )
         )
         self.assertEqual(response, "edited i-abcdef12")
+
+
+class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
+    class Bot:
+        def __init__(self, updates):
+            self.updates = updates
+            self.answers = []
+            self.sent = []
+            self.markup_edits = []
+            self.polls = 0
+
+        def delete_webhook(self):
+            return None
+
+        def get_me(self):
+            return {"username": "project_bot"}
+
+        def get_updates(self, offset=None):
+            self.polls += 1
+            if self.polls == 1:
+                return self.updates
+            raise asyncio.CancelledError()
+
+        def answer_callback_query(self, query_id, text=""):
+            self.answers.append((query_id, text))
+
+        def send_message(self, chat_id, text, thread_id=None, **kwargs):
+            self.sent.append((chat_id, text, thread_id, kwargs))
+            return {"message_id": 100 + len(self.sent)}
+
+        def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
+            self.markup_edits.append((chat_id, message_id, reply_markup))
+
+    class Router:
+        def __init__(self):
+            self.commands = []
+            self.bot_username = ""
+
+        def set_bot_username(self, username):
+            self.bot_username = username
+
+        async def handle_message(self, message):
+            self.commands.append(message.text)
+            return "Action queued"
+
+    @staticmethod
+    def callback(update_id, query_id, data, message_id=20):
+        return {
+            "update_id": update_id,
+            "callback_query": {
+                "id": query_id,
+                "from": {"id": 30, "username": "admin"},
+                "data": data,
+                "message": {
+                    "message_id": message_id,
+                    "chat": {"id": 40, "type": "supergroup"},
+                },
+            },
+        }
+
+    async def test_action_button_dispatches_existing_command(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "command:/code rebase c-abcdef12")
+        ])
+        router = self.Router()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/code rebase c-abcdef12"])
+        self.assertEqual(bot.answers, [("query-1", "Action requested")])
+        self.assertEqual(bot.sent[0][1], "ℹ️ <b>Action queued</b>")
+
+    async def test_deploy_button_prompts_then_confirm_dispatches(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "confirm_deploy:c-abcdef12"),
+            self.callback(2, "query-2", "command:/deploy c-abcdef12", message_id=21),
+        ])
+        router = self.Router()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/deploy c-abcdef12"])
+        confirmation_markup = bot.sent[0][3]["reply_markup"]
+        self.assertEqual(
+            confirmation_markup["inline_keyboard"][0][0]["callback_data"],
+            "command:/deploy c-abcdef12",
+        )
+        self.assertEqual(
+            bot.markup_edits,
+            [(40, 21, {"inline_keyboard": []})],
+        )
 
 
 if __name__ == "__main__":

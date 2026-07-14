@@ -6,9 +6,10 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
-from telegram_project_manager.platform.responses import outgoing_message
+from telegram_project_manager.platform.responses import callback_button, outgoing_message
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage, TelegramRouter
 
 
@@ -16,6 +17,15 @@ DRAFT_ID_PATTERN = re.compile(r"(?m)^Draft ID:\s*(i-[0-9a-f]{8})\s*$")
 CODE_JOB_ID_PATTERN = re.compile(r"(?m)^Code Job ID:\s*(c-[0-9a-f]{8})\s*$")
 ISSUE_REPO_PATTERN = re.compile(r"(?m)^Repo:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$")
 ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
+CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
+
+
+@dataclass(frozen=True)
+class CallbackAction:
+    query_id: str
+    data: str
+    message: IncomingMessage
+    source_message_id: int
 
 
 class TelegramBotApiError(RuntimeError):
@@ -33,7 +43,10 @@ class TelegramBotApi:
         self._call("deleteWebhook", {"drop_pending_updates": False})
 
     def get_updates(self, offset: int | None = None) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {"timeout": 50, "allowed_updates": ["message"]}
+        payload: dict[str, Any] = {
+            "timeout": 50,
+            "allowed_updates": ["message", "callback_query"],
+        }
         if offset is not None:
             payload["offset"] = offset
         result = self._call("getUpdates", payload, timeout=60)
@@ -111,6 +124,27 @@ class TelegramBotApi:
         if disable_link_preview:
             payload["link_preview_options"] = {"is_disabled": True}
         self._call("editMessageText", payload)
+
+    def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: dict[str, object],
+    ) -> None:
+        self._call(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": reply_markup,
+            },
+        )
+
+    def answer_callback_query(self, query_id: str, text: str = "") -> None:
+        payload = {"callback_query_id": query_id}
+        if text:
+            payload["text"] = text
+        self._call("answerCallbackQuery", payload)
 
     def _call(self, method: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> Any:
         request = urllib.request.Request(
@@ -191,6 +225,47 @@ def incoming_message_from_updates(updates: list[dict[str, Any]]) -> IncomingMess
         reply_to_code_job_id=next(
             (item.reply_to_code_job_id for item in messages if item.reply_to_code_job_id), None
         ),
+    )
+
+
+def callback_action_from_update(update: dict[str, Any]) -> CallbackAction | None:
+    query = update.get("callback_query")
+    if not isinstance(query, dict):
+        return None
+    sender = query.get("from")
+    source = query.get("message")
+    data = query.get("data")
+    query_id = query.get("id")
+    if not isinstance(sender, dict) or not isinstance(source, dict):
+        return None
+    chat = source.get("chat")
+    message_id = source.get("message_id")
+    if (
+        not isinstance(query_id, str)
+        or not isinstance(data, str)
+        or not isinstance(chat, dict)
+        or not isinstance(sender.get("id"), int)
+        or not isinstance(chat.get("id"), int)
+        or not isinstance(message_id, int)
+    ):
+        return None
+    return CallbackAction(
+        query_id=query_id,
+        data=data,
+        message=IncomingMessage(
+            chat_id=chat["id"],
+            user_id=sender["id"],
+            username=str(sender.get("username") or ""),
+            text="",
+            is_private=chat.get("type") == "private",
+            message_id=message_id,
+            thread_id=(
+                source.get("message_thread_id")
+                if isinstance(source.get("message_thread_id"), int)
+                else None
+            ),
+        ),
+        source_message_id=message_id,
     )
 
 
@@ -277,21 +352,85 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
     pending_albums: dict[str, list[dict[str, Any]]] = {}
     album_tasks: dict[str, asyncio.Task[None]] = {}
 
+    async def send_response(
+        incoming: IncomingMessage,
+        response: object,
+    ) -> None:
+        if not response:
+            return
+        outgoing = outgoing_message(response)
+        await asyncio.to_thread(
+            bot.send_message,
+            incoming.chat_id,
+            outgoing.text,
+            incoming.thread_id,
+            parse_mode=outgoing.parse_mode,
+            reply_markup=outgoing.reply_markup(),
+            disable_link_preview=outgoing.disable_link_preview,
+        )
+
     async def dispatch(incoming: IncomingMessage | None) -> None:
         if incoming is None:
             return
-        response = await router.handle_message(incoming)
-        if response:
-            outgoing = outgoing_message(response)
+        await send_response(incoming, await router.handle_message(incoming))
+
+    async def dispatch_callback(update: dict[str, Any]) -> None:
+        callback = callback_action_from_update(update)
+        if callback is None:
+            return
+        incoming = callback.message
+        data = callback.data
+        if data == "cancel_deploy":
+            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Deployment cancelled")
             await asyncio.to_thread(
-                bot.send_message,
+                bot.edit_message_reply_markup,
                 incoming.chat_id,
-                outgoing.text,
-                incoming.thread_id,
-                parse_mode=outgoing.parse_mode,
-                reply_markup=outgoing.reply_markup(),
-                disable_link_preview=outgoing.disable_link_preview,
+                callback.source_message_id,
+                {"inline_keyboard": []},
             )
+            return
+        if data.startswith("confirm_deploy:"):
+            job_id = data.removeprefix("confirm_deploy:")
+            if not CALLBACK_JOB_PATTERN.fullmatch(job_id):
+                await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+                return
+            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Confirmation required")
+            confirmation = outgoing_message(
+                "⚠️ Confirm deployment\n"
+                f"Code Job ID: {job_id}\n"
+                "This will squash-merge the pull request and start deployment.",
+                keyboard=((
+                    callback_button("🚀 Confirm deploy", f"command:/deploy {job_id}"),
+                    callback_button("✖️ Cancel", "cancel_deploy"),
+                ),),
+            )
+            await send_response(incoming, confirmation)
+            return
+        if not data.startswith("command:"):
+            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+            return
+        command = data.removeprefix("command:").strip()
+        if not command.startswith("/"):
+            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+            return
+        await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Action requested")
+        if command.lower().startswith("/deploy "):
+            await asyncio.to_thread(
+                bot.edit_message_reply_markup,
+                incoming.chat_id,
+                callback.source_message_id,
+                {"inline_keyboard": []},
+            )
+        incoming = IncomingMessage(
+            chat_id=incoming.chat_id,
+            user_id=incoming.user_id,
+            username=incoming.username,
+            text=command,
+            is_private=incoming.is_private,
+            message_id=incoming.message_id,
+            thread_id=incoming.thread_id,
+        )
+        await send_response(incoming, await router.handle_message(incoming))
 
     async def flush_album(media_group_id: str) -> None:
         await asyncio.sleep(0.75)
@@ -311,6 +450,9 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
+                if "callback_query" in update:
+                    await dispatch_callback(update)
+                    continue
                 raw_message = update.get("message")
                 media_group_id = (
                     str(raw_message["media_group_id"])

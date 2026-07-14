@@ -24,7 +24,7 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertIn("<blockquote expandable>", outgoing.text)
         self.assertNotIn("<tags>", outgoing.text)
 
-    def test_primary_id_commands_get_native_copy_buttons(self):
+    def test_primary_id_commands_get_native_action_buttons(self):
         outgoing = outgoing_message(
             "Issue draft created.\n"
             "Draft ID: i-12345678\n"
@@ -44,8 +44,41 @@ class ResponsePresentationTests(unittest.TestCase):
             [
                 "i-12345678",
                 "/edit i-12345678",
-                "/confirm i-12345678",
-                "/cancel i-12345678",
+            ],
+        )
+        callbacks = [
+            button.callback_data
+            for row in outgoing.keyboard
+            for button in row
+            if button.callback_data
+        ]
+        self.assertEqual(
+            callbacks,
+            [
+                "command:/confirm i-12345678",
+                "command:/cancel i-12345678",
+            ],
+        )
+
+    def test_deploy_requires_confirmation_while_rebase_runs_directly(self):
+        outgoing = outgoing_message(
+            "Codex code job\n"
+            "Code Job ID: c-abcdef12\n"
+            "Rebase onto latest base: /code rebase c-abcdef12\n"
+            "Deploy: /deploy c-abcdef12"
+        )
+        callbacks = [
+            button.callback_data
+            for row in outgoing.keyboard
+            for button in row
+            if button.callback_data
+        ]
+
+        self.assertEqual(
+            callbacks,
+            [
+                "command:/code rebase c-abcdef12",
+                "confirm_deploy:c-abcdef12",
             ],
         )
 
@@ -57,6 +90,10 @@ class ResponsePresentationTests(unittest.TestCase):
     def test_copy_button_rejects_telegram_limit_violation(self):
         with self.assertRaises(ValueError):
             InlineButton("Copy", copy_text="x" * 257)
+
+    def test_callback_button_rejects_telegram_byte_limit_violation(self):
+        with self.assertRaises(ValueError):
+            InlineButton("Action", callback_data="é" * 33)
 
 
 if __name__ == "__main__":
