@@ -252,7 +252,35 @@ class CodeJobService:
             self.github.get_pr_head_sha, str(job["pull_request_url"])
         )
         if remote_sha != str(job.get("ci_head_sha") or ""):
-            raise ValueError("Pull request head changed after checks; run or wait for checks first.")
+            if not self.db.update_code_job(
+                job_id,
+                {
+                    "status": "queued_checks",
+                    "resume_phase": "checks",
+                    "latest_activity": "PR head changed; checking the new commit",
+                    "ci_head_sha": remote_sha,
+                    "ci_wait_started_at": int(time.time()),
+                    "ci_repair_attempts": 0,
+                    "ci_checks_json": [],
+                    "error": None,
+                    "deployment_status": None,
+                    "deployment_error": None,
+                    "deployment_run_id": None,
+                    "deployment_run_url": None,
+                    "deployment_started_at": None,
+                },
+                allowed_statuses=("ready",),
+            ):
+                raise ValueError("Code job changed concurrently; retry the rebase command.")
+            self.db.audit(
+                "code.checks",
+                "queued",
+                {"head_sha": remote_sha, "reason": "pr_head_changed_before_rebase"},
+                job_id,
+            )
+            await self.reporter.refresh(job_id, force=True)
+            self._schedule(job_id, "checks")
+            return
         if not self.db.update_code_job(
             job_id,
             {

@@ -451,16 +451,21 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.calls[-1]["effort"], ReasoningEffort.high)
         self.assertIn("Modify only the listed conflicted files", self.codex.calls[-1]["prompt"])
 
-    async def test_rebase_rejects_changed_pr_head(self):
+    async def test_rebase_checks_changed_pr_head_before_rebasing(self):
         job_id = await self.service.create_job(
             chat_id=10, user_id=20, thread_id=None, issue=self.issue,
             base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
         )
         await wait_for_status(self.db, job_id, "ready")
-        self.github.head_shas = ["someone-else-sha"]
-        with self.assertRaisesRegex(ValueError, "head changed"):
-            await self.service.rebase(job_id)
-        self.assertEqual(self.db.get_code_job(job_id)["status"], "ready")
+        self.github.head_shas = ["someone-else-sha", "someone-else-sha"]
+
+        await self.service.rebase(job_id)
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["ci_head_sha"], "someone-else-sha")
+        self.assertEqual(ready["result_json"]["ci"]["head_sha"], "someone-else-sha")
+        self.assertEqual(ready["ci_repair_attempts"], 0)
+        self.assertFalse(self.workspaces.rebase_started)
 
 
 class CodeSafetyTests(unittest.TestCase):

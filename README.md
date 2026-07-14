@@ -161,6 +161,10 @@ currently valid commands, plus direct buttons for relevant GitHub links.
 /deploy                            Same action when replying to its code-job message
 ```
 
+If a ready pull request received a new commit after its recorded CI pass,
+`/code rebase` first adopts that head and checks it without modifying the
+branch. When the job returns to `ready`, run the rebase command again.
+
 You can also reply `/code` to the bot's `Issue created` message. Plan controls
 may be sent by the requester or any registered admin. At most two Codex jobs run
 concurrently and ten may wait in the queue. Service restarts mark active turns
