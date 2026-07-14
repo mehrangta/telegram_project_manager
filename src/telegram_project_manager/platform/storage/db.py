@@ -902,6 +902,33 @@ class Database:
                 ),
             )
 
+    def list_code_job_events(self, job_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, summary_json, created_at
+                FROM code_job_events
+                WHERE job_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (job_id, limit),
+            ).fetchall()
+        events = []
+        for row in reversed(rows):
+            try:
+                summary = json.loads(row["summary_json"])
+            except (TypeError, json.JSONDecodeError):
+                summary = {}
+            events.append(
+                {
+                    "event_type": row["event_type"],
+                    "summary": summary if isinstance(summary, dict) else {},
+                    "created_at": row["created_at"],
+                }
+            )
+        return events
+
     def mark_running_code_jobs_interrupted(self) -> int:
         running = (
             "preparing",

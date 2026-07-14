@@ -81,13 +81,17 @@ class CodeProgressReporter:
         if job["status"] == "ready" and not job.get("deployment_merge_sha"):
             lines.append(f"Deploy: /deploy {job['id']}")
         elif job["status"] == "failed":
+            phase = str(job.get("resume_phase") or "unknown").replace("_", " ")
+            lines.append(f"Failure phase: {phase}")
+            if job.get("error"):
+                lines.append(f"Error: {job['error']}")
             lines.extend(
                 [
                     f"Retry: /code retry {job['id']}",
                     f"Status: /code status {job['id']}",
                 ]
             )
-        outgoing = outgoing_message("\n".join(lines))
+        outgoing = outgoing_message("\n".join(lines), expandable_prefixes=("Error:",))
         await asyncio.to_thread(
             self.bot.send_message,
             int(job["telegram_chat_id"]),
@@ -126,15 +130,17 @@ class CodeProgressReporter:
             disable_link_preview=outgoing.disable_link_preview,
         )
 
-    @staticmethod
-    def render_message(job: dict[str, Any]) -> OutgoingMessage:
+    def render_message(self, job: dict[str, Any]) -> OutgoingMessage:
+        events = self.db.list_code_job_events(str(job["id"]), limit=5)
         return outgoing_message(
-            CodeProgressReporter.render(job),
-            expandable_prefixes=("Plan revision", "Deployment error:", "Error:"),
+            CodeProgressReporter.render(job, events),
+            expandable_prefixes=(
+                "Recent activity:", "Plan revision", "Deployment error:", "Error:"
+            ),
         )
 
     @staticmethod
-    def render(job: dict[str, Any]) -> str:
+    def render(job: dict[str, Any], events: list[dict[str, Any]] | None = None) -> str:
         created = int(job.get("created_at") or time.time())
         elapsed = max(0, int(time.time()) - created)
         lines = [
@@ -147,6 +153,18 @@ class CodeProgressReporter:
         ]
         if job.get("latest_activity"):
             lines.append(f"Activity: {job['latest_activity']}")
+        if str(job.get("status") or "") == "failed":
+            phase = str(job.get("resume_phase") or "unknown").replace("_", " ")
+            failed_at = max(0, int(job.get("updated_at") or time.time()) - created)
+            lines.extend(
+                [
+                    f"Failure phase: {phase}",
+                    f"Failed after: {_duration(failed_at)}",
+                ]
+            )
+        timeline = _recent_activity(events or [], created)
+        if timeline:
+            lines.extend(["", "Recent activity:", *timeline])
         plan_raw = job.get("plan_json")
         if isinstance(plan_raw, dict):
             try:
@@ -247,3 +265,23 @@ def _event_summary(event: dict[str, Any]) -> str:
         )
         return active[:500]
     return ""
+
+
+def _recent_activity(events: list[dict[str, Any]], created_at: int) -> list[str]:
+    items: list[str] = []
+    previous = ""
+    for event in events:
+        summary = event.get("summary")
+        text = str(summary.get("text") or "") if isinstance(summary, dict) else ""
+        text = " ".join(text.split())[:500]
+        if not text or text == previous:
+            continue
+        offset = max(0, int(event.get("created_at") or created_at) - created_at)
+        items.append(f"- +{_duration(offset)}: {text}")
+        previous = text
+    return items
+
+
+def _duration(seconds: int) -> str:
+    minutes, seconds = divmod(max(0, seconds), 60)
+    return f"{minutes}m {seconds}s"

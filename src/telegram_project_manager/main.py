@@ -22,7 +22,12 @@ from telegram_project_manager.integrations.gh.issues import GhIssueExecutor
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryService
 from telegram_project_manager.integrations.gh.runner import GhRunner
-from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, SUPPORTED_CONFIG_KEYS, normalize_config_value
+from telegram_project_manager.platform.config import (
+    SECRET_CONFIG_KEYS,
+    SUPPORTED_CONFIG_KEYS,
+    normalize_config_value,
+    resolve_codex_model,
+)
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
 from telegram_project_manager.platform.router import TelegramRouter
 from telegram_project_manager.platform.secrets import SecretStore
@@ -125,7 +130,7 @@ async def run_bot(db: Database) -> None:
         codex=CodexSdkAdapter(
             lambda: db.get_secret("codex_api_key"),
             lambda: db.get_setting("codex_base_url", ""),
-            lambda: db.get_setting("codex_model", ""),
+            lambda role: resolve_codex_model(db.get_setting, role),
         ),
         workspaces=GitWorkspaceService(repositories=repositories),
         github=code_github,

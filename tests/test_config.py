@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from telegram_project_manager.main import main
-from telegram_project_manager.platform.config import normalize_config_value
+from telegram_project_manager.platform.config import normalize_config_value, resolve_codex_model
 from telegram_project_manager.platform.storage.db import Database
 
 
@@ -27,6 +27,33 @@ class ConfigTests(unittest.TestCase):
             normalize_config_value("codex_base_url", " http://codex.example.test/ "),
             "http://codex.example.test",
         )
+
+    def test_resolves_phase_specific_codex_models_with_legacy_fallback(self):
+        settings = {"codex_model": "shared", "codex_plan_model": "planner"}
+
+        def get_setting(key, default=""):
+            return settings.get(key, default)
+
+        self.assertEqual(resolve_codex_model(get_setting, "plan"), "planner")
+        self.assertEqual(resolve_codex_model(get_setting, "code"), "shared")
+
+    def test_cli_stores_phase_specific_codex_models(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            for key, value in (
+                ("codex_plan_model", "planner-model"),
+                ("codex_code_model", "coding-model"),
+            ):
+                argv = [
+                    "telegram-project-manager", "--db", str(db_path), "config", "set",
+                    key, value,
+                ]
+                with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                    main()
+
+            db = Database(db_path)
+            self.assertEqual(db.get_setting("codex_plan_model"), "planner-model")
+            self.assertEqual(db.get_setting("codex_code_model"), "coding-model")
 
     def test_validates_llm_memory_limit(self):
         self.assertEqual(normalize_config_value("llm_memory_max_messages", " 8 "), "8")

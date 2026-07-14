@@ -183,10 +183,16 @@ class CodeResult:
             raise CodeJobValidationError("commit message is too long")
         if any(item.status not in {"passed", "failed", "not_run"} for item in self.tests):
             raise CodeJobValidationError("invalid test status")
-        if any(item.status == "failed" for item in self.tests):
-            raise CodeJobValidationError("Codex reported a failed validation command")
-        if not any(item.status == "passed" for item in self.tests):
-            raise CodeJobValidationError("Codex did not report a successful validation command")
+        if any(item.status == "passed" for item in self.tests):
+            return
+        failed = next((item for item in self.tests if item.status == "failed"), None)
+        if failed is not None:
+            command = failed.command[:240] or "unspecified command"
+            summary = failed.summary[:500] or "No failure summary was provided."
+            raise CodeJobValidationError(
+                f"Codex reported failed validation command: {command} — {summary}"
+            )
+        raise CodeJobValidationError("Codex did not report a successful validation command")
 
     def to_json(self) -> dict[str, Any]:
         return {

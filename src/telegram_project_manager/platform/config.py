@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Literal
 from urllib.parse import urlsplit
 
+
+CodexModelRole = Literal["plan", "code"]
 
 SECRET_CONFIG_KEYS = frozenset({"openai_api_key", "codex_api_key"})
 
@@ -13,6 +17,8 @@ SUPPORTED_CONFIG_KEYS = frozenset(
         "codex_api_key",
         "codex_base_url",
         "codex_model",
+        "codex_plan_model",
+        "codex_code_model",
         "max_files_per_commit",
         "max_bytes_per_commit",
         "require_confirmation",
@@ -20,6 +26,15 @@ SUPPORTED_CONFIG_KEYS = frozenset(
         "llm_memory_max_messages",
     }
 )
+
+
+def resolve_codex_model(
+    setting_provider: Callable[[str, str], str],
+    role: CodexModelRole,
+) -> str:
+    """Return the phase-specific Codex model, falling back to the legacy setting."""
+    fallback = setting_provider("codex_model", "")
+    return setting_provider(f"codex_{role}_model", fallback).strip()
 
 
 def normalize_config_value(key: str, value: str) -> str:

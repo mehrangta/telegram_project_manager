@@ -9,6 +9,8 @@ from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.codex_sdk import (
+    CodexSdkAdapter,
+    CodexSdkError,
     _codex_config,
     _safe_progress,
     _turn_input,
@@ -76,12 +78,17 @@ class FakeCodex:
     def __init__(self):
         self.calls = []
         self.interrupted = []
+        self.results = []
 
     async def run_turn(self, **kwargs):
         self.calls.append(kwargs)
         await kwargs["on_thread"]("thread-1")
         await kwargs["on_progress"]({"kind": "phase", "text": "Inspecting repository"})
-        raw = PLAN if kwargs["sandbox"] == Sandbox.read_only else RESULT
+        raw = (
+            self.results.pop(0)
+            if self.results
+            else PLAN if kwargs["sandbox"] == Sandbox.read_only else RESULT
+        )
         return "thread-1", raw
 
     async def interrupt(self, job_id):
@@ -290,6 +297,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Code Job ID:", self.bot.sent[0][1])
         self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.read_only)
         self.assertEqual(self.codex.calls[0]["effort"], ReasoningEffort.high)
+        self.assertEqual(self.codex.calls[0]["model_role"], "plan")
 
         await self.service.approve(job_id)
         ready = await wait_for_status(self.db, job_id, "ready")
@@ -297,6 +305,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["result_json"]["ci"]["checks"][0]["bucket"], "pass")
         self.assertEqual(self.codex.calls[1]["sandbox"], Sandbox.workspace_write)
         self.assertEqual(self.codex.calls[1]["effort"], ReasoningEffort.medium)
+        self.assertEqual(self.codex.calls[1]["model_role"], "code")
         self.assertEqual(len(self.github.created), 1)
         self.assertEqual(len(self.github.updated), 1)
         self.assertEqual(self.github.ready, ["https://github.com/owner/repo/pull/42"])
@@ -345,7 +354,58 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ready["plan_json"])
         self.assertEqual(len(self.codex.calls), 1)
         self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(self.codex.calls[0]["model_role"], "code")
         self.assertTrue(self.workspaces.code_commits[0]["first_push"])
+
+    async def test_invalid_validation_command_is_recovered_automatically(self):
+        self.codex.results = [
+            {
+                "summary": "Implemented the issue.",
+                "commit_message": "fix: implement issue",
+                "tests": [
+                    {
+                        "command": "bun run tsc --noEmit",
+                        "status": "failed",
+                        "summary": "No tsc script or local compiler.",
+                    }
+                ],
+            },
+            RESULT,
+        ]
+
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
+        )
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(len(self.codex.calls), 2)
+        self.assertIn("Recover from an invalid validation result", self.codex.calls[1]["prompt"])
+        self.assertIn("package.json scripts", self.codex.calls[1]["prompt"])
+        self.assertEqual(self.codex.calls[1]["thread_id"], "thread-1")
+        events = self.db.list_code_job_events(job_id)
+        self.assertTrue(
+            any("recovering validation" in event["summary"].get("text", "") for event in events)
+        )
+
+    async def test_plan_revision_uses_plan_model(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False,
+        )
+        await wait_for_status(self.db, job_id, "awaiting_approval")
+
+        await self.service.edit_plan(job_id, "Include another regression test.")
+        for _ in range(200):
+            job = self.db.get_code_job(job_id)
+            if job and job["status"] == "awaiting_approval" and job["plan_revision"] == 2:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.fail("revised plan did not reach awaiting_approval")
+
+        self.assertEqual([call["model_role"] for call in self.codex.calls], ["plan", "plan"])
 
     async def test_pending_checks_are_polled_before_ready(self):
         self.github.check_sequences = [(_check("pending", "pending"),), (_check("success", "pass"),)]
@@ -369,6 +429,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["result_json"]["commit_sha"], "repair-sha-1")
         self.assertEqual(len(ready["result_json"]["repairs"]), 1)
         self.assertEqual(len(self.codex.calls), 2)
+        self.assertEqual(self.codex.calls[-1]["model_role"], "code")
         self.assertEqual(len(self.github.diagnostics), 1)
         self.assertEqual(len(self.workspaces.code_commits), 2)
 
@@ -415,6 +476,11 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[-1][2], 30)
         self.assertIn("❌ <b>Code job failed</b>", self.bot.sent[-1][1])
         self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
+        self.assertIn("<b>Failure phase:</b> code", self.bot.sent[-1][1])
+        self.assertIn("invalid changes", self.bot.sent[-1][1])
+        events = self.db.list_code_job_events(job_id)
+        self.assertEqual(events[-1]["event_type"], "failure")
+        self.assertIn("invalid changes", events[-1]["summary"]["text"])
 
     async def test_terminal_alert_failure_does_not_change_ready_state_or_block_cleanup(self):
         self.bot.fail_send_at = 2
@@ -484,6 +550,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolutions[0]["files"], ["src/handler.py"])
         self.assertEqual(len(self.workspaces.rebase_continuations), 1)
         self.assertEqual(self.codex.calls[-1]["effort"], ReasoningEffort.high)
+        self.assertEqual(self.codex.calls[-1]["model_role"], "code")
         self.assertIn("Modify only the listed conflicted files", self.codex.calls[-1]["prompt"])
 
     async def test_rebase_checks_changed_pr_head_before_rebasing(self):
@@ -501,6 +568,95 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["result_json"]["ci"]["head_sha"], "someone-else-sha")
         self.assertEqual(ready["ci_repair_attempts"], 0)
         self.assertFalse(self.workspaces.rebase_started)
+
+
+class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selects_phase_model_for_thread_start_and_resume(self):
+        class Notification:
+            def __init__(self, method, payload):
+                self.method = method
+                self.payload = payload
+
+        class Turn:
+            async def stream(self):
+                yield Notification(
+                    "item/completed",
+                    {"item": {"root": {"type": "agentMessage", "text": '{"ok": true}'}}},
+                )
+                yield Notification("turn/completed", {"turn": {"status": "completed"}})
+
+        class Thread:
+            def __init__(self, thread_id):
+                self.id = thread_id
+
+            async def turn(self, *args, **kwargs):
+                return Turn()
+
+        class Client:
+            def __init__(self):
+                self.starts = []
+                self.resumes = []
+
+            async def thread_start(self, **kwargs):
+                self.starts.append(kwargs)
+                return Thread("thread-1")
+
+            async def thread_resume(self, thread_id, **kwargs):
+                self.resumes.append((thread_id, kwargs))
+                return Thread(thread_id)
+
+        models = {"plan": "planner-model", "code": "coding-model"}
+        adapter = CodexSdkAdapter(
+            lambda: "secret",
+            lambda: "https://codex.example.test",
+            lambda role: models[role],
+        )
+        client = Client()
+        adapter._client = client
+
+        async def callback(*args):
+            return None
+
+        common = {
+            "job_id": "c-test",
+            "cwd": "/workspace",
+            "prompt": "Do the work",
+            "output_schema": {},
+            "sandbox": Sandbox.read_only,
+            "effort": ReasoningEffort.medium,
+            "developer_instructions": "Follow instructions",
+            "timeout_seconds": 10,
+            "on_progress": callback,
+            "on_thread": callback,
+        }
+        await adapter.run_turn(**common, model_role="plan", thread_id=None)
+        await adapter.run_turn(**common, model_role="code", thread_id="thread-1")
+
+        self.assertEqual(client.starts[0]["model"], "planner-model")
+        self.assertEqual(client.resumes[0][0], "thread-1")
+        self.assertEqual(client.resumes[0][1]["model"], "coding-model")
+
+    async def test_missing_phase_model_has_role_specific_error(self):
+        adapter = CodexSdkAdapter(lambda: "secret", lambda: "https://example.test", lambda role: "")
+
+        async def callback(*args):
+            return None
+
+        with self.assertRaisesRegex(CodexSdkError, "codex_plan_model"):
+            await adapter.run_turn(
+                job_id="c-test",
+                cwd="/workspace",
+                prompt="Plan",
+                output_schema={},
+                sandbox=Sandbox.read_only,
+                effort=ReasoningEffort.high,
+                model_role="plan",
+                developer_instructions="Follow instructions",
+                thread_id=None,
+                timeout_seconds=10,
+                on_progress=callback,
+                on_thread=callback,
+            )
 
 
 class CodeSafetyTests(unittest.TestCase):
@@ -589,6 +745,8 @@ class CodeSafetyTests(unittest.TestCase):
         self.assertIn("not a validation result", prompt)
         self.assertIn("Do not run Vite production", prompt)
         self.assertIn("builds inside Codex", prompt)
+        self.assertIn("inspect repository metadata such as package.json scripts", prompt)
+        self.assertIn("Never invent a conventional script", prompt)
 
     def test_ci_repair_prompt_treats_logs_as_untrusted(self):
         prompt = ci_repair_prompt(
@@ -679,6 +837,81 @@ class CodeSafetyTests(unittest.TestCase):
     def test_result_requires_a_successful_validation(self):
         with self.assertRaises(CodeJobValidationError):
             CodeResult.from_json({"summary": "Changed code.", "commit_message": "fix: change code", "tests": [{"command": "pytest", "status": "not_run", "summary": "Unavailable"}]})
+
+    def test_failed_validation_reports_command_and_reason(self):
+        with self.assertRaises(CodeJobValidationError) as raised:
+            CodeResult.from_json(
+                {
+                    "summary": "Changed code.",
+                    "commit_message": "fix: change code",
+                    "tests": [
+                        {
+                            "command": "bun run build",
+                            "status": "failed",
+                            "summary": "TypeScript error in NewsPage.tsx:42",
+                        }
+                    ],
+                }
+            )
+
+        self.assertIn("bun run build", str(raised.exception))
+        self.assertIn("TypeScript error in NewsPage.tsx:42", str(raised.exception))
+
+    def test_successful_validation_allows_a_recorded_exploratory_failure(self):
+        result = CodeResult.from_json(
+            {
+                "summary": "Changed code.",
+                "commit_message": "fix: change code",
+                "tests": [
+                    {
+                        "command": "bun run tsc --noEmit",
+                        "status": "failed",
+                        "summary": "Script does not exist.",
+                    },
+                    {
+                        "command": "bun test",
+                        "status": "passed",
+                        "summary": "Tests passed.",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual([item.status for item in result.tests], ["failed", "passed"])
+
+    def test_failed_progress_includes_phase_timing_and_recent_activity(self):
+        rendered = CodeProgressReporter.render(
+            {
+                "id": "c-abcdef12",
+                "repo": "owner/repo",
+                "issue_number": 10,
+                "issue_title": "Fix news page",
+                "status": "failed",
+                "resume_phase": "code",
+                "created_at": 100,
+                "updated_at": 428,
+                "latest_activity": "Code failed",
+                "error": "bun run build — TypeScript error in NewsPage.tsx:42",
+            },
+            [
+                {
+                    "event_type": "command",
+                    "summary": {"text": "Command completed: bun run build"},
+                    "created_at": 400,
+                },
+                {
+                    "event_type": "failure",
+                    "summary": {"text": "Code failed: bun run build"},
+                    "created_at": 428,
+                },
+            ],
+        )
+
+        self.assertIn("Failure phase: code", rendered)
+        self.assertIn("Failed after: 5m 28s", rendered)
+        self.assertIn("Recent activity:", rendered)
+        self.assertIn("+5m 0s: Command completed: bun run build", rendered)
+        self.assertIn("+5m 28s: Code failed: bun run build", rendered)
 
     def test_sensitive_paths_are_blocked(self):
         class Runner:

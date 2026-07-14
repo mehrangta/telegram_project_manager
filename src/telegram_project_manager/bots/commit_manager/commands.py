@@ -9,7 +9,11 @@ from telegram_project_manager.integrations.git.local_repository import (
     LocalRepositoryError,
     LocalRepositoryService,
 )
-from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, normalize_config_value
+from telegram_project_manager.platform.config import (
+    SECRET_CONFIG_KEYS,
+    normalize_config_value,
+    resolve_codex_model,
+)
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, memory_session_id
 from telegram_project_manager.platform.permissions import PermissionService
@@ -86,7 +90,9 @@ Commands:
 /config set openai_model <model>
 /config set codex_api_key <key> (private chat only)
 /config set codex_base_url <url>
-/config set codex_model <model>
+/config set codex_model <model> (shared fallback)
+/config set codex_plan_model <model>
+/config set codex_code_model <model>
 /config set issue_body_llm_enabled <true|false>
 /config set llm_memory_max_messages <count>
 /memory status
@@ -109,7 +115,8 @@ Commands:
                     f"Admins: {', '.join(admins) if admins else 'none'}",
                     f"OpenAI model: {self.db.get_setting('openai_model', 'not set')}",
                     f"Codex SDK auth: {'configured' if self.db.has_secret('codex_api_key') else 'not configured'}",
-                    f"Codex model: {self.db.get_setting('codex_model', 'not set')}",
+                    f"Codex plan model: {resolve_codex_model(self.db.get_setting, 'plan') or 'not set'}",
+                    f"Codex coding model: {resolve_codex_model(self.db.get_setting, 'code') or 'not set'}",
                 ]
             )
         )

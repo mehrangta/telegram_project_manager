@@ -10,6 +10,8 @@ from openai_codex import ApprovalMode, AsyncCodex, LocalImageInput, Sandbox, Tex
 from openai_codex.client import CodexConfig
 from openai_codex.types import ReasoningEffort
 
+from telegram_project_manager.platform.config import CodexModelRole
+
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 ThreadCallback = Callable[[str], Awaitable[None]]
@@ -26,7 +28,7 @@ class CodexSdkAdapter:
         self,
         api_key_provider: Callable[[], str],
         base_url_provider: Callable[[], str],
-        model_provider: Callable[[], str],
+        model_provider: Callable[[CodexModelRole], str],
     ) -> None:
         self.api_key_provider = api_key_provider
         self.base_url_provider = base_url_provider
@@ -43,15 +45,14 @@ class CodexSdkAdapter:
                 return self._client
             api_key = self.api_key_provider().strip()
             base_url = self.base_url_provider().strip().rstrip("/")
-            model = self.model_provider().strip()
             if not api_key:
                 raise CodexSdkError(
                     "Codex API key is not configured. Admin private chat: "
                     "/config set codex_api_key <key>"
                 )
-            if not base_url or not model:
+            if not base_url:
                 raise CodexSdkError(
-                    "Codex provider is incomplete. Configure codex_base_url and codex_model."
+                    "Codex provider is incomplete. Configure codex_base_url."
                 )
             client = AsyncCodex(_codex_config(api_key, base_url))
             try:
@@ -91,12 +92,20 @@ class CodexSdkAdapter:
         output_schema: dict[str, Any],
         sandbox: Sandbox,
         effort: ReasoningEffort,
+        model_role: CodexModelRole,
         developer_instructions: str,
         thread_id: str | None,
         timeout_seconds: int,
         on_progress: ProgressCallback,
         on_thread: ThreadCallback,
     ) -> tuple[str, dict[str, Any]]:
+        model = self.model_provider(model_role).strip()
+        if not model:
+            raise CodexSdkError(
+                f"Codex {model_role} model is not configured. Admin: "
+                f"/config set codex_{model_role}_model <model> "
+                "(or set codex_model as a shared fallback)."
+            )
         client = await self.ensure_started()
         try:
             if thread_id:
@@ -105,7 +114,7 @@ class CodexSdkAdapter:
                     approval_mode=ApprovalMode.auto_review,
                     cwd=cwd,
                     developer_instructions=developer_instructions,
-                    model=self.model_provider().strip(),
+                    model=model,
                     sandbox=sandbox,
                 )
             else:
@@ -113,7 +122,7 @@ class CodexSdkAdapter:
                     approval_mode=ApprovalMode.auto_review,
                     cwd=cwd,
                     developer_instructions=developer_instructions,
-                    model=self.model_provider().strip(),
+                    model=model,
                     sandbox=sandbox,
                 )
             await on_thread(str(thread.id))

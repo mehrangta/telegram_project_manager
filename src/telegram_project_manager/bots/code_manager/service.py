@@ -20,6 +20,7 @@ from telegram_project_manager.bots.code_manager.prompts import (
     plan_edit_prompt,
     planning_prompt,
     rebase_conflict_prompt,
+    validation_recovery_prompt,
 )
 from telegram_project_manager.bots.code_manager.schemas import (
     CODE_PLAN_SCHEMA,
@@ -35,6 +36,7 @@ from telegram_project_manager.bots.code_manager.workspace import (
     PullRequestCheck,
     WorkspaceError,
 )
+from telegram_project_manager.platform.config import CodexModelRole
 from telegram_project_manager.integrations.gh.runner import GhError
 from telegram_project_manager.platform.storage.db import Database
 
@@ -47,6 +49,7 @@ CHECK_POLL_SECONDS = 10
 CHECK_GRACE_SECONDS = 60
 CHECK_TIMEOUT_SECONDS = 30 * 60
 MAX_CI_REPAIR_ATTEMPTS = 2
+MAX_VALIDATION_RECOVERY_ATTEMPTS = 2
 MAX_REBASE_CONFLICT_ROUNDS = 20
 TERMINAL_STATUSES = {"ready", "discarded"}
 ACTIVE_STATUSES = {
@@ -393,6 +396,7 @@ class CodeJobService:
         output_schema: dict[str, Any],
         sandbox: Sandbox,
         effort: ReasoningEffort,
+        model_role: CodexModelRole,
         timeout_seconds: int,
     ) -> tuple[str, dict[str, Any]]:
         image_paths = await asyncio.to_thread(
@@ -411,6 +415,7 @@ class CodeJobService:
                 output_schema=output_schema,
                 sandbox=sandbox,
                 effort=effort,
+                model_role=model_role,
                 developer_instructions=DEVELOPER_INSTRUCTIONS,
                 thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
                 timeout_seconds=timeout_seconds,
@@ -419,6 +424,50 @@ class CodeJobService:
             )
         finally:
             await asyncio.to_thread(self.workspaces.remove_issue_images, path=path)
+
+    async def _run_code_result_turn(
+        self,
+        *,
+        job: dict[str, Any],
+        path: Path,
+        prompt: str,
+        effort: ReasoningEffort,
+    ) -> CodeResult:
+        current_prompt = prompt
+        for recovery_attempt in range(MAX_VALIDATION_RECOVERY_ATTEMPTS + 1):
+            current_job = self._require_job(str(job["id"]))
+            _, raw = await self._run_codex_turn(
+                job=current_job,
+                path=path,
+                prompt=current_prompt,
+                output_schema=CODE_RESULT_SCHEMA,
+                sandbox=Sandbox.workspace_write,
+                effort=effort,
+                model_role="code",
+                timeout_seconds=CODE_TIMEOUT_SECONDS,
+            )
+            try:
+                return CodeResult.from_json(raw)
+            except CodeJobValidationError as exc:
+                if (
+                    "validation command" not in str(exc)
+                    or recovery_attempt >= MAX_VALIDATION_RECOVERY_ATTEMPTS
+                ):
+                    raise
+                attempt = recovery_attempt + 1
+                await self.reporter.activity(
+                    str(job["id"]),
+                    {
+                        "kind": "phase",
+                        "text": (
+                            "Codex is recovering validation "
+                            f"({attempt}/{MAX_VALIDATION_RECOVERY_ATTEMPTS})"
+                        ),
+                    },
+                    force=True,
+                )
+                current_prompt = validation_recovery_prompt(raw, str(exc), attempt)
+        raise AssertionError("validation recovery loop exhausted unexpectedly")
 
     async def _run_rebase(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -462,16 +511,12 @@ class CodeJobService:
                 {"latest_activity": f"Codex is resolving rebase conflicts ({rounds})"},
             )
             await self.reporter.refresh(job_id, force=True)
-            _, raw = await self._run_codex_turn(
+            result = await self._run_code_result_turn(
                 job=job,
                 path=path,
                 prompt=rebase_conflict_prompt(dict(job["issue_context_json"]), conflicts, rounds),
-                output_schema=CODE_RESULT_SCHEMA,
-                sandbox=Sandbox.workspace_write,
                 effort=ReasoningEffort.high,
-                timeout_seconds=CODE_TIMEOUT_SECONDS,
             )
-            result = CodeResult.from_json(raw)
             resolutions.append({**result.to_json(), "files": list(conflicts), "round": rounds})
             conflicts = await asyncio.to_thread(
                 self.workspaces.continue_conflict_aware_rebase, path, conflicts
@@ -567,6 +612,7 @@ class CodeJobService:
             output_schema=CODE_PLAN_SCHEMA,
             sandbox=Sandbox.read_only,
             effort=ReasoningEffort.high,
+            model_role="plan",
             timeout_seconds=PLAN_TIMEOUT_SECONDS,
         )
         plan = CodePlan.from_json(raw)
@@ -666,21 +712,17 @@ class CodeJobService:
         job = self._require_job(job_id)
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
         plan_path = PLAN_PATH_TEMPLATE.format(job_id=job_id)
-        _, raw = await self._run_codex_turn(
+        result = await self._run_code_result_turn(
             job=job,
             path=path,
             prompt=coding_prompt(dict(job["issue_context_json"]), plan, plan_path),
-            output_schema=CODE_RESULT_SCHEMA,
-            sandbox=Sandbox.workspace_write,
             effort=ReasoningEffort.medium,
-            timeout_seconds=CODE_TIMEOUT_SECONDS,
         )
         await asyncio.to_thread(
             self.workspaces.remove_plan,
             path=path,
             plan_path=plan_path,
         )
-        result = CodeResult.from_json(raw)
         if self._discarded(job_id):
             return
         self.db.update_code_job(job_id, {"status": "validating", "latest_activity": "Validating Codex changes"})
@@ -867,18 +909,14 @@ class CodeJobService:
         implementation = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
         async with self._semaphore:
-            _, raw = await self._run_codex_turn(
+            result = await self._run_code_result_turn(
                 job=job,
                 path=path,
                 prompt=ci_repair_prompt(
                     dict(job["issue_context_json"]), plan, implementation, diagnostics, attempt
                 ),
-                output_schema=CODE_RESULT_SCHEMA,
-                sandbox=Sandbox.workspace_write,
                 effort=ReasoningEffort.medium,
-                timeout_seconds=CODE_TIMEOUT_SECONDS,
             )
-        result = CodeResult.from_json(raw)
         if self._discarded(job_id):
             return
         files = await asyncio.to_thread(
@@ -993,6 +1031,11 @@ class CodeJobService:
             allowed_statuses=tuple(sorted(ACTIVE_STATUSES - {"failed"})),
         ):
             return
+        self.db.add_code_job_event(
+            job_id,
+            "failure",
+            {"text": f"{phase.replace('_', ' ').title()} failed: {safe_error}"},
+        )
         self.db.audit("code.job", "failed", {"phase": phase, "error": safe_error}, job_id)
         if phase == "plan" and not job.get("pull_request_number"):
             try:

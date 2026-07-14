@@ -273,6 +273,7 @@ def _is_detail_boundary(line: str) -> bool:
         (
             "Pull request:", "CI checks:", "CI repair attempts:", "Deployment:",
             "Merge commit:", "Deployment run:", "Deployment error:", "Error:",
+            "Recent activity:", "Plan revision",
             "Reply with", "Retry:", "Discard:", "Rebase onto", "Deploy:",
         )
     )
