@@ -73,6 +73,7 @@ class IssueManager:
                 user_id=message.user_id,
                 repo=repo,
                 default_branch=default_branch,
+                local_repo_path=str(chat.get("local_repo_path") or ""),
                 attachments=message.attachments,
             )
         except RepositoryContextError as exc:
@@ -132,6 +133,9 @@ class IssueManager:
                     record=record,
                     feedback_history=feedback_history,
                     new_feedback=feedback_text,
+                    local_repo_path=str(
+                        self.db.get_chat_settings(message.chat_id).get("local_repo_path") or ""
+                    ),
                 )
             else:
                 issue = IssueDraft.from_llm(dict(record["issue_json"]))

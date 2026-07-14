@@ -38,10 +38,14 @@ class IssuePlanner:
         user_id: int,
         repo: str,
         default_branch: str,
+        local_repo_path: str,
         attachments: tuple[IncomingAttachment, ...],
     ) -> tuple[str, IssueDraft]:
         context = self.repository_context.collect(
-            repo=repo, branch=default_branch, request_text=request_text
+            repo=repo,
+            branch=default_branch,
+            request_text=request_text,
+            source_path=local_repo_path,
         )
         raw = self.llm.chat_json(
             SYSTEM_PROMPT,
@@ -100,6 +104,7 @@ class IssuePlanner:
         record: dict,
         feedback_history: list[str],
         new_feedback: str,
+        local_repo_path: str,
     ) -> IssueDraft:
         search_text = "\n".join(
             [str(record["request_text"]), *feedback_history, new_feedback]
@@ -108,6 +113,7 @@ class IssuePlanner:
             repo=str(record["repo"]),
             branch=str(record["default_branch"]),
             request_text=search_text,
+            source_path=local_repo_path,
         )
         raw = self.llm.chat_json(
             SYSTEM_PROMPT,

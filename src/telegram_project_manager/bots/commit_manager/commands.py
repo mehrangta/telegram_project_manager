@@ -5,6 +5,10 @@ from telegram_project_manager.bots.commit_manager.planner import CommitPlanner
 from telegram_project_manager.bots.commit_manager.schemas import PlanValidationError, validate_repo
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
+from telegram_project_manager.integrations.git.local_repository import (
+    LocalRepositoryError,
+    LocalRepositoryService,
+)
 from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, normalize_config_value
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, memory_session_id
@@ -15,12 +19,20 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class CommitManager:
-    def __init__(self, db: Database, llm: OpenAICompatibleClient, gh: GhRunner, executor: GhCommitExecutor) -> None:
+    def __init__(
+        self,
+        db: Database,
+        llm: OpenAICompatibleClient,
+        gh: GhRunner,
+        executor: GhCommitExecutor,
+        repositories: LocalRepositoryService,
+    ) -> None:
         self.db = db
         self.permissions = PermissionService(db)
         self.gh = gh
         self.planner = CommitPlanner(db, llm)
         self.execution = CommitExecutionService(db, executor)
+        self.repositories = repositories
 
     async def handle(self, message: IncomingMessage) -> str | None:
         text = message.text.strip()
@@ -58,6 +70,7 @@ Commands:
 /status
 /repo allow owner/repository
 /repo set owner/repository
+/repo local set <absolute-path>
 /repo show
 /commit <request>
 /issue <prompt> (text or photo/album caption)
@@ -89,6 +102,7 @@ Commands:
                     f"GitHub auth: {gh_line}",
                     f"Active repo: {chat.get('active_repo') or 'not set'}",
                     f"Default branch: {chat.get('default_branch') or 'main'}",
+                    f"Local repo: {chat.get('local_repo_path') or 'not set'}",
                     f"Admins: {', '.join(admins) if admins else 'none'}",
                     f"OpenAI model: {self.db.get_setting('openai_model', 'not set')}",
                     f"Codex SDK auth: {'configured' if self.db.has_secret('codex_api_key') else 'not configured'}",
@@ -98,10 +112,9 @@ Commands:
         )
 
     def repo(self, message: IncomingMessage, rest: str) -> str:
-        parts = rest.split()
+        parts = rest.split(maxsplit=2)
         if not parts or parts[0] == "show":
-            chat = self.db.get_chat_settings(message.chat_id)
-            return f"Active repo: {chat.get('active_repo') or 'not set'}\nDefault branch: {chat.get('default_branch') or 'main'}"
+            return self._repo_summary(message.chat_id)
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -115,7 +128,50 @@ Commands:
         if action == "clear":
             self.db.set_chat_repo(message.chat_id, None, message.user_id)
             return "Active repo cleared for this chat."
-        return "Usage: /repo show | /repo allow owner/repository | /repo set owner/repository | /repo clear"
+        if action == "local":
+            if len(parts) >= 2 and parts[1] == "clear":
+                self.db.set_chat_local_repo(message.chat_id, None, message.user_id)
+                return "Local repository cache cleared for this chat."
+            if len(parts) == 3 and parts[1] == "set":
+                return self._set_local_repo(message, parts[2])
+        return (
+            "Usage: /repo show | /repo allow owner/repository | /repo set owner/repository | "
+            "/repo clear | /repo local set <absolute-path> | /repo local clear"
+        )
+
+    def _repo_summary(self, chat_id: int) -> str:
+        chat = self.db.get_chat_settings(chat_id)
+        repo = str(chat.get("active_repo") or "")
+        path = str(chat.get("local_repo_path") or "")
+        if not path:
+            cache = "not set"
+        elif not repo:
+            cache = f"{path} (active repo not set)"
+        else:
+            try:
+                resolved = self.repositories.validate(path, repo)
+                cache = f"{resolved} (ok)"
+            except LocalRepositoryError as exc:
+                cache = f"{path} (invalid: {exc})"
+        return "\n".join(
+            [
+                f"Active repo: {repo or 'not set'}",
+                f"Default branch: {chat.get('default_branch') or 'main'}",
+                f"Local repo: {cache}",
+            ]
+        )
+
+    def _set_local_repo(self, message: IncomingMessage, path: str) -> str:
+        chat = self.db.get_chat_settings(message.chat_id)
+        repo = str(chat.get("active_repo") or "")
+        if not repo:
+            return "Set the active repo before configuring its local cache."
+        try:
+            resolved = self.repositories.validate(path, repo)
+        except LocalRepositoryError as exc:
+            return f"Local repository cache not set.\nReason: {exc}"
+        self.db.set_chat_local_repo(message.chat_id, str(resolved), message.user_id)
+        return f"Local repository cache set: {resolved}"
 
     def _allow_repo(self, repo: str, user_id: int) -> str:
         try:

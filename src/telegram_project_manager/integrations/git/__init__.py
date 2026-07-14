@@ -1,0 +1,1 @@
+"""Local Git repository integration."""

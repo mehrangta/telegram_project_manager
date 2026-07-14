@@ -47,6 +47,7 @@ class Database:
                     telegram_chat_id INTEGER PRIMARY KEY,
                     active_repo TEXT,
                     default_branch TEXT NOT NULL DEFAULT 'main',
+                    local_repo_path TEXT,
                     updated_by_user_id INTEGER,
                     updated_at INTEGER NOT NULL
                 );
@@ -162,6 +163,7 @@ class Database:
                     base_sha TEXT,
                     target_branch TEXT NOT NULL,
                     workspace_path TEXT NOT NULL,
+                    source_repo_path TEXT,
                     status TEXT NOT NULL,
                     resume_phase TEXT NOT NULL,
                     skip_plan INTEGER NOT NULL DEFAULT 0,
@@ -198,6 +200,19 @@ class Database:
                 ON code_job_events (job_id, id);
                 """
             )
+            self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
+            self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def upsert_user(self, telegram_user_id: int, username: str, role: str) -> None:
         now = int(time.time())
@@ -345,7 +360,29 @@ class Database:
             row = conn.execute("SELECT * FROM chat_settings WHERE telegram_chat_id = ?", (chat_id,)).fetchone()
         if row:
             return dict(row)
-        return {"telegram_chat_id": chat_id, "active_repo": None, "default_branch": "main"}
+        return {
+            "telegram_chat_id": chat_id,
+            "active_repo": None,
+            "default_branch": "main",
+            "local_repo_path": None,
+        }
+
+    def set_chat_local_repo(self, chat_id: int, path: str | None, user_id: int) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_settings (
+                    telegram_chat_id, active_repo, default_branch, local_repo_path,
+                    updated_by_user_id, updated_at
+                ) VALUES (?, NULL, 'main', ?, ?, ?)
+                ON CONFLICT(telegram_chat_id) DO UPDATE SET
+                    local_repo_path = excluded.local_repo_path,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, path, user_id, now),
+            )
 
     def allow_repo(self, repo: str, user_id: int) -> None:
         now = int(time.time())
@@ -649,9 +686,9 @@ class Database:
                 INSERT INTO code_jobs (
                     id, telegram_chat_id, telegram_user_id, telegram_thread_id,
                     repo, issue_number, issue_title, issue_url, issue_context_json,
-                    base_branch, target_branch, workspace_path, status, resume_phase,
+                    base_branch, target_branch, workspace_path, source_repo_path, status, resume_phase,
                     skip_plan, feedback_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
                 """,
                 (
                     job["id"],
@@ -666,6 +703,7 @@ class Database:
                     job["base_branch"],
                     job["target_branch"],
                     job["workspace_path"],
+                    job["source_repo_path"],
                     job["status"],
                     job["resume_phase"],
                     int(bool(job.get("skip_plan"))),
@@ -732,6 +770,7 @@ class Database:
         allowed_columns = {
             "telegram_message_id",
             "base_sha",
+            "source_repo_path",
             "status",
             "resume_phase",
             "plan_json",

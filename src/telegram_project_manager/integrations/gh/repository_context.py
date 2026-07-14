@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import base64
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
+from telegram_project_manager.integrations.git.local_repository import (
+    LocalRepositoryError,
+    LocalRepositoryService,
+)
 
 
 MAX_CONTEXT_BYTES = 24_000
@@ -166,28 +168,43 @@ class RepositoryContext:
 
 
 class RepositoryContextService:
-    def __init__(self, gh: GhRunner) -> None:
-        self.gh = gh
+    def __init__(self, repositories: LocalRepositoryService) -> None:
+        self.repositories = repositories
 
-    def collect(self, *, repo: str, branch: str, request_text: str) -> RepositoryContext:
+    def collect(
+        self,
+        *,
+        repo: str,
+        branch: str,
+        request_text: str,
+        source_path: str,
+    ) -> RepositoryContext:
         try:
-            return self._collect(repo=repo, branch=branch, request_text=request_text)
+            return self._collect(
+                repo=repo,
+                branch=branch,
+                request_text=request_text,
+                source_path=source_path,
+            )
         except RepositoryContextError:
             raise
-        except (GhError, KeyError, TypeError, ValueError) as exc:
+        except (LocalRepositoryError, KeyError, TypeError, UnicodeError, ValueError) as exc:
             raise RepositoryContextError(f"repository context retrieval failed: {exc}") from exc
 
-    def _collect(self, *, repo: str, branch: str, request_text: str) -> RepositoryContext:
-        ref = self.gh.api_json(f"repos/{repo}/git/ref/heads/{branch}")
-        commit_sha = str(ref["object"]["sha"])
-        commit = self.gh.api_json(f"repos/{repo}/git/commits/{commit_sha}")
-        tree_sha = str(commit["tree"]["sha"])
-        tree = self.gh.api_json(f"repos/{repo}/git/trees/{tree_sha}?recursive=1")
-        if tree.get("truncated"):
-            raise RepositoryContextError("repository tree is truncated; refusing incomplete context")
-        raw_entries = tree.get("tree")
-        if not isinstance(raw_entries, list):
-            raise RepositoryContextError("repository tree response is invalid")
+    def _collect(
+        self,
+        *,
+        repo: str,
+        branch: str,
+        request_text: str,
+        source_path: str,
+    ) -> RepositoryContext:
+        source = self.repositories.validate(source_path, repo)
+        _, commit_sha = self.repositories.fetch(source, branch)
+        raw_entries = [
+            {"path": item.path, "type": item.type, "sha": item.sha, "size": item.size}
+            for item in self.repositories.tree(source, commit_sha)
+        ]
 
         entries = [item for item in raw_entries if self._eligible_blob(item)]
         docs = sorted((item for item in entries if self._is_documentation(item)), key=self._doc_sort_key)
@@ -212,7 +229,7 @@ class RepositoryContextService:
             available = self._available_content_bytes(context, tuple(files), path, reason)
             if available < 256:
                 break
-            content = self._read_blob(repo, sha, path, min(MAX_FILE_CONTEXT_BYTES, available))
+            content = self._read_blob(source, sha, path, min(MAX_FILE_CONTEXT_BYTES, available))
             files.append(RepositoryContextFile(path=path, content=content, selection_reason=reason))
             if reason == "request-relevant source":
                 source_files += 1
@@ -313,15 +330,11 @@ class RepositoryContextService:
         wrapper = f"\n\n--- FILE: {path} ({reason}) ---\n\n--- END FILE: {path} ---"
         return MAX_CONTEXT_BYTES - len(current.encode("utf-8")) - len(wrapper.encode("utf-8"))
 
-    def _read_blob(self, repo: str, sha: str, path: str, limit: int) -> str:
-        blob = self.gh.api_json(f"repos/{repo}/git/blobs/{sha}")
-        if blob.get("encoding") != "base64" or not isinstance(blob.get("content"), str):
-            raise RepositoryContextError(f"selected file has unsupported encoding: {path}")
-        encoded = "".join(str(blob["content"]).split())
+    def _read_blob(self, source_path: Any, sha: str, path: str, limit: int) -> str:
         try:
-            content_bytes = base64.b64decode(encoded, validate=True)
+            content_bytes = self.repositories.read_blob(source_path, sha)
             content = content_bytes.decode("utf-8", errors="strict")
-        except (ValueError, UnicodeDecodeError) as exc:
+        except (LocalRepositoryError, UnicodeDecodeError) as exc:
             raise RepositoryContextError(f"selected file is not valid UTF-8 text: {path}") from exc
         if "\x00" in content:
             raise RepositoryContextError(f"selected file contains binary data: {path}")

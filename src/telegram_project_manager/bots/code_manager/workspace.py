@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
+from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError, LocalRepositoryService
 
 
 SENSITIVE_PATTERNS = (
@@ -25,8 +26,7 @@ MAX_CHANGED_FILES = 100
 MAX_CHANGED_BYTES = 5_000_000
 
 
-class WorkspaceError(RuntimeError):
-    pass
+WorkspaceError = LocalRepositoryError
 
 
 @dataclass(frozen=True)
@@ -67,39 +67,73 @@ class CommandRunner:
 
 
 class GitWorkspaceService:
-    def __init__(self, commands: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        commands: CommandRunner | None = None,
+        repositories: LocalRepositoryService | None = None,
+    ) -> None:
         self.commands = commands or CommandRunner()
+        self.repositories = repositories or LocalRepositoryService()
 
-    def prepare(self, *, repo: str, base_branch: str, target_branch: str, path: Path) -> str:
-        if path.exists():
-            shutil.rmtree(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.commands.run(
-            ["gh", "repo", "clone", repo, str(path), "--", "--depth", "1", "--branch", base_branch],
-            timeout=900,
-        )
-        self.commands.run(["git", "config", "user.name", "telegram-project-manager[bot]"], cwd=path)
-        self.commands.run(
-            ["git", "config", "user.email", "telegram-project-manager[bot]@users.noreply.github.com"],
-            cwd=path,
-        )
-        self.commands.run(["git", "switch", "-c", target_branch], cwd=path)
-        return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
+    def validate_source(self, *, source_path: str, repo: str) -> str:
+        return str(self.repositories.validate(source_path, repo))
 
-    def checkout_existing(self, *, repo: str, branch: str, path: Path) -> str:
-        if path.exists():
-            shutil.rmtree(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.commands.run(
-            ["gh", "repo", "clone", repo, str(path), "--", "--depth", "20", "--branch", branch],
-            timeout=900,
-        )
-        self.commands.run(["git", "config", "user.name", "telegram-project-manager[bot]"], cwd=path)
-        self.commands.run(
-            ["git", "config", "user.email", "telegram-project-manager[bot]@users.noreply.github.com"],
-            cwd=path,
-        )
-        return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
+    def prepare(
+        self,
+        *,
+        source_path: str,
+        repo: str,
+        base_branch: str,
+        target_branch: str,
+        path: Path,
+    ) -> str:
+        source = self.repositories.validate(source_path, repo)
+        _, base_sha = self.repositories.fetch(source, base_branch)
+        with self.repositories.lock_for(source):
+            self._remove_existing(source, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.commands.run(["git", "-C", str(source), "worktree", "prune"])
+            try:
+                self.commands.run(["git", "-C", str(source), "branch", "-D", target_branch])
+            except WorkspaceError:
+                pass
+            self.commands.run(
+                [
+                    "git", "-C", str(source), "worktree", "add", "-b", target_branch,
+                    str(path), f"refs/remotes/origin/{base_branch}",
+                ],
+                timeout=900,
+            )
+            self._configure_identity(path)
+        return base_sha
+
+    def checkout_existing(
+        self,
+        *,
+        source_path: str,
+        repo: str,
+        branch: str,
+        path: Path,
+    ) -> str:
+        source = self.repositories.validate(source_path, repo)
+        _, remote_sha = self.repositories.fetch(source, branch)
+        with self.repositories.lock_for(source):
+            self._remove_existing(source, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.commands.run(["git", "-C", str(source), "worktree", "prune"])
+            try:
+                self.commands.run(
+                    ["git", "-C", str(source), "show-ref", "--verify", f"refs/heads/{branch}"]
+                )
+                add_args = ["git", "-C", str(source), "worktree", "add", str(path), branch]
+            except WorkspaceError:
+                add_args = [
+                    "git", "-C", str(source), "worktree", "add", "-b", branch,
+                    str(path), f"refs/remotes/origin/{branch}",
+                ]
+            self.commands.run(add_args, timeout=900)
+            self._configure_identity(path)
+        return remote_sha
 
     def refresh_base(self, path: Path, base_branch: str) -> str:
         self.commands.run(["git", "fetch", "origin", base_branch], cwd=path, timeout=600)
@@ -187,10 +221,31 @@ class GitWorkspaceService:
         self.commands.run(push, cwd=path, timeout=900)
         return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
 
-    @staticmethod
-    def cleanup(path: Path) -> None:
-        if path.exists():
-            shutil.rmtree(path)
+    def cleanup(self, *, source_path: str, path: Path, target_branch: str) -> None:
+        source = Path(source_path).expanduser().resolve()
+        with self.repositories.lock_for(source):
+            self._remove_existing(source, path)
+            try:
+                self.commands.run(["git", "-C", str(source), "worktree", "prune"])
+                self.commands.run(["git", "-C", str(source), "branch", "-D", target_branch])
+            except WorkspaceError:
+                pass
+
+    def _remove_existing(self, source: Path, path: Path) -> None:
+        try:
+            self.commands.run(
+                ["git", "-C", str(source), "worktree", "remove", "--force", str(path)]
+            )
+        except WorkspaceError:
+            if path.exists():
+                shutil.rmtree(path)
+
+    def _configure_identity(self, path: Path) -> None:
+        self.commands.run(["git", "config", "user.name", "telegram-project-manager[bot]"], cwd=path)
+        self.commands.run(
+            ["git", "config", "user.email", "telegram-project-manager[bot]@users.noreply.github.com"],
+            cwd=path,
+        )
 
 
 class CodeGitHubService:

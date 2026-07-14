@@ -74,6 +74,11 @@ class FakeWorkspaces:
         self.cleaned = []
         self.removed_plans = []
 
+    def validate_source(self, *, source_path, repo):
+        if not source_path:
+            raise WorkspaceError("missing local repository")
+        return source_path
+
     def prepare(self, *, path, **kwargs):
         (path / ".git").mkdir(parents=True)
         return "base-sha"
@@ -105,7 +110,7 @@ class FakeWorkspaces:
         self.code_commits.append(kwargs)
         return "code-sha"
 
-    def cleanup(self, path):
+    def cleanup(self, *, path, **kwargs):
         self.cleaned.append(path)
 
 
@@ -168,7 +173,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_plan_approval_runs_code_and_marks_draft_pr_ready(self):
-        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", skip_plan=False)
+        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False)
         planned = await wait_for_status(self.db, job_id, "awaiting_approval")
         self.assertEqual(planned["plan_json"]["summary"], PLAN["summary"])
         self.assertEqual(planned["pull_request_number"], 42)
@@ -196,7 +201,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("Implementation ready for review" in item[2] for item in self.bot.edited))
 
     async def test_skip_plan_codes_immediately_and_creates_pr(self):
-        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=None, issue=self.issue, base_branch="main", skip_plan=True)
+        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=None, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
         ready = await wait_for_status(self.db, job_id, "ready")
         self.assertIsNone(ready["plan_json"])
         self.assertEqual(len(self.codex.calls), 1)

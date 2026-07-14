@@ -13,57 +13,58 @@ from telegram_project_manager.integrations.gh.repository_context import (
     RepositoryContextFile,
     RepositoryContextService,
 )
+from telegram_project_manager.integrations.git.local_repository import (
+    GitTreeEntry,
+    LocalRepositoryError,
+)
 from telegram_project_manager.platform.storage.db import Database
 
 
-def encoded_blob(value: str) -> dict[str, str]:
-    return {
-        "encoding": "base64",
-        "content": base64.b64encode(value.encode("utf-8")).decode("ascii"),
-    }
-
-
-class FakeContextGh:
-    def __init__(self, *, truncated: bool = False, invalid_path: str = "") -> None:
-        self.truncated = truncated
+class FakeLocalRepositories:
+    def __init__(self, *, tree_error: bool = False, invalid_path: str = "") -> None:
+        self.tree_error = tree_error
         self.invalid_path = invalid_path
-        self.calls: list[str] = []
+        self.calls: list[tuple] = []
         self.entries = [
-            {"path": "README.md", "type": "blob", "sha": "readme", "size": 30},
-            {"path": "pyproject.toml", "type": "blob", "sha": "manifest", "size": 30},
-            {"path": "src/app.py", "type": "blob", "sha": "app", "size": 30},
-            {"path": "src/button_handler.py", "type": "blob", "sha": "button", "size": 30},
-            {"path": "node_modules/ignored.js", "type": "blob", "sha": "ignored", "size": 30},
-            {"path": ".env", "type": "blob", "sha": "secret", "size": 30},
+            GitTreeEntry("README.md", "a" * 40, 30, "blob"),
+            GitTreeEntry("pyproject.toml", "b" * 40, 30, "blob"),
+            GitTreeEntry("src/app.py", "c" * 40, 30, "blob"),
+            GitTreeEntry("src/button_handler.py", "d" * 40, 30, "blob"),
+            GitTreeEntry("node_modules/ignored.js", "e" * 40, 30, "blob"),
+            GitTreeEntry(".env", "f" * 40, 30, "blob"),
         ]
         self.blobs = {
-            "readme": encoded_blob("Project documentation"),
-            "manifest": encoded_blob("[project]\nname='demo'"),
-            "app": encoded_blob("def main():\n    return run()"),
-            "button": encoded_blob("def save_button():\n    return False"),
+            "a" * 40: b"Project documentation",
+            "b" * 40: b"[project]\nname='demo'",
+            "c" * 40: b"def main():\n    return run()",
+            "d" * 40: b"def save_button():\n    return False",
         }
 
-    def api_json(self, endpoint, method="GET", body=None):
-        self.calls.append(endpoint)
-        if endpoint.endswith("/git/ref/heads/main"):
-            return {"object": {"sha": "commit-sha"}}
-        if endpoint.endswith("/git/commits/commit-sha"):
-            return {"tree": {"sha": "tree-sha"}}
-        if endpoint.endswith("/git/trees/tree-sha?recursive=1"):
-            return {"tree": self.entries, "truncated": self.truncated}
-        sha = endpoint.rsplit("/", 1)[-1]
+    def validate(self, source_path, repo):
+        self.calls.append(("validate", source_path, repo))
+        return Path(source_path)
+
+    def fetch(self, source_path, branch):
+        self.calls.append(("fetch", str(source_path), branch))
+        return Path(source_path), "commit-sha"
+
+    def tree(self, source_path, commit):
+        if self.tree_error:
+            raise LocalRepositoryError("tree unavailable")
+        return self.entries
+
+    def read_blob(self, source_path, sha):
         if sha == self.invalid_path:
-            return {"encoding": "base64", "content": "not base64!"}
-        if sha in self.blobs:
-            return self.blobs[sha]
-        raise AssertionError(endpoint)
+            return b"\xff"
+        return self.blobs[sha]
 
 
 class RepositoryContextTests(unittest.TestCase):
     def test_collects_bounded_docs_and_request_relevant_source(self):
-        gh = FakeContextGh()
-        context = RepositoryContextService(gh).collect(
-            repo="owner/repo", branch="main", request_text="save button does nothing"
+        repositories = FakeLocalRepositories()
+        context = RepositoryContextService(repositories).collect(
+            repo="owner/repo", branch="main", request_text="save button does nothing",
+            source_path="/cache/repo.git",
         )
         self.assertEqual(context.commit_sha, "commit-sha")
         self.assertIn("README.md", context.paths)
@@ -72,16 +73,18 @@ class RepositoryContextTests(unittest.TestCase):
         self.assertNotIn(".env", context.paths)
         self.assertLessEqual(len(context.to_prompt().encode("utf-8")), MAX_CONTEXT_BYTES)
 
-    def test_rejects_truncated_tree(self):
-        with self.assertRaisesRegex(RepositoryContextError, "truncated"):
-            RepositoryContextService(FakeContextGh(truncated=True)).collect(
-                repo="owner/repo", branch="main", request_text="button"
+    def test_rejects_local_tree_failure(self):
+        with self.assertRaisesRegex(RepositoryContextError, "tree unavailable"):
+            RepositoryContextService(FakeLocalRepositories(tree_error=True)).collect(
+                repo="owner/repo", branch="main", request_text="button",
+                source_path="/cache/repo.git",
             )
 
     def test_rejects_any_selected_file_read_failure(self):
         with self.assertRaisesRegex(RepositoryContextError, "not valid UTF-8"):
-            RepositoryContextService(FakeContextGh(invalid_path="button")).collect(
-                repo="owner/repo", branch="main", request_text="button"
+            RepositoryContextService(FakeLocalRepositories(invalid_path="d" * 40)).collect(
+                repo="owner/repo", branch="main", request_text="button",
+                source_path="/cache/repo.git",
             )
 
     def test_prompt_escapes_repository_evidence_delimiters(self):
@@ -167,6 +170,7 @@ class IssuePlannerContextTests(unittest.TestCase):
                 user_id=10,
                 repo="owner/repo",
                 default_branch="main",
+                local_repo_path="/cache/repo.git",
                 attachments=(),
             )
             self.assertEqual(issue.context_commit_sha, "abcdef1234567890")
@@ -201,6 +205,7 @@ class IssuePlannerContextTests(unittest.TestCase):
                 },
                 feedback_history=["focus on save flow"],
                 new_feedback="make the title shorter",
+                local_repo_path="/cache/repo.git",
             )
 
             self.assertEqual(issue.context_commit_sha, "abcdef1234567890")

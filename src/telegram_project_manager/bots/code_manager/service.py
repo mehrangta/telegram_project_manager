@@ -102,8 +102,14 @@ class CodeJobService:
         thread_id: int | None,
         issue: IssueContext,
         base_branch: str,
+        source_path: str,
         skip_plan: bool,
     ) -> str:
+        resolved_source = await asyncio.to_thread(
+            self.workspaces.validate_source,
+            source_path=source_path,
+            repo=issue.repo,
+        )
         if self.db.count_queued_code_jobs() >= MAX_QUEUED_JOBS:
             raise ValueError("Code job queue is full. Retry after another job finishes.")
         active = self.db.get_active_code_job(issue.repo, issue.number)
@@ -128,6 +134,7 @@ class CodeJobService:
                 "base_branch": base_branch,
                 "target_branch": target_branch,
                 "workspace_path": str(workspace),
+                "source_repo_path": resolved_source,
                 "status": status,
                 "resume_phase": phase,
                 "skip_plan": skip_plan,
@@ -214,7 +221,13 @@ class CodeJobService:
             number=int(job["pull_request_number"]) if job.get("pull_request_number") else None,
             branch=str(job["target_branch"]),
         )
-        await asyncio.to_thread(self.workspaces.cleanup, Path(str(job["workspace_path"])))
+        source = self._ensure_source(job)
+        await asyncio.to_thread(
+            self.workspaces.cleanup,
+            source_path=source,
+            path=Path(str(job["workspace_path"])),
+            target_branch=str(job["target_branch"]),
+        )
         self.db.audit("code.discard", "ok", {}, job_id)
         await self.reporter.refresh(job_id, force=True)
 
@@ -257,9 +270,11 @@ class CodeJobService:
             return
         await self.reporter.refresh(job_id, force=True)
         path = Path(str(job["workspace_path"]))
+        source = self._ensure_source(job)
         if editing and not (path / ".git").exists():
             await asyncio.to_thread(
                 self.workspaces.checkout_existing,
+                source_path=source,
                 repo=str(job["repo"]),
                 branch=str(job["target_branch"]),
                 path=path,
@@ -273,6 +288,7 @@ class CodeJobService:
         elif not editing:
             base_sha = await asyncio.to_thread(
                 self.workspaces.prepare,
+                source_path=source,
                 repo=str(job["repo"]),
                 base_branch=str(job["base_branch"]),
                 target_branch=str(job["target_branch"]),
@@ -372,10 +388,12 @@ class CodeJobService:
             return
         await self.reporter.refresh(job_id, force=True)
         path = Path(str(job["workspace_path"]))
+        source = self._ensure_source(job)
         if not (path / ".git").exists():
             if job.get("pull_request_number"):
                 await asyncio.to_thread(
                     self.workspaces.checkout_existing,
+                    source_path=source,
                     repo=str(job["repo"]),
                     branch=str(job["target_branch"]),
                     path=path,
@@ -383,15 +401,17 @@ class CodeJobService:
             else:
                 base_sha = await asyncio.to_thread(
                     self.workspaces.prepare,
+                    source_path=source,
                     repo=str(job["repo"]),
                     base_branch=str(job["base_branch"]),
                     target_branch=str(job["target_branch"]),
                     path=path,
                 )
                 self.db.update_code_job(job_id, {"base_sha": base_sha})
-        if job.get("pull_request_number") and not await asyncio.to_thread(self.workspaces.is_dirty, path):
+        if not await asyncio.to_thread(self.workspaces.is_dirty, path):
             base_sha = await asyncio.to_thread(self.workspaces.refresh_base, path, str(job["base_branch"]))
-            await asyncio.to_thread(self.workspaces.push_rebased_branch, path)
+            if job.get("pull_request_number"):
+                await asyncio.to_thread(self.workspaces.push_rebased_branch, path)
             self.db.update_code_job(job_id, {"base_sha": base_sha})
         if self._discarded(job_id):
             return
@@ -470,7 +490,12 @@ class CodeJobService:
         )
         self.db.audit("code.ready", "ok", {"pr": pr_number, "files": len(files)}, job_id)
         await self.reporter.refresh(job_id, force=True)
-        await asyncio.to_thread(self.workspaces.cleanup, path)
+        await asyncio.to_thread(
+            self.workspaces.cleanup,
+            source_path=source,
+            path=path,
+            target_branch=str(job["target_branch"]),
+        )
 
     async def _fail(self, job_id: str, error: str, phase: str) -> None:
         safe_error = " ".join(error.split())[:1000]
@@ -514,6 +539,16 @@ class CodeJobService:
         if not job:
             raise ValueError("Code job not found.")
         return job
+
+    def _ensure_source(self, job: dict[str, Any]) -> str:
+        source = str(job.get("source_repo_path") or "")
+        if not source:
+            chat = self.db.get_chat_settings(int(job["telegram_chat_id"]))
+            source = str(chat.get("local_repo_path") or "")
+        resolved = self.workspaces.validate_source(source_path=source, repo=str(job["repo"]))
+        if resolved != job.get("source_repo_path"):
+            self.db.update_code_job(str(job["id"]), {"source_repo_path": resolved})
+        return resolved
 
 
 def _plan_pr_body(job: dict[str, Any], markdown: str) -> str:

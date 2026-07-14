@@ -73,6 +73,7 @@ class CodeManager:
                 thread_id=message.thread_id,
                 issue=issue,
                 base_branch=str(chat.get("default_branch") or "main"),
+                source_path=str(chat.get("local_repo_path") or ""),
                 skip_plan=skip_plan,
             )
         except (ValueError, WorkspaceError, GhError) as exc:

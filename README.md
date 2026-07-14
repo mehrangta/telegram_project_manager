@@ -74,6 +74,8 @@ allowlist is global.
 /repo disallow owner/repository Disallow a repository (admin)
 /repo set owner/repository      Set this chat's repository (admin)
 /repo clear                     Clear this chat's repository (admin)
+/repo local set <absolute-path> Set this chat's service-owned Git cache (admin)
+/repo local clear               Clear this chat's Git cache setting (admin)
 /branch <branch_name>           Set this chat's default branch (admin)
 ```
 
@@ -89,9 +91,10 @@ Generated plans include current actual behavior and expected behavior after the 
 
 ### Issue workflow
 
-Issue drafts use the active repository for the current chat. Before drafting, the
-bot reads a bounded, read-only snapshot of project documentation and relevant
-source files at the configured branch's current commit. The LLM improves the
+Issue drafts use the active repository and local Git cache for the current chat.
+Before drafting, the bot fetches branch deltas and reads a bounded, read-only
+snapshot of project documentation and relevant source files at the fetched
+commit. The LLM improves the
 prompt into a title, summary, actual behavior, expected behavior, codebase
 context, relevant files, and evidence-backed possible causes. Context retrieval
 must succeed before a draft is created. Images are embedded from an isolated
@@ -113,9 +116,10 @@ edit keeps the same draft ID, records a revision, and renews the one-hour expiry
 
 ### Code workflow
 
-`/code` operates on an existing, open GitHub issue in an allowed repository. By
-default, Codex clones the configured branch, inspects the repository in a
-read-only sandbox, and publishes its structured plan as the first commit and
+`/code` operates on an existing, open GitHub issue in an allowed repository with
+a configured local Git cache. The bot fetches only new Git objects, creates an
+isolated linked worktree for the job branch, and lets Codex inspect it in a
+read-only sandbox before publishing its structured plan as the first commit and
 body of a draft pull request. The Telegram progress message updates as Codex
 changes phases, runs commands, and touches files; raw model reasoning is never
 shown.
@@ -147,7 +151,37 @@ as interrupted so an admin can explicitly retry or discard them.
 The bot blocks changes to `.env*`, private-key files, and
 `.github/workflows/*`, and rejects more than 100 changed files or 5 MB of
 changes. GitHub CLI credentials must be configured for the service account with
-permission to clone, push branches, and manage pull requests.
+permission to fetch, push branches, and manage pull requests.
+
+### Local repository cache
+
+The configured cache must be an absolute path to a normal or bare Git repository
+that is readable and writable by the bot service account. Its literal `origin`
+URL must identify the chat's active `owner/repository`. Missing, inaccessible,
+or mismatched caches fail clearly; issue and code workflows never fall back to a
+fresh clone.
+
+Seed the managed cache once from an existing root-owned checkout without
+downloading the repository again:
+
+```bash
+sudo install -d -o telegram-pm -g telegram-pm /var/lib/telegram-project-manager/repos
+sudo git clone --mirror --no-hardlinks /root/trade-router \
+  /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git
+sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
+  config remote.origin.mirror false
+sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
+  config remote.origin.url https://github.com/mehrangta/telegram-trade-router.git
+sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
+  config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+sudo chown -R telegram-pm:telegram-pm /var/lib/telegram-project-manager/repos
+```
+
+Then run in the Telegram chat:
+
+```text
+/repo local set /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git
+```
 
 ### Configuration
 
