@@ -61,6 +61,31 @@ class CommandTests(unittest.TestCase):
             self.assertIn("cache cleared", manager.repo(message, "local clear"))
             self.assertIsNone(db.get_chat_settings(20)["local_repo_path"])
 
+    def test_admin_configures_per_repo_deployment_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            db.allow_repo("owner/repo", 10)
+            db.set_chat_repo(20, "owner/repo", 10)
+            manager = object.__new__(CommitManager)
+            manager.db = db
+            manager.permissions = PermissionService(db)
+            manager.repositories = object()
+            message = IncomingMessage(20, 10, "admin", "")
+
+            self.assertIn(
+                "workflow set",
+                manager.repo(message, "deploy set owner/repo deploy.yml"),
+            )
+            self.assertEqual(db.get_repo_deploy_workflow("owner/repo"), "deploy.yml")
+            self.assertIn("Deploy workflow: deploy.yml", manager.repo(message, "show"))
+            self.assertIn(
+                "workflow cleared",
+                manager.repo(message, "deploy clear owner/repo"),
+            )
+            self.assertEqual(db.get_repo_deploy_workflow("owner/repo"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

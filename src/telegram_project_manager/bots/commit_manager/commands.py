@@ -71,11 +71,13 @@ Commands:
 /repo allow owner/repository
 /repo set owner/repository
 /repo local set <absolute-path>
+/repo deploy set owner/repository <workflow-name-or-file>
 /repo show
 /commit <request>
 /issue <prompt> (text or photo/album caption)
 /code #123 [--skip-plan]
 /code approve|edit|discard|retry|status <code_job_id>
+/deploy <code_job_id> (or reply /deploy to a code-job message)
 /confirm <plan_id>
 /cancel <plan_id>
 /config show
@@ -113,6 +115,9 @@ Commands:
         )
 
     def repo(self, message: IncomingMessage, rest: str) -> str:
+        deploy_parts = rest.split(maxsplit=3)
+        if deploy_parts and deploy_parts[0] == "deploy":
+            return self._repo_deploy(message, deploy_parts[1:])
         parts = rest.split(maxsplit=2)
         if not parts or parts[0] == "show":
             return self._repo_summary(message.chat_id)
@@ -137,7 +142,38 @@ Commands:
                 return self._set_local_repo(message, parts[2])
         return (
             "Usage: /repo show | /repo allow owner/repository | /repo set owner/repository | "
-            "/repo clear | /repo local set <absolute-path> | /repo local clear"
+            "/repo clear | /repo local set <absolute-path> | /repo local clear | "
+            "/repo deploy set owner/repository <workflow-name-or-file> | "
+            "/repo deploy clear owner/repository"
+        )
+
+    def _repo_deploy(self, message: IncomingMessage, parts: list[str]) -> str:
+        admin_error = self.permissions.require_admin(message.user_id)
+        if admin_error:
+            return admin_error
+        if len(parts) == 3 and parts[0] == "set":
+            repo, workflow = parts[1], parts[2].strip()
+            try:
+                validate_repo(repo)
+            except PlanValidationError as exc:
+                return str(exc)
+            if not self.db.is_repo_allowed(repo):
+                return "Repo is not allowed. Admin must run: /repo allow owner/repository"
+            if not workflow or len(workflow) > 256 or any(ord(char) < 32 for char in workflow):
+                return "Deployment workflow must be a non-empty name or file up to 256 characters."
+            self.db.set_repo_deploy_workflow(repo, workflow)
+            return f"Deployment workflow set for {repo}: {workflow}"
+        if len(parts) == 2 and parts[0] == "clear":
+            repo = parts[1]
+            try:
+                validate_repo(repo)
+                self.db.set_repo_deploy_workflow(repo, None)
+            except (PlanValidationError, ValueError) as exc:
+                return str(exc)
+            return f"Deployment workflow cleared for {repo}."
+        return (
+            "Usage: /repo deploy set owner/repository <workflow-name-or-file> | "
+            "/repo deploy clear owner/repository"
         )
 
     def _repo_summary(self, chat_id: int) -> str:
@@ -159,6 +195,9 @@ Commands:
                 f"Active repo: {repo or 'not set'}",
                 f"Default branch: {chat.get('default_branch') or 'main'}",
                 f"Local repo: {cache}",
+                f"Deploy workflow: {self.db.get_repo_deploy_workflow(repo) or 'not set'}"
+                if repo
+                else "Deploy workflow: not set",
             ]
         )
 

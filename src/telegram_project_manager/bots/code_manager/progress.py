@@ -78,6 +78,29 @@ class CodeProgressReporter:
             job.get("telegram_thread_id"),
         )
 
+    async def notify_deployment(self, job_id: str) -> None:
+        job = self.db.get_code_job(job_id)
+        if not job or job.get("deployment_status") not in {"succeeded", "failed"}:
+            return
+        succeeded = job["deployment_status"] == "succeeded"
+        lines = [
+            "✅ Deployment succeeded" if succeeded else "❌ Deployment failed",
+            f"Code Job ID: {job['id']}",
+            f"Repo: {job['repo']}",
+        ]
+        if job.get("deployment_merge_sha"):
+            lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
+        if job.get("deployment_run_url"):
+            lines.append(f"Deployment: {job['deployment_run_url']}")
+        if job.get("deployment_error"):
+            lines.append(f"Error: {job['deployment_error']}")
+        await asyncio.to_thread(
+            self.bot.send_message,
+            int(job["telegram_chat_id"]),
+            "\n".join(lines),
+            job.get("telegram_thread_id"),
+        )
+
     @staticmethod
     def render(job: dict[str, Any]) -> str:
         created = int(job.get("created_at") or time.time())
@@ -122,6 +145,14 @@ class CodeProgressReporter:
             attempts = int(job.get("ci_repair_attempts") or 0)
             if attempts:
                 lines.append(f"CI repair attempts: {attempts}")
+        if job.get("deployment_status"):
+            lines.append(f"Deployment: {str(job['deployment_status']).replace('_', ' ')}")
+        if job.get("deployment_merge_sha"):
+            lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
+        if job.get("deployment_run_url"):
+            lines.append(f"Deployment run: {job['deployment_run_url']}")
+        if job.get("deployment_error"):
+            lines.extend(["", f"Deployment error: {job['deployment_error']}"])
         if job.get("error"):
             lines.extend(["", f"Error: {job['error']}"])
         status = str(job["status"])

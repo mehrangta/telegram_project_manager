@@ -66,6 +66,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS allowed_repos (
                     repo TEXT PRIMARY KEY,
+                    deploy_workflow TEXT,
                     added_by_user_id INTEGER,
                     created_at INTEGER NOT NULL
                 );
@@ -179,6 +180,12 @@ class Database:
                     ci_wait_started_at INTEGER,
                     ci_repair_attempts INTEGER NOT NULL DEFAULT 0,
                     ci_checks_json TEXT,
+                    deployment_status TEXT,
+                    deployment_merge_sha TEXT,
+                    deployment_run_id INTEGER,
+                    deployment_run_url TEXT,
+                    deployment_started_at INTEGER,
+                    deployment_error TEXT,
                     error TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -205,6 +212,7 @@ class Database:
                 """
             )
             self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
+            self._ensure_column(conn, "allowed_repos", "deploy_workflow", "TEXT")
             self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
             self._ensure_column(conn, "code_jobs", "ci_head_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "ci_wait_started_at", "INTEGER")
@@ -212,6 +220,12 @@ class Database:
                 conn, "code_jobs", "ci_repair_attempts", "INTEGER NOT NULL DEFAULT 0"
             )
             self._ensure_column(conn, "code_jobs", "ci_checks_json", "TEXT")
+            self._ensure_column(conn, "code_jobs", "deployment_status", "TEXT")
+            self._ensure_column(conn, "code_jobs", "deployment_merge_sha", "TEXT")
+            self._ensure_column(conn, "code_jobs", "deployment_run_id", "INTEGER")
+            self._ensure_column(conn, "code_jobs", "deployment_run_url", "TEXT")
+            self._ensure_column(conn, "code_jobs", "deployment_started_at", "INTEGER")
+            self._ensure_column(conn, "code_jobs", "deployment_error", "TEXT")
 
     @staticmethod
     def _ensure_column(
@@ -419,6 +433,22 @@ class Database:
         with self.session() as conn:
             rows = conn.execute("SELECT repo FROM allowed_repos ORDER BY repo").fetchall()
         return [str(row["repo"]) for row in rows]
+
+    def set_repo_deploy_workflow(self, repo: str, workflow: str | None) -> None:
+        with self.session() as conn:
+            cursor = conn.execute(
+                "UPDATE allowed_repos SET deploy_workflow = ? WHERE repo = ?",
+                (workflow, repo),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("Repo is not allowed.")
+
+    def get_repo_deploy_workflow(self, repo: str) -> str:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT deploy_workflow FROM allowed_repos WHERE repo = ?", (repo,)
+            ).fetchone()
+        return str(row["deploy_workflow"] or "") if row else ""
 
     def create_plan(self, plan: dict[str, Any]) -> None:
         with self.session() as conn:
@@ -795,6 +825,12 @@ class Database:
             "ci_wait_started_at",
             "ci_repair_attempts",
             "ci_checks_json",
+            "deployment_status",
+            "deployment_merge_sha",
+            "deployment_run_id",
+            "deployment_run_url",
+            "deployment_started_at",
+            "deployment_error",
             "error",
         }
         unknown = set(values) - allowed_columns
@@ -818,6 +854,34 @@ class Database:
         with self.session() as conn:
             cursor = conn.execute(query, params)
         return cursor.rowcount == 1
+
+    def start_code_job_deployment(self, job_id: str) -> bool:
+        now = int(time.time())
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE code_jobs
+                SET deployment_status = 'queued', deployment_error = NULL,
+                    deployment_run_id = NULL, deployment_run_url = NULL,
+                    deployment_started_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'ready'
+                  AND (deployment_status IS NULL OR deployment_status = 'failed')
+                """,
+                (now, now, job_id),
+            )
+        return cursor.rowcount == 1
+
+    def list_active_deployments(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM code_jobs
+                WHERE deployment_status IN ('queued', 'merging', 'waiting_workflow', 'deploying')
+                ORDER BY updated_at ASC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [job for row in rows if (job := self._decode_code_job(row)) is not None]
 
     def add_code_job_event(self, job_id: str, event_type: str, summary: dict[str, Any]) -> None:
         with self.session() as conn:

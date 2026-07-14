@@ -154,6 +154,8 @@ a workspace-write sandbox, must report a successful validation command, removes
 /code discard <c-job_id>           Close the draft PR and delete its branch
 /code retry <c-job_id>             Retry a failed or interrupted phase
 /code status [c-job_id]            Show one job or recent jobs in this chat
+/deploy c-job_id                   Squash-merge a ready PR and watch deployment
+/deploy                            Same action when replying to its code-job message
 ```
 
 You can also reply `/code` to the bot's `Issue created` message. Plan controls
@@ -165,6 +167,26 @@ The bot blocks changes to `.env*`, private-key files, and
 `.github/workflows/*`, and rejects more than 100 changed files or 5 MB of
 changes. GitHub CLI credentials must be configured for the service account with
 permission to fetch, push branches, and manage pull requests.
+
+### Merge and deployment workflow
+
+Configure the push-triggered GitHub Actions deployment workflow once for each
+allowed repository. The value may be a workflow name or workflow file:
+
+```text
+/repo deploy set owner/repository deploy.yml
+/repo deploy clear owner/repository
+```
+
+After a `/code` job reports `ready`, an admin in the originating chat may run
+`/deploy c-job_id`, or reply `/deploy` to that job's progress message. The bot
+requires the PR to target `main`, verifies that its
+head is still the exact SHA accepted by the code-job CI gate, honors reviews,
+branch protection, and merge queues, then performs a squash merge and deletes
+the feature branch. It waits up to two minutes for the configured workflow's
+`push` run on the merge commit and up to 30 minutes for successful completion.
+The bot reports merge and deployment failures separately and resumes an active
+monitor after restart.
 
 ### Local repository cache
 

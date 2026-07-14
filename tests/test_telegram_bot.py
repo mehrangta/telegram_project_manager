@@ -107,6 +107,24 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(issue.reply_to_issue_ref, "owner/repo#123")
         self.assertEqual(job.reply_to_code_job_id, "c-abcdef12")
 
+    def test_deploy_reply_extracts_code_job_id(self):
+        message = incoming_message_from_update(
+            {
+                "message": {
+                    "message_id": 32,
+                    "from": {"id": 1},
+                    "chat": {"id": 2, "type": "supergroup"},
+                    "text": "/deploy",
+                    "reply_to_message": {
+                        "from": {"id": 99, "is_bot": True},
+                        "text": "Codex code job\nCode Job ID: c-abcdef12\nStatus: ready",
+                    },
+                }
+            }
+        )
+        assert message is not None
+        self.assertEqual(message.reply_to_code_job_id, "c-abcdef12")
+
     def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
         class Handler:
             async def handle(self, message):

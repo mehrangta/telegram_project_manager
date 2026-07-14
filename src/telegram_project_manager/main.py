@@ -14,6 +14,9 @@ from telegram_project_manager.bots.code_manager.workspace import CodeGitHubServi
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
+from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
+from telegram_project_manager.bots.pull_request_manager.github import DeploymentGitHubService
+from telegram_project_manager.bots.pull_request_manager.service import MergeDeploymentService
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.issues import GhIssueExecutor
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
@@ -134,9 +137,20 @@ async def run_bot(db: Database) -> None:
         github=code_github,
         reporter=code_reporter,
     )
-    router = TelegramRouter(db=db, handlers=[issue_manager, code_manager, commit_manager])
+    deployment_service = MergeDeploymentService(
+        db=db,
+        github=DeploymentGitHubService(gh),
+        reporter=code_reporter,
+    )
+    pull_request_manager = PullRequestManager(db=db, service=deployment_service)
+    router = TelegramRouter(
+        db=db,
+        handlers=[issue_manager, code_manager, pull_request_manager, commit_manager],
+    )
     await code_service.recover()
+    await deployment_service.recover()
     try:
         await run_polling(bot, router)
     finally:
+        await deployment_service.shutdown()
         await code_service.shutdown()
