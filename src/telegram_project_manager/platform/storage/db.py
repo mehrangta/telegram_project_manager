@@ -876,7 +876,9 @@ class Database:
             rows = conn.execute(
                 """
                 SELECT * FROM code_jobs
-                WHERE deployment_status IN ('queued', 'merging', 'waiting_workflow', 'deploying')
+                WHERE deployment_status IN (
+                    'queued', 'merging', 'waiting_workflow', 'dispatching', 'deploying'
+                )
                 ORDER BY updated_at ASC LIMIT ?
                 """,
                 (limit,),

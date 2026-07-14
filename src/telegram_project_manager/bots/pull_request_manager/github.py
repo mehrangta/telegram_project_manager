@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from telegram_project_manager.bots.code_manager.workspace import PullRequestCheck
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
+
+
+ACTION_RUN_RE = re.compile(r"https://github\.com/[^/]+/[^/]+/actions/runs/(\d+)")
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,7 @@ class WorkflowRun:
     url: str
     head_sha: str
     workflow_name: str
+    created_at: str = ""
 
 
 class DeploymentGitHubService:
@@ -90,8 +96,36 @@ class DeploymentGitHubService:
             ]
         )
 
-    def find_workflow_run(
+    def dispatch_workflow(
         self, *, repo: str, workflow: str, commit_sha: str
+    ) -> WorkflowRun | None:
+        result = self.gh.run(
+            [
+                "workflow",
+                "run",
+                workflow,
+                "--repo",
+                repo,
+                "--ref",
+                "main",
+                "--raw-field",
+                f"ref={commit_sha}",
+            ]
+        )
+        match = ACTION_RUN_RE.search(result.stdout)
+        if not match:
+            return None
+        return WorkflowRun(
+            run_id=int(match.group(1)),
+            status="requested",
+            conclusion="",
+            url=match.group(0),
+            head_sha="",
+            workflow_name=workflow,
+        )
+
+    def find_dispatched_workflow_run(
+        self, *, repo: str, workflow: str, not_before: int
     ) -> WorkflowRun | None:
         result = self.gh.run(
             [
@@ -101,14 +135,12 @@ class DeploymentGitHubService:
                 repo,
                 "--workflow",
                 workflow,
-                "--commit",
-                commit_sha,
                 "--event",
-                "push",
+                "workflow_dispatch",
                 "--limit",
                 "5",
                 "--json",
-                "databaseId,status,conclusion,url,headSha,workflowName",
+                "databaseId,status,conclusion,url,headSha,workflowName,createdAt",
             ]
         )
         try:
@@ -118,8 +150,11 @@ class DeploymentGitHubService:
         if not isinstance(value, list):
             raise GhError(result)
         for item in value:
-            if isinstance(item, dict) and str(item.get("headSha") or "") == commit_sha:
-                return _parse_run(item)
+            if not isinstance(item, dict):
+                continue
+            run = _parse_run(item)
+            if _created_epoch(run.created_at) >= not_before - 5:
+                return run
         return None
 
     def get_workflow_run(self, *, repo: str, run_id: int) -> WorkflowRun:
@@ -176,4 +211,12 @@ def _parse_run(item: dict[str, Any]) -> WorkflowRun:
         url=str(item.get("url") or ""),
         head_sha=str(item.get("headSha") or ""),
         workflow_name=str(item.get("workflowName") or ""),
+        created_at=str(item.get("createdAt") or ""),
     )
+
+
+def _created_epoch(value: str) -> int:
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0

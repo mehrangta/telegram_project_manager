@@ -18,7 +18,9 @@ MERGE_TIMEOUT_SECONDS = 30 * 60
 WORKFLOW_DISCOVERY_SECONDS = 2 * 60
 DEPLOY_TIMEOUT_SECONDS = 30 * 60
 POLL_SECONDS = 10
-ACTIVE_DEPLOYMENT_STATUSES = {"queued", "merging", "waiting_workflow", "deploying"}
+ACTIVE_DEPLOYMENT_STATUSES = {
+    "queued", "merging", "waiting_workflow", "dispatching", "deploying"
+}
 
 
 class DeploymentError(ValueError):
@@ -97,7 +99,9 @@ class MergeDeploymentService:
             if str(job.get("deployment_status") or "") in {"queued", "merging"}:
                 await self._merge(job_id)
             job = self._require_job(job_id)
-            if str(job.get("deployment_status") or "") in {"waiting_workflow", "deploying"}:
+            if str(job.get("deployment_status") or "") in {
+                "waiting_workflow", "dispatching", "deploying"
+            }:
                 await self._monitor_deployment(job_id)
         except asyncio.CancelledError:
             raise
@@ -199,13 +203,52 @@ class MergeDeploymentService:
             raise DeploymentError("Merged pull request has no stored merge SHA.")
         run_id = int(job.get("deployment_run_id") or 0)
         if not run_id:
+            deployment_status = str(job.get("deployment_status") or "")
             started = int(job.get("deployment_started_at") or time.time())
-            while True:
+            if deployment_status == "waiting_workflow":
+                started = int(time.time())
+                self.db.update_code_job(
+                    job_id,
+                    {
+                        "deployment_status": "dispatching",
+                        "deployment_started_at": started,
+                        "latest_activity": f"Dispatching deployment workflow: {workflow}",
+                    },
+                )
+                await self.reporter.refresh(job_id, force=True)
                 run = await asyncio.to_thread(
-                    self.github.find_workflow_run,
+                    self.github.dispatch_workflow,
                     repo=repo,
                     workflow=workflow,
                     commit_sha=merge_sha,
+                )
+                self.db.audit(
+                    "deploy.dispatch",
+                    "ok",
+                    {"repo": repo, "workflow": workflow, "merge_sha": merge_sha},
+                    job_id,
+                )
+                if run:
+                    run_id = run.run_id
+                    self.db.update_code_job(
+                        job_id,
+                        {
+                            "deployment_status": "deploying",
+                            "deployment_run_id": run.run_id,
+                            "deployment_run_url": run.url,
+                            "deployment_started_at": int(time.time()),
+                            "latest_activity": f"Deployment workflow requested: {workflow}",
+                        },
+                    )
+                    await self.reporter.refresh(job_id, force=True)
+            while True:
+                if run_id:
+                    break
+                run = await asyncio.to_thread(
+                    self.github.find_dispatched_workflow_run,
+                    repo=repo,
+                    workflow=workflow,
+                    not_before=started,
                 )
                 if run:
                     run_id = run.run_id
@@ -223,15 +266,13 @@ class MergeDeploymentService:
                     break
                 if time.time() - started >= self.discovery_seconds:
                     raise DeploymentError(
-                        f"Merged successfully, but deployment workflow '{workflow}' did not start within 2 minutes."
+                        f"Merged successfully, but dispatched workflow '{workflow}' did not start within 2 minutes."
                     )
                 await asyncio.sleep(self.poll_seconds)
         job = self._require_job(job_id)
         started = int(job.get("deployment_started_at") or time.time())
         while True:
             run = await asyncio.to_thread(self.github.get_workflow_run, repo=repo, run_id=run_id)
-            if run.head_sha and run.head_sha != merge_sha:
-                raise DeploymentError("Deployment workflow run targets the wrong commit.")
             if run.status == "completed":
                 if run.conclusion != "success":
                     raise DeploymentError(

@@ -7,9 +7,11 @@ from pathlib import Path
 from telegram_project_manager.bots.code_manager.workspace import PullRequestCheck
 from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
 from telegram_project_manager.bots.pull_request_manager.github import (
+    DeploymentGitHubService,
     PullRequestSnapshot,
     WorkflowRun,
 )
+from telegram_project_manager.integrations.gh.runner import GhResult
 from telegram_project_manager.bots.pull_request_manager.service import (
     DeploymentError,
     MergeDeploymentService,
@@ -41,6 +43,7 @@ class FakeGitHub:
     def __init__(self):
         self.prs = [pr(), pr(state="MERGED", merge_sha="merge-sha")]
         self.merges = []
+        self.dispatches = []
         self.workflow = WorkflowRun(91, "completed", "success", "https://run/91", "merge-sha", "Deploy")
 
     def get_pr(self, url):
@@ -51,7 +54,11 @@ class FakeGitHub:
     def squash_merge(self, **kwargs):
         self.merges.append(kwargs)
 
-    def find_workflow_run(self, **kwargs):
+    def dispatch_workflow(self, **kwargs):
+        self.dispatches.append(kwargs)
+        return self.workflow
+
+    def find_dispatched_workflow_run(self, **kwargs):
         return self.workflow
 
     def get_workflow_run(self, **kwargs):
@@ -142,6 +149,10 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.github.merges,
             [{"pr_url": "https://github.com/owner/repo/pull/42", "head_sha": "checked-sha"}],
         )
+        self.assertEqual(
+            self.github.dispatches,
+            [{"repo": "owner/repo", "workflow": "deploy.yml", "commit_sha": "merge-sha"}],
+        )
         self.assertEqual(self.reporter.notified, ["c-abcdef12"])
 
     async def test_changed_head_fails_without_merging(self):
@@ -158,7 +169,8 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.db.get_code_job("c-abcdef12")["deployment_status"])
 
     async def test_missing_workflow_run_reports_merge_succeeded(self):
-        self.github.find_workflow_run = lambda **kwargs: None
+        self.github.dispatch_workflow = lambda **kwargs: None
+        self.github.find_dispatched_workflow_run = lambda **kwargs: None
         self.service.discovery_seconds = 0
         await self.service.start("c-abcdef12")
         failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
@@ -195,6 +207,20 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         deployed = await wait_for_deployment(self.db, "c-abcdef12", "succeeded")
         self.assertEqual(deployed["deployment_run_id"], 91)
         self.assertEqual(self.github.merges, [])
+
+    async def test_recovery_from_dispatching_discovers_run_without_redispatch(self):
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "deployment_status": "dispatching",
+                "deployment_merge_sha": "merge-sha",
+                "deployment_started_at": int(time.time()),
+            },
+        )
+        await self.service.recover()
+        deployed = await wait_for_deployment(self.db, "c-abcdef12", "succeeded")
+        self.assertEqual(deployed["deployment_run_id"], 91)
+        self.assertEqual(self.github.dispatches, [])
 
 
 class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -255,6 +281,39 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 reply_to_code_job_id="c-abcdef12",
             )
             self.assertEqual(await manager.handle(message), "started c-abcdef12")
+
+
+class DeploymentGitHubAdapterTests(unittest.TestCase):
+    def test_dispatch_passes_merge_sha_and_parses_created_run_url(self):
+        class Runner:
+            def __init__(self):
+                self.args = None
+
+            def run(self, args):
+                self.args = args
+                return GhResult(
+                    ["gh", *args],
+                    0,
+                    "https://github.com/owner/repo/actions/runs/12345\n",
+                    "",
+                    10,
+                )
+
+        runner = Runner()
+        github = DeploymentGitHubService(runner)
+        run = github.dispatch_workflow(
+            repo="owner/repo", workflow="deploy.yml", commit_sha="merge-sha"
+        )
+        self.assertEqual(
+            runner.args,
+            [
+                "workflow", "run", "deploy.yml", "--repo", "owner/repo",
+                "--ref", "main", "--raw-field", "ref=merge-sha",
+            ],
+        )
+        assert run is not None
+        self.assertEqual(run.run_id, 12345)
+        self.assertEqual(run.url, "https://github.com/owner/repo/actions/runs/12345")
 
 
 if __name__ == "__main__":
