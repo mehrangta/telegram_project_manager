@@ -74,6 +74,8 @@ allowlist is global.
 
 ### Commit workflow
 
+Generated plans include current actual behavior and expected behavior after the change.
+
 ```text
 /commit <request>              Generate a commit plan (admin)
 /confirm <plan_id>             Execute a commit plan (admin)

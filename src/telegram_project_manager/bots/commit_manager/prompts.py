@@ -36,6 +36,8 @@ Return JSON:
   "base_branch": "{base_branch}",
   "target_branch": "{target_branch}",
   "commit_message": "Short imperative commit message",
+  "actual_behavior": "Concise description of current behavior before the change",
+  "expected_behavior": "Concise description of behavior after the change",
   "changes": [
     {{
       "path": "README.md",
@@ -48,4 +50,3 @@ Return JSON:
   "questions": []
 }}
 """
-

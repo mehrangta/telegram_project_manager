@@ -29,6 +29,8 @@ class CommitPlan:
     base_branch: str
     target_branch: str
     commit_message: str
+    actual_behavior: str
+    expected_behavior: str
     changes: list[FileChange]
     github_comment: str
     requires_confirmation: bool
@@ -60,6 +62,12 @@ class CommitPlan:
             base_branch=base_branch,
             target_branch=target,
             commit_message=str(raw.get("commit_message") or raw.get("summary") or "").strip(),
+            actual_behavior=str(
+                raw.get("actual_behavior") or "Not provided for legacy plan."
+            ).strip(),
+            expected_behavior=str(
+                raw.get("expected_behavior") or raw.get("commit_message") or raw.get("summary") or "Not provided."
+            ).strip(),
             changes=changes,
             github_comment=str(raw.get("github_comment") or "").strip(),
             requires_confirmation=bool(raw.get("requires_confirmation", raw.get("needs_confirmation", True))),
@@ -75,6 +83,8 @@ class CommitPlan:
             "base_branch": self.base_branch,
             "target_branch": self.target_branch,
             "commit_message": self.commit_message,
+            "actual_behavior": self.actual_behavior,
+            "expected_behavior": self.expected_behavior,
             "changes": [change.__dict__ for change in self.changes],
             "github_comment": self.github_comment,
             "requires_confirmation": self.requires_confirmation,
@@ -89,6 +99,10 @@ class CommitPlan:
         validate_branch(self.target_branch)
         if not self.commit_message:
             raise PlanValidationError("commit message is required")
+        if not self.actual_behavior:
+            raise PlanValidationError("actual behavior is required")
+        if not self.expected_behavior:
+            raise PlanValidationError("expected behavior is required")
         if not self.changes:
             raise PlanValidationError("at least one file change is required")
         if len(self.changes) > max_files:
@@ -122,4 +136,3 @@ def validate_path(path: str) -> None:
     for pattern in SENSITIVE_PATTERNS:
         if fnmatch.fnmatch(normalized, pattern):
             raise PlanValidationError(f"sensitive path blocked: {path}")
-

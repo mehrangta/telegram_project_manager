@@ -239,6 +239,8 @@ Commands:
                 f"Base branch: {plan.base_branch}",
                 f"Target branch: {plan.target_branch}",
                 f"Message: {plan.commit_message}",
+                f"Actual behavior: {plan.actual_behavior}",
+                f"Expected behavior: {plan.expected_behavior}",
                 "Files:",
                 bullet_list(change.path for change in plan.changes),
                 "",

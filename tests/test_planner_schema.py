@@ -9,6 +9,8 @@ class SchemaTests(unittest.TestCase):
             {
                 "intent": "create_commit",
                 "commit_message": "Add README",
+                "actual_behavior": "README is missing.",
+                "expected_behavior": "README documents the project.",
                 "changes": [{"path": "README.md", "content": "hello"}],
             },
             fallback_repo="owner/repo",
@@ -17,6 +19,10 @@ class SchemaTests(unittest.TestCase):
         )
         self.assertEqual(plan.repo, "owner/repo")
         self.assertEqual(plan.changes[0].path, "README.md")
+        self.assertEqual(plan.actual_behavior, "README is missing.")
+        self.assertEqual(plan.expected_behavior, "README documents the project.")
+        self.assertEqual(plan.to_json()["actual_behavior"], "README is missing.")
+        self.assertEqual(plan.to_json()["expected_behavior"], "README documents the project.")
 
     def test_rejects_bad_repo(self):
         with self.assertRaises(PlanValidationError):
@@ -29,4 +35,3 @@ class SchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

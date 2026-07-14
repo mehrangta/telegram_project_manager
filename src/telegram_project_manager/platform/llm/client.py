@@ -25,6 +25,8 @@ COMMIT_PLAN_RESPONSE_SCHEMA = {
         "base_branch": {"type": "string"},
         "target_branch": {"type": "string"},
         "commit_message": {"type": "string"},
+        "actual_behavior": {"type": "string"},
+        "expected_behavior": {"type": "string"},
         "changes": {
             "type": "array",
             "items": {
@@ -51,6 +53,8 @@ COMMIT_PLAN_RESPONSE_SCHEMA = {
         "base_branch",
         "target_branch",
         "commit_message",
+        "actual_behavior",
+        "expected_behavior",
         "changes",
         "github_comment",
         "requires_confirmation",
