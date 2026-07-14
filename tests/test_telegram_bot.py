@@ -3,12 +3,49 @@ import unittest
 
 from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
 from telegram_project_manager.platform.telegram_bot import (
+    TelegramBotApi,
     incoming_message_from_update,
     incoming_message_from_updates,
 )
 
 
 class TelegramBotTests(unittest.TestCase):
+    def test_send_and_edit_include_formatting_keyboard_and_preview_options(self):
+        class RecordingApi(TelegramBotApi):
+            def __init__(self):
+                super().__init__("token")
+                self.calls = []
+
+            def _call(self, method, payload=None, timeout=30):
+                self.calls.append((method, payload))
+                return {"message_id": 9} if method == "sendMessage" else True
+
+        api = RecordingApi()
+        markup = {"inline_keyboard": [[{"text": "Copy", "copy_text": {"text": "c-id"}}]]}
+        api.send_message(
+            1,
+            "<b>Status</b>",
+            2,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_link_preview=True,
+        )
+        api.edit_message_text(
+            1,
+            9,
+            "<b>Ready</b>",
+            parse_mode="HTML",
+            reply_markup={"inline_keyboard": []},
+            disable_link_preview=True,
+        )
+
+        sent = api.calls[0][1]
+        edited = api.calls[1][1]
+        self.assertEqual(sent["parse_mode"], "HTML")
+        self.assertEqual(sent["reply_markup"], markup)
+        self.assertEqual(sent["link_preview_options"], {"is_disabled": True})
+        self.assertEqual(edited["reply_markup"], {"inline_keyboard": []})
+
     def test_builds_incoming_message_from_bot_api_update(self):
         incoming = incoming_message_from_update(
             {

@@ -293,6 +293,7 @@ class IssueManager:
                 "Reply to this preview with feedback or images, or run:",
                 f"/edit {draft_id} <feedback>",
                 f"/confirm {draft_id}",
+                f"/cancel {draft_id}",
             ]
         )
         return truncate(

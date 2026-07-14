@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 from telegram_project_manager.bots.code_manager.schemas import CodePlan
-from telegram_project_manager.platform.responses import truncate
+from telegram_project_manager.platform.responses import OutgoingMessage, outgoing_message, truncate
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
 
@@ -17,18 +17,22 @@ class CodeProgressReporter:
         self.bot = bot
         self.min_interval = min_interval
         self._last_update: dict[str, float] = defaultdict(float)
-        self._last_text: dict[str, str] = {}
+        self._last_message: dict[str, OutgoingMessage] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def create(self, job_id: str) -> None:
         job = self.db.get_code_job(job_id)
         if not job:
             return
+        outgoing = self.render_message(job)
         result = await asyncio.to_thread(
             self.bot.send_message,
             int(job["telegram_chat_id"]),
-            self.render(job),
+            outgoing.text,
             job.get("telegram_thread_id"),
+            parse_mode=outgoing.parse_mode,
+            reply_markup=outgoing.reply_markup(),
+            disable_link_preview=outgoing.disable_link_preview,
         )
         self.db.update_code_job(job_id, {"telegram_message_id": int(result["message_id"])})
 
@@ -47,20 +51,23 @@ class CodeProgressReporter:
             job = self.db.get_code_job(job_id)
             if not job or not job.get("telegram_message_id"):
                 return
-            text = self.render(job)
-            if text == self._last_text.get(job_id):
+            outgoing = self.render_message(job)
+            if outgoing == self._last_message.get(job_id):
                 return
             try:
                 await asyncio.to_thread(
                     self.bot.edit_message_text,
                     int(job["telegram_chat_id"]),
                     int(job["telegram_message_id"]),
-                    text,
+                    outgoing.text,
+                    parse_mode=outgoing.parse_mode,
+                    reply_markup=outgoing.reply_markup(include_empty=True),
+                    disable_link_preview=outgoing.disable_link_preview,
                 )
             except TelegramBotApiError as exc:
                 if "message is not modified" not in str(exc).lower():
                     raise
-            self._last_text[job_id] = text
+            self._last_message[job_id] = outgoing
             self._last_update[job_id] = now
 
     async def notify_terminal(self, job_id: str) -> None:
@@ -71,11 +78,24 @@ class CodeProgressReporter:
         lines = [outcome, f"Code Job ID: {job['id']}"]
         if job.get("pull_request_url"):
             lines.append(f"Pull request: {job['pull_request_url']}")
+        if job["status"] == "ready" and not job.get("deployment_merge_sha"):
+            lines.append(f"Deploy: /deploy {job['id']}")
+        elif job["status"] == "failed":
+            lines.extend(
+                [
+                    f"Retry: /code retry {job['id']}",
+                    f"Status: /code status {job['id']}",
+                ]
+            )
+        outgoing = outgoing_message("\n".join(lines))
         await asyncio.to_thread(
             self.bot.send_message,
             int(job["telegram_chat_id"]),
-            "\n".join(lines),
+            outgoing.text,
             job.get("telegram_thread_id"),
+            parse_mode=outgoing.parse_mode,
+            reply_markup=outgoing.reply_markup(),
+            disable_link_preview=outgoing.disable_link_preview,
         )
 
     async def notify_deployment(self, job_id: str) -> None:
@@ -94,11 +114,23 @@ class CodeProgressReporter:
             lines.append(f"Deployment: {job['deployment_run_url']}")
         if job.get("deployment_error"):
             lines.append(f"Error: {job['deployment_error']}")
+        lines.append(f"Status command: /code status {job['id']}")
+        outgoing = outgoing_message("\n".join(lines), expandable_prefixes=("Error:",))
         await asyncio.to_thread(
             self.bot.send_message,
             int(job["telegram_chat_id"]),
-            "\n".join(lines),
+            outgoing.text,
             job.get("telegram_thread_id"),
+            parse_mode=outgoing.parse_mode,
+            reply_markup=outgoing.reply_markup(),
+            disable_link_preview=outgoing.disable_link_preview,
+        )
+
+    @staticmethod
+    def render_message(job: dict[str, Any]) -> OutgoingMessage:
+        return outgoing_message(
+            CodeProgressReporter.render(job),
+            expandable_prefixes=("Plan revision", "Deployment error:", "Error:"),
         )
 
     @staticmethod
@@ -106,9 +138,10 @@ class CodeProgressReporter:
         created = int(job.get("created_at") or time.time())
         elapsed = max(0, int(time.time()) - created)
         lines = [
-            "Codex code job",
+            _status_heading(str(job["status"]), str(job.get("deployment_status") or "")),
             f"Code Job ID: {job['id']}",
             f"Issue: {job['repo']}#{job['issue_number']} — {job['issue_title']}",
+            f"Issue link: https://github.com/{job['repo']}/issues/{job['issue_number']}",
             f"Status: {str(job['status']).replace('_', ' ')}",
             f"Elapsed: {elapsed // 60}m {elapsed % 60}s",
         ]
@@ -140,7 +173,7 @@ class CodeProgressReporter:
                 for item in checks
             )
             lines.append(
-                f"CI checks: {passed} passed, {pending} pending, {failed} failed"
+                f"CI checks: ✅ {passed}  ⏳ {pending}  ❌ {failed}"
             )
             attempts = int(job.get("ci_repair_attempts") or 0)
             if attempts:
@@ -169,8 +202,32 @@ class CodeProgressReporter:
         elif status in {"failed", "interrupted"}:
             lines.extend(["", f"Retry: /code retry {job['id']}", f"Discard: /code discard {job['id']}"])
         elif status == "ready" and not job.get("deployment_merge_sha"):
-            lines.extend(["", f"Rebase onto latest base: /code rebase {job['id']}"])
+            lines.extend(
+                [
+                    "",
+                    f"Rebase onto latest base: /code rebase {job['id']}",
+                    f"Deploy: /deploy {job['id']}",
+                ]
+            )
         return truncate("\n".join(lines), 4096)
+
+
+def _status_heading(status: str, deployment_status: str) -> str:
+    if deployment_status == "succeeded":
+        return "✅ Codex code job"
+    if deployment_status == "failed" or status == "failed":
+        return "❌ Codex code job"
+    if deployment_status:
+        return "⚙️ Codex code job"
+    if status == "interrupted":
+        return "⚠️ Codex code job"
+    if status == "awaiting_approval":
+        return "⏸️ Codex code job"
+    if status == "waiting_checks":
+        return "🧪 Codex code job"
+    if status == "ready":
+        return "✅ Codex code job"
+    return "🧭 Codex code job"
 
 
 def _event_summary(event: dict[str, Any]) -> str:

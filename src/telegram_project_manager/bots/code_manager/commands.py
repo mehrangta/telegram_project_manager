@@ -8,6 +8,7 @@ from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, WorkspaceError
 from telegram_project_manager.integrations.gh.runner import GhError
 from telegram_project_manager.platform.permissions import PermissionService
+from telegram_project_manager.platform.responses import OutgoingMessage
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -35,7 +36,7 @@ class CodeManager:
         self.github = github
         self.reporter = reporter
 
-    async def handle(self, message: IncomingMessage) -> str | None:
+    async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         text = message.text.strip()
         if message.reply_to_code_job_id and not text.startswith("/"):
             return await self._reply_control(message, message.reply_to_code_job_id, text)
@@ -80,7 +81,9 @@ class CodeManager:
             return f"Code job not started.\nReason: {exc}"
         return None
 
-    async def _reply_control(self, message: IncomingMessage, job_id: str, text: str) -> str | None:
+    async def _reply_control(
+        self, message: IncomingMessage, job_id: str, text: str
+    ) -> str | OutgoingMessage | None:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -89,7 +92,9 @@ class CodeManager:
             return await self._perform_control(message, action, job_id, "")
         return await self._perform_control(message, "edit", job_id, text.strip())
 
-    async def _command_control(self, message: IncomingMessage, action: str, rest: str) -> str | None:
+    async def _command_control(
+        self, message: IncomingMessage, action: str, rest: str
+    ) -> str | OutgoingMessage | None:
         if action == "edit":
             job_id, _, feedback = rest.partition(" ")
             return await self._perform_control(message, action, job_id, feedback.strip())
@@ -110,7 +115,7 @@ class CodeManager:
         action: str,
         job_id: str,
         feedback: str,
-    ) -> str | None:
+    ) -> str | OutgoingMessage | None:
         if not JOB_RE.fullmatch(job_id):
             return f"Usage: /code {action} c-12345678" + (" <feedback>" if action == "edit" else "")
         job = self.db.get_code_job(job_id)
@@ -132,7 +137,7 @@ class CodeManager:
             elif action == "rebase":
                 await self.service.rebase(job_id)
             elif action == "status":
-                return self.reporter.render(job)
+                return self.reporter.render_message(job)
             else:
                 return "Unknown /code action."
         except (ValueError, WorkspaceError, GhError) as exc:

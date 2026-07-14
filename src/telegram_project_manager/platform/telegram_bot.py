@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from telegram_project_manager.platform.responses import outgoing_message
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage, TelegramRouter
 
 
@@ -65,21 +66,51 @@ class TelegramBotApi:
         return content
 
     def send_message(
-        self, chat_id: int, text: str, message_thread_id: int | None = None
+        self,
+        chat_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+        *,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+        disable_link_preview: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if message_thread_id is not None:
             payload["message_thread_id"] = message_thread_id
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if disable_link_preview:
+            payload["link_preview_options"] = {"is_disabled": True}
         result = self._call("sendMessage", payload)
         if not isinstance(result, dict) or not isinstance(result.get("message_id"), int):
             raise TelegramBotApiError("Telegram Bot API sendMessage returned invalid data")
         return result
 
-    def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
-        self._call(
-            "editMessageText",
-            {"chat_id": chat_id, "message_id": message_id, "text": text},
-        )
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+        disable_link_preview: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if disable_link_preview:
+            payload["link_preview_options"] = {"is_disabled": True}
+        self._call("editMessageText", payload)
 
     def _call(self, method: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> Any:
         request = urllib.request.Request(
@@ -251,7 +282,16 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             return
         response = await router.handle_message(incoming)
         if response:
-            await asyncio.to_thread(bot.send_message, incoming.chat_id, response, incoming.thread_id)
+            outgoing = outgoing_message(response)
+            await asyncio.to_thread(
+                bot.send_message,
+                incoming.chat_id,
+                outgoing.text,
+                incoming.thread_id,
+                parse_mode=outgoing.parse_mode,
+                reply_markup=outgoing.reply_markup(),
+                disable_link_preview=outgoing.disable_link_preview,
+            )
 
     async def flush_album(media_group_id: str) -> None:
         await asyncio.sleep(0.75)

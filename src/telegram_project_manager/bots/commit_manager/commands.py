@@ -353,6 +353,7 @@ Commands:
                 bullet_list(change.path for change in plan.changes),
                 "",
                 f"Run: /confirm {plan_id}",
+                f"Cancel: /cancel {plan_id}",
             ]
         )
 

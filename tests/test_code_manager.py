@@ -47,18 +47,22 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.sent_options = []
+        self.edited_options = []
         self.send_calls = 0
         self.fail_send_at = None
 
-    def send_message(self, chat_id, text, thread_id=None):
+    def send_message(self, chat_id, text, thread_id=None, **options):
         self.send_calls += 1
         if self.send_calls == self.fail_send_at:
             raise TelegramBotApiError("send failed")
         self.sent.append((chat_id, text, thread_id))
+        self.sent_options.append(options)
         return {"message_id": 77}
 
-    def edit_message_text(self, chat_id, message_id, text):
+    def edit_message_text(self, chat_id, message_id, text, **options):
         self.edited.append((chat_id, message_id, text))
+        self.edited_options.append(options)
         return {"message_id": message_id}
 
 
@@ -291,14 +295,13 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         await wait_for_send_count(self.bot, 2)
         self.assertTrue(self.workspaces.cleaned)
         self.assertTrue(any("All pull request checks passed" in item[2] for item in self.bot.edited))
-        self.assertEqual(
-            self.bot.sent[-1],
-            (
-                10,
-                f"✅ Code job ready\nCode Job ID: {job_id}\n"
-                "Pull request: https://github.com/owner/repo/pull/42",
-                30,
-            ),
+        self.assertEqual(self.bot.sent[-1][0], 10)
+        self.assertEqual(self.bot.sent[-1][2], 30)
+        self.assertIn("✅ <b>Code job ready</b>", self.bot.sent[-1][1])
+        self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
+        self.assertIn(
+            f"/deploy {job_id}",
+            str(self.bot.sent_options[-1]["reply_markup"]),
         )
 
     async def test_skip_plan_codes_immediately_and_creates_pr(self):
@@ -349,8 +352,8 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.codex.calls), 3)
         self.assertFalse(self.workspaces.cleaned)
         await wait_for_send_count(self.bot, 2)
-        self.assertIn("❌ Code job failed", self.bot.sent[-1][1])
-        self.assertIn("Pull request: https://github.com/owner/repo/pull/42", self.bot.sent[-1][1])
+        self.assertIn("❌ <b>Code job failed</b>", self.bot.sent[-1][1])
+        self.assertIn("https://github.com/owner/repo/pull/42", self.bot.sent[-1][1])
 
     async def test_cancelled_check_fails_without_codex_repair(self):
         self.github.check_sequences = [(_check("cancelled", "cancel"),)]
@@ -373,10 +376,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
         await wait_for_status(self.db, job_id, "failed")
         await wait_for_send_count(self.bot, 2)
-        self.assertEqual(
-            self.bot.sent[-1],
-            (10, f"❌ Code job failed\nCode Job ID: {job_id}", 30),
-        )
+        self.assertEqual(self.bot.sent[-1][0], 10)
+        self.assertEqual(self.bot.sent[-1][2], 30)
+        self.assertIn("❌ <b>Code job failed</b>", self.bot.sent[-1][1])
+        self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
 
     async def test_terminal_alert_failure_does_not_change_ready_state_or_block_cleanup(self):
         self.bot.fail_send_at = 2

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from telegram_project_manager.platform.responses import OutgoingMessage
 from telegram_project_manager.platform.storage.db import Database
 
 
@@ -31,7 +32,7 @@ class IncomingMessage:
 
 
 class BotHandler(Protocol):
-    async def handle(self, message: IncomingMessage) -> str | None:
+    async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         ...
 
 
@@ -44,7 +45,7 @@ class TelegramRouter:
     def set_bot_username(self, username: str) -> None:
         self.bot_username = username.lstrip("@")
 
-    async def handle_message(self, message: IncomingMessage) -> str | None:
+    async def handle_message(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         if not self._should_handle(message):
             return None
         cleaned = self._strip_mention(message.text)

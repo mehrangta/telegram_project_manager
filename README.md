@@ -143,6 +143,8 @@ a workspace-write sandbox, must report a successful validation command, removes
   checks remain supported after a 60-second discovery grace. The Telegram job is
   reported as ready and its workspace is cleaned only after this gate succeeds.
   A separate short Telegram alert is sent when the job becomes ready or fails.
+Job, draft, and plan messages also include native copy buttons for their IDs and
+currently valid commands, plus direct buttons for relevant GitHub links.
 
 ```text
 /code #123                         Plan an issue in this chat's active repo
