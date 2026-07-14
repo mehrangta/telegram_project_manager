@@ -4,6 +4,7 @@ from telegram_project_manager.bots.issue_manager.executor import IssueExecutionS
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
 from telegram_project_manager.bots.issue_manager.schemas import IssueDraftValidationError
 from telegram_project_manager.integrations.gh.runner import GhError
+from telegram_project_manager.integrations.gh.repository_context import RepositoryContextError
 from telegram_project_manager.platform.llm.client import LlmError
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import truncate
@@ -61,6 +62,9 @@ class IssueManager:
                 default_branch=default_branch,
                 attachments=message.attachments,
             )
+        except RepositoryContextError as exc:
+            self.db.audit("issue.context", "failed", {"repo": repo, "error": str(exc)})
+            return f"Issue draft not created.\nReason: {exc}"
         except (LlmError, IssueDraftValidationError, ValueError) as exc:
             self.db.audit("issue.plan", "failed", {"repo": repo, "error": str(exc)})
             return f"Issue draft not created.\nReason: {exc}"
@@ -74,6 +78,10 @@ class IssueManager:
                     f"Summary: {issue.summary}",
                     f"Actual behavior: {issue.actual_behavior}",
                     f"Expected behavior: {issue.expected_behavior}",
+                    f"Codebase context: {issue.codebase_context}",
+                    f"Relevant files: {len(issue.relevant_files)}",
+                    f"Possible causes: {len(issue.possible_causes)}",
+                    f"Context commit: {issue.context_commit_sha[:12]}",
                     f"Images: {len(message.attachments)}",
                     "",
                     f"Run: /confirm {draft_id}",

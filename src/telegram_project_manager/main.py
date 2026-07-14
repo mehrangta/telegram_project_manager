@@ -11,6 +11,7 @@ from telegram_project_manager.bots.issue_manager.executor import IssueExecutionS
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.issues import GhIssueExecutor
+from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.integrations.gh.runner import GhRunner
 from telegram_project_manager.platform.config import SECRET_CONFIG_KEYS, SUPPORTED_CONFIG_KEYS, normalize_config_value
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
@@ -97,7 +98,7 @@ async def run_bot(db: Database) -> None:
     bot = TelegramBotApi(bot_token)
     commit_executor = GhCommitExecutor(gh)
     commit_manager = CommitManager(db=db, llm=llm, gh=gh, executor=commit_executor)
-    issue_planner = IssuePlanner(db, llm)
+    issue_planner = IssuePlanner(db, llm, RepositoryContextService(gh))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))
     issue_manager = IssueManager(db, issue_planner, issue_execution)
     router = TelegramRouter(db=db, handlers=[issue_manager, commit_manager])

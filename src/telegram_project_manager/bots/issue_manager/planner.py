@@ -5,19 +5,26 @@ import uuid
 
 from telegram_project_manager.bots.issue_manager.prompts import SYSTEM_PROMPT, build_user_prompt
 from telegram_project_manager.bots.issue_manager.schemas import ISSUE_DRAFT_RESPONSE_SCHEMA, IssueDraft
+from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
 from telegram_project_manager.platform.router import IncomingAttachment
 from telegram_project_manager.platform.storage.db import Database
 
 
-def issue_memory_session_id(chat_id: int) -> str:
-    return f"issue-manager:{chat_id}"
+def issue_memory_session_id(chat_id: int, repo: str) -> str:
+    return f"issue-manager:{chat_id}:{repo}"
 
 
 class IssuePlanner:
-    def __init__(self, db: Database, llm: OpenAICompatibleClient) -> None:
+    def __init__(
+        self,
+        db: Database,
+        llm: OpenAICompatibleClient,
+        repository_context: RepositoryContextService,
+    ) -> None:
         self.db = db
         self.llm = llm
+        self.repository_context = repository_context
 
     def create_draft(
         self,
@@ -29,13 +36,21 @@ class IssuePlanner:
         default_branch: str,
         attachments: tuple[IncomingAttachment, ...],
     ) -> tuple[str, IssueDraft]:
+        context = self.repository_context.collect(
+            repo=repo, branch=default_branch, request_text=request_text
+        )
         raw = self.llm.chat_json(
             SYSTEM_PROMPT,
-            build_user_prompt(request_text, repo),
-            memory_key=issue_memory_session_id(chat_id),
+            build_user_prompt(request_text, repo, context.to_prompt()),
+            memory_key=issue_memory_session_id(chat_id, repo),
             response_schema=ISSUE_DRAFT_RESPONSE_SCHEMA,
         )
-        issue = IssueDraft.from_llm(raw)
+        issue = IssueDraft.from_llm(
+            raw,
+            context_branch=context.branch,
+            context_commit_sha=context.commit_sha,
+            allowed_paths=context.paths,
+        )
         draft_id = f"i-{uuid.uuid4().hex[:8]}"
         now = int(time.time())
         self.db.create_issue_draft(
@@ -62,5 +77,15 @@ class IssuePlanner:
                 for position, item in enumerate(attachments)
             ],
         )
-        self.db.audit("issue.plan", "ok", {"repo": repo, "images": len(attachments)}, draft_id)
+        self.db.audit(
+            "issue.plan",
+            "ok",
+            {
+                "repo": repo,
+                "images": len(attachments),
+                "context_commit_sha": context.commit_sha,
+                "context_paths": sorted(context.paths),
+            },
+            draft_id,
+        )
         return draft_id, issue

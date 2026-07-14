@@ -53,7 +53,7 @@ class GhIssueExecutor:
         created = self.gh.api_json(
             f"repos/{repo}/issues",
             method="POST",
-            body={"title": issue.title, "body": issue.body(image_links, marker)},
+            body={"title": issue.title, "body": issue.body(image_links, marker, repo)},
         )
         return self._result(repo, created, issue.title), paths
 

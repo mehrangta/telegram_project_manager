@@ -84,9 +84,13 @@ Generated plans include current actual behavior and expected behavior after the 
 
 ### Issue workflow
 
-Issue drafts use the active repository for the current chat. The LLM improves the
-prompt into a title, summary, actual behavior, and expected behavior. Images are
-embedded from an isolated issue-assets branch and are not sent to the LLM.
+Issue drafts use the active repository for the current chat. Before drafting, the
+bot reads a bounded, read-only snapshot of project documentation and relevant
+source files at the configured branch's current commit. The LLM improves the
+prompt into a title, summary, actual behavior, expected behavior, codebase
+context, relevant files, and evidence-backed possible causes. Context retrieval
+must succeed before a draft is created. Images are embedded from an isolated
+issue-assets branch and are not sent to the LLM.
 
 ```text
 /issue <prompt>                Generate an issue draft (admin)
