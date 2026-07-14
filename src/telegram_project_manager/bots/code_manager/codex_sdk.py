@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openai_codex import ApprovalMode, AsyncCodex, Sandbox
+from openai_codex.client import CodexConfig
 from openai_codex.types import ReasoningEffort
 
 
@@ -20,8 +22,15 @@ class CodexSdkError(RuntimeError):
 class CodexSdkAdapter:
     """Small boundary around the beta SDK so the rest of the bot remains stable."""
 
-    def __init__(self, api_key_provider: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        api_key_provider: Callable[[], str],
+        base_url_provider: Callable[[], str],
+        model_provider: Callable[[], str],
+    ) -> None:
         self.api_key_provider = api_key_provider
+        self.base_url_provider = base_url_provider
+        self.model_provider = model_provider
         self._client: AsyncCodex | None = None
         self._start_lock = asyncio.Lock()
         self._active_turns: dict[str, Any] = {}
@@ -33,12 +42,25 @@ class CodexSdkAdapter:
             if self._client is not None:
                 return self._client
             api_key = self.api_key_provider().strip()
+            base_url = self.base_url_provider().strip().rstrip("/")
+            model = self.model_provider().strip()
             if not api_key:
                 raise CodexSdkError(
-                    "OpenAI API key is not configured. Admin private chat: "
-                    "/config set openai_api_key <key>"
+                    "Codex API key is not configured. Admin private chat: "
+                    "/config set codex_api_key <key>"
                 )
-            client = AsyncCodex()
+            if not base_url or not model:
+                raise CodexSdkError(
+                    "Codex provider is incomplete. Configure codex_base_url and codex_model."
+                )
+            client = AsyncCodex(
+                CodexConfig(
+                    env={
+                        "OPENAI_API_KEY": api_key,
+                        "OPENAI_BASE_URL": base_url,
+                    }
+                )
+            )
             try:
                 await client.__aenter__()
                 await client.login_api_key(api_key)
@@ -89,6 +111,7 @@ class CodexSdkAdapter:
                     approval_mode=ApprovalMode.auto_review,
                     cwd=cwd,
                     developer_instructions=developer_instructions,
+                    model=self.model_provider().strip(),
                     sandbox=sandbox,
                 )
             else:
@@ -96,6 +119,7 @@ class CodexSdkAdapter:
                     approval_mode=ApprovalMode.auto_review,
                     cwd=cwd,
                     developer_instructions=developer_instructions,
+                    model=self.model_provider().strip(),
                     sandbox=sandbox,
                 )
             await on_thread(str(thread.id))
@@ -187,18 +211,24 @@ def _safe_progress(method: str, payload: dict[str, Any]) -> dict[str, Any] | Non
             command = item.get("command")
             if isinstance(command, list):
                 command = " ".join(str(part) for part in command)
-            return {"kind": "command", "text": str(command or "command")[:240], "status": state}
+            return {"kind": "command", "text": _sanitize_text(str(command or "command"))[:240], "status": state}
         if item_type == "fileChange":
             paths = []
             changes = item.get("changes") if isinstance(item.get("changes"), list) else []
             for change in changes[:20]:
                 if isinstance(change, dict) and change.get("path"):
-                    paths.append(str(change["path"])[:240])
+                    paths.append(_sanitize_text(str(change["path"]))[:240])
             return {"kind": "files", "paths": paths, "status": state}
     if method == "error":
         error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-        return {"kind": "error", "text": str(error.get("message") or "Codex error")[:500]}
+        return {"kind": "error", "text": _sanitize_text(str(error.get("message") or "Codex error"))[:500]}
     if method == "turn/completed":
         turn = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
         return {"kind": "phase", "text": f"Codex turn {turn.get('status') or 'completed'}"}
     return None
+
+
+def _sanitize_text(value: str) -> str:
+    value = re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED_API_KEY]", value)
+    value = re.sub(r"(?i)(authorization:\s*bearer\s+)\S+", r"\1[REDACTED]", value)
+    return value

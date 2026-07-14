@@ -76,7 +76,8 @@ def main() -> None:
             print("Config:")
             for key, value in settings.items():
                 print(f"- {key}={value}")
-            print(f"- openai_api_key={'<set>' if db.has_secret('openai_api_key') else '<not set>'}")
+            for key in sorted(SECRET_CONFIG_KEYS):
+                print(f"- {key}={'<set>' if db.has_secret(key) else '<not set>'}")
             return
         if args.config_command == "set":
             try:
@@ -110,7 +111,11 @@ async def run_bot(db: Database) -> None:
     code_reporter = CodeProgressReporter(db, bot)
     code_service = CodeJobService(
         db=db,
-        codex=CodexSdkAdapter(lambda: db.get_secret("openai_api_key")),
+        codex=CodexSdkAdapter(
+            lambda: db.get_secret("codex_api_key"),
+            lambda: db.get_setting("codex_base_url", ""),
+            lambda: db.get_setting("codex_model", ""),
+        ),
         workspaces=GitWorkspaceService(),
         github=code_github,
         reporter=code_reporter,

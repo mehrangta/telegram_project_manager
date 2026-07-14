@@ -3,13 +3,16 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 
-SECRET_CONFIG_KEYS = frozenset({"openai_api_key"})
+SECRET_CONFIG_KEYS = frozenset({"openai_api_key", "codex_api_key"})
 
 SUPPORTED_CONFIG_KEYS = frozenset(
     {
         "openai_api_key",
         "openai_base_url",
         "openai_model",
+        "codex_api_key",
+        "codex_base_url",
+        "codex_model",
         "max_files_per_commit",
         "max_bytes_per_commit",
         "require_confirmation",
@@ -26,10 +29,10 @@ def normalize_config_value(key: str, value: str) -> str:
     if not normalized:
         raise ValueError("Config value cannot be empty.")
 
-    if key == "openai_base_url":
+    if key in {"openai_base_url", "codex_base_url"}:
         parsed = urlsplit(normalized)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("OpenAI base URL must be an absolute HTTP or HTTPS URL.")
+            raise ValueError("Base URL must be an absolute HTTP or HTTPS URL.")
         normalized = normalized.rstrip("/")
 
     if key == "llm_memory_max_messages":

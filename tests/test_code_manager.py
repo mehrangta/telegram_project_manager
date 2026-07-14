@@ -7,6 +7,7 @@ from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
+from telegram_project_manager.bots.code_manager.codex_sdk import _safe_progress
 from telegram_project_manager.bots.code_manager.schemas import CodeJobValidationError, CodeResult
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import (
@@ -178,6 +179,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.github.created), 1)
         self.assertEqual(len(self.github.updated), 1)
         self.assertEqual(self.github.ready, ["https://github.com/owner/repo/pull/42"])
+        for _ in range(100):
+            if self.workspaces.cleaned:
+                break
+            await asyncio.sleep(0.01)
         self.assertTrue(self.workspaces.cleaned)
         self.assertTrue(any("Implementation ready for review" in item[2] for item in self.bot.edited))
 
@@ -191,6 +196,15 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodeSafetyTests(unittest.TestCase):
+    def test_progress_redacts_api_keys(self):
+        event = _safe_progress(
+            "error",
+            {"error": {"message": "401 invalid key sk-example-secret-value"}},
+        )
+        assert event is not None
+        self.assertNotIn("sk-example-secret-value", event["text"])
+        self.assertIn("[REDACTED_API_KEY]", event["text"])
+
     def test_result_requires_a_successful_validation(self):
         with self.assertRaises(CodeJobValidationError):
             CodeResult.from_json({"summary": "Changed code.", "commit_message": "fix: change code", "tests": [{"command": "pytest", "status": "not_run", "summary": "Unavailable"}]})

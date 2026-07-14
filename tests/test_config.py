@@ -22,6 +22,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absolute HTTP or HTTPS URL"):
             normalize_config_value("openai_base_url", "llm.example.test/v1")
 
+    def test_normalizes_codex_base_url(self):
+        self.assertEqual(
+            normalize_config_value("codex_base_url", " http://codex.example.test/ "),
+            "http://codex.example.test",
+        )
+
     def test_validates_llm_memory_limit(self):
         self.assertEqual(normalize_config_value("llm_memory_max_messages", " 8 "), "8")
         with self.assertRaisesRegex(ValueError, "at least 2"):
@@ -72,6 +78,24 @@ class ConfigTests(unittest.TestCase):
             self.assertNotIn("openai_api_key", db.all_settings())
             self.assertIn("openai_api_key=<set>", output.getvalue())
             self.assertNotIn("secret-value", output.getvalue())
+
+    def test_cli_stores_and_redacts_codex_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            set_argv = [
+                "telegram-project-manager", "--db", str(db_path), "config", "set",
+                "codex_api_key", "codex-secret-value",
+            ]
+            with patch.object(sys, "argv", set_argv), redirect_stdout(io.StringIO()):
+                main()
+            output = io.StringIO()
+            show_argv = ["telegram-project-manager", "--db", str(db_path), "config", "show"]
+            with patch.object(sys, "argv", show_argv), redirect_stdout(output):
+                main()
+            db = Database(db_path)
+            self.assertEqual(db.get_secret("codex_api_key"), "codex-secret-value")
+            self.assertIn("codex_api_key=<set>", output.getvalue())
+            self.assertNotIn("codex-secret-value", output.getvalue())
 
 
 if __name__ == "__main__":

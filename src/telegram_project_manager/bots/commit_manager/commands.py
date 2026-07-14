@@ -69,6 +69,9 @@ Commands:
 /config set openai_api_key <key> (private chat only)
 /config set openai_base_url <url>
 /config set openai_model <model>
+/config set codex_api_key <key> (private chat only)
+/config set codex_base_url <url>
+/config set codex_model <model>
 /config set llm_memory_max_messages <count>
 /memory status
 /memory clear
@@ -88,7 +91,8 @@ Commands:
                     f"Default branch: {chat.get('default_branch') or 'main'}",
                     f"Admins: {', '.join(admins) if admins else 'none'}",
                     f"OpenAI model: {self.db.get_setting('openai_model', 'not set')}",
-                    f"Codex SDK auth: {'configured' if self.db.has_secret('openai_api_key') else 'not configured'}",
+                    f"Codex SDK auth: {'configured' if self.db.has_secret('codex_api_key') else 'not configured'}",
+                    f"Codex model: {self.db.get_setting('codex_model', 'not set')}",
                 ]
             )
         )
@@ -152,8 +156,9 @@ Commands:
         if not parts or parts[0] == "show":
             settings = self.db.all_settings()
             items = [f"{key}={value}" for key, value in settings.items()]
-            key_status = "<set>" if self.db.has_secret("openai_api_key") else "<not set>"
-            items.append(f"openai_api_key={key_status}")
+            for key in sorted(SECRET_CONFIG_KEYS):
+                key_status = "<set>" if self.db.has_secret(key) else "<not set>"
+                items.append(f"{key}={key_status}")
             return "Config:\n" + bullet_list(items)
         if len(parts) == 3 and parts[0] == "set":
             key, value = parts[1], parts[2]
@@ -163,7 +168,7 @@ Commands:
                 return str(exc)
             if key in SECRET_CONFIG_KEYS:
                 if not message.is_private:
-                    return "OpenAI API key must be set in a private chat with the bot."
+                    return "API keys must be set in a private chat with the bot."
                 self.db.set_secret(key, value)
             else:
                 self.db.set_setting(key, value)

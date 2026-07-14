@@ -37,8 +37,10 @@ Telegram API ID and API hash are not used. After startup, message the bot privat
 ```
 
 The API key is stored separately in SQLite and never returned by `/config show`. Setting it in group chats is blocked.
-The `/code` workflow reuses this key with the official OpenAI Codex SDK. Unlike
-the other LLM workflows, it does not use `openai_base_url` or `openai_model`.
+The `/code` workflow has separate `codex_api_key`, `codex_base_url`, and
+`codex_model` settings. They are passed to the Codex SDK runtime as
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and the thread model, so Codex can use a
+different provider without changing issue or commit generation.
 
 GitHub auth is handled by `gh`, not by the bot:
 
@@ -154,6 +156,9 @@ permission to clone, push branches, and manage pull requests.
 /config set openai_api_key <key>            Set API key (admin, private chat only)
 /config set openai_base_url <url>           Set OpenAI-compatible URL (admin)
 /config set openai_model <model>            Set model (admin)
+/config set codex_api_key <key>             Set Codex API key (admin, private chat only)
+/config set codex_base_url <url>            Set Codex provider URL (admin)
+/config set codex_model <model>             Set Codex model (admin)
 /config set llm_memory_max_messages <count> Set even memory limit, minimum 2 (admin)
 /config set max_files_per_commit <count>    Set file limit (admin)
 /config set max_bytes_per_commit <count>    Set byte limit (admin)
