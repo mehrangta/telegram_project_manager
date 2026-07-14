@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class FakePlanner:
+    def __init__(self):
+        self.revise_calls = []
+
     def create_draft(self, **kwargs):
         return (
             "i-12345678",
@@ -27,6 +31,20 @@ class FakePlanner:
             ),
         )
 
+    def revise_draft(self, **kwargs):
+        self.revise_calls.append(kwargs)
+        return IssueDraft(
+            title="Short title",
+            summary="Revised summary.",
+            actual_behavior="Clicking Save has no effect.",
+            expected_behavior="The form is saved.",
+            codebase_context="Fresh repository context.",
+            relevant_files=(RelevantFile("src/form.py", "Contains the save handler."),),
+            possible_causes=(),
+            context_branch="main",
+            context_commit_sha="fedcba9876543210",
+        )
+
 
 class FakeExecution:
     def execute(self, draft_id, user_id):
@@ -34,6 +52,45 @@ class FakeExecution:
 
 
 class IssueManagerTests(unittest.TestCase):
+    @staticmethod
+    def create_pending_draft(db, *, draft_id="i-abcdef12", user_id=10, chat_id=20):
+        now = int(time.time())
+        db.create_issue_draft(
+            {
+                "id": draft_id,
+                "telegram_chat_id": chat_id,
+                "telegram_user_id": user_id,
+                "repo": "owner/repo",
+                "default_branch": "main",
+                "request_text": "button broken",
+                "issue_json": {
+                    "title": "Original title",
+                    "summary": "Original summary",
+                    "actual_behavior": "Nothing happens",
+                    "expected_behavior": "The form is saved",
+                    "codebase_context": "Original context",
+                    "relevant_files": [
+                        {"path": "src/form.py", "reason": "Contains the handler"}
+                    ],
+                    "possible_causes": [],
+                    "context_branch": "main",
+                    "context_commit_sha": "abcdef",
+                },
+                "status": "pending",
+                "created_at": now,
+                "expires_at": now + 300,
+            },
+            [
+                {
+                    "position": 0,
+                    "telegram_file_id": "old-file",
+                    "telegram_file_unique_id": "old-unique",
+                    "mime_type": "image/png",
+                    "file_size": 100,
+                }
+            ],
+        )
+
     def test_admin_creates_issue_draft_for_chat_repo_with_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
@@ -148,6 +205,114 @@ class IssueManagerTests(unittest.TestCase):
             response = manager.create(IncomingMessage(20, 10, "admin", "/issue bug"), "bug")
             self.assertIn("Issue draft not created", response)
             self.assertIn("truncated", response)
+
+    def test_author_feedback_revises_same_draft_and_appends_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(db)
+            planner = FakePlanner()
+            manager = IssueManager(db, planner, FakeExecution())
+            before = int(time.time()) + 3500
+            response = manager.revise(
+                IncomingMessage(
+                    20,
+                    10,
+                    "admin",
+                    "make the title shorter",
+                    attachments=(
+                        IncomingAttachment("new-file", "new-unique", "image/jpeg", 200),
+                    ),
+                ),
+                "i-abcdef12",
+                "make the title shorter",
+            )
+
+            self.assertIn("Issue draft revised.", response)
+            self.assertIn("Draft ID: i-abcdef12", response)
+            self.assertIn("Revision: 2", response)
+            self.assertIn("Images: 2", response)
+            stored = db.get_issue_draft("i-abcdef12")
+            assert stored is not None
+            self.assertEqual(stored["issue_json"]["title"], "Short title")
+            self.assertEqual(len(stored["attachments"]), 2)
+            self.assertGreaterEqual(stored["expires_at"], before)
+            revisions = db.get_issue_draft_revisions("i-abcdef12")
+            self.assertEqual([item["revision_number"] for item in revisions], [1, 2])
+            self.assertEqual(revisions[1]["feedback_text"], "make the title shorter")
+            self.assertEqual(planner.revise_calls[0]["feedback_history"], [])
+
+    def test_only_original_author_can_edit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "author", "admin")
+            db.upsert_user(11, "other", "admin")
+            self.create_pending_draft(db)
+            planner = FakePlanner()
+            manager = IssueManager(db, planner, FakeExecution())
+            response = manager.revise(
+                IncomingMessage(20, 11, "other", "change it"),
+                "i-abcdef12",
+                "change it",
+            )
+            self.assertIn("Only the original author", response)
+            self.assertEqual(planner.revise_calls, [])
+
+    def test_image_only_edit_skips_llm_and_duplicate_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(db)
+            planner = FakePlanner()
+            manager = IssueManager(db, planner, FakeExecution())
+            duplicate = IncomingAttachment("retry-file", "old-unique", "image/png", 100)
+            self.assertIn(
+                "No changes supplied",
+                manager.revise(
+                    IncomingMessage(20, 10, "admin", "", attachments=(duplicate,)),
+                    "i-abcdef12",
+                    "",
+                ),
+            )
+            new_image = IncomingAttachment("new-file", "new-unique", "image/png", 100)
+            response = manager.revise(
+                IncomingMessage(20, 10, "admin", "", attachments=(new_image,)),
+                "i-abcdef12",
+                "",
+            )
+            self.assertIn("Revision: 2", response)
+            self.assertEqual(planner.revise_calls, [])
+
+    def test_planner_failure_does_not_append_revision_images(self):
+        class FailingRevisionPlanner(FakePlanner):
+            def revise_draft(self, **kwargs):
+                raise RepositoryContextError("context unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(db)
+            manager = IssueManager(db, FailingRevisionPlanner(), FakeExecution())
+            response = manager.revise(
+                IncomingMessage(
+                    20,
+                    10,
+                    "admin",
+                    "change",
+                    attachments=(IncomingAttachment("new", "new", "image/png", 100),),
+                ),
+                "i-abcdef12",
+                "change",
+            )
+            self.assertIn("Issue draft not revised", response)
+            stored = db.get_issue_draft("i-abcdef12")
+            assert stored is not None
+            self.assertEqual(len(stored["attachments"]), 1)
+            self.assertEqual(stored["revision_number"], 1)
 
 
 if __name__ == "__main__":

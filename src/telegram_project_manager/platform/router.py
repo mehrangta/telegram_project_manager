@@ -25,6 +25,7 @@ class IncomingMessage:
     message_id: int | None = None
     media_group_id: str | None = None
     thread_id: int | None = None
+    reply_to_draft_id: str | None = None
 
 
 class BotHandler(Protocol):
@@ -42,7 +43,7 @@ class TelegramRouter:
         self.bot_username = username.lstrip("@")
 
     async def handle_message(self, message: IncomingMessage) -> str | None:
-        if not self._should_handle(message.text, message.is_private):
+        if not self._should_handle(message):
             return None
         cleaned = self._strip_mention(message.text)
         message = IncomingMessage(
@@ -55,6 +56,7 @@ class TelegramRouter:
             message_id=message.message_id,
             media_group_id=message.media_group_id,
             thread_id=message.thread_id,
+            reply_to_draft_id=message.reply_to_draft_id,
         )
         for handler in self.handlers:
             response = await handler.handle(message)
@@ -62,8 +64,11 @@ class TelegramRouter:
                 return response
         return None
 
-    def _should_handle(self, text: str, is_private: bool) -> bool:
-        if is_private:
+    def _should_handle(self, message: IncomingMessage) -> bool:
+        text = message.text
+        if message.is_private:
+            return True
+        if message.reply_to_draft_id:
             return True
         if text.startswith("/"):
             return True

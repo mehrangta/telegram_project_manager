@@ -111,7 +111,11 @@ class RepositoryContextTests(unittest.TestCase):
 
 
 class FakeRepositoryContext:
+    def __init__(self):
+        self.calls = []
+
     def collect(self, **kwargs):
+        self.calls.append(kwargs)
         return RepositoryContext(
             repo=kwargs["repo"],
             branch=kwargs["branch"],
@@ -175,6 +179,37 @@ class IssuePlannerContextTests(unittest.TestCase):
                 stored["issue_json"]["possible_causes"][0]["evidence_paths"],
                 ["src/button_handler.py"],
             )
+
+    def test_revision_refreshes_context_and_uses_explicit_history_without_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            llm = FakeLlm()
+            context = FakeRepositoryContext()
+            planner = IssuePlanner(db, llm, context)
+            issue = planner.revise_draft(
+                record={
+                    "request_text": "button broken",
+                    "repo": "owner/repo",
+                    "default_branch": "main",
+                    "issue_json": {
+                        "title": "Old",
+                        "summary": "Old summary",
+                        "actual_behavior": "Old actual",
+                        "expected_behavior": "Old expected",
+                    },
+                },
+                feedback_history=["focus on save flow"],
+                new_feedback="make the title shorter",
+            )
+
+            self.assertEqual(issue.context_commit_sha, "abcdef1234567890")
+            self.assertIn("focus on save flow", context.calls[0]["request_text"])
+            self.assertIn("make the title shorter", context.calls[0]["request_text"])
+            self.assertNotIn("memory_key", llm.calls[0][2])
+            self.assertIn("Previous revision feedback", llm.calls[0][1])
+            self.assertIn("focus on save flow", llm.calls[0][1])
+            self.assertIn("make the title shorter", llm.calls[0][1])
 
 
 if __name__ == "__main__":

@@ -3,7 +3,11 @@ from __future__ import annotations
 import time
 import uuid
 
-from telegram_project_manager.bots.issue_manager.prompts import SYSTEM_PROMPT, build_user_prompt
+from telegram_project_manager.bots.issue_manager.prompts import (
+    SYSTEM_PROMPT,
+    build_revision_prompt,
+    build_user_prompt,
+)
 from telegram_project_manager.bots.issue_manager.schemas import ISSUE_DRAFT_RESPONSE_SCHEMA, IssueDraft
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
@@ -89,3 +93,37 @@ class IssuePlanner:
             draft_id,
         )
         return draft_id, issue
+
+    def revise_draft(
+        self,
+        *,
+        record: dict,
+        feedback_history: list[str],
+        new_feedback: str,
+    ) -> IssueDraft:
+        search_text = "\n".join(
+            [str(record["request_text"]), *feedback_history, new_feedback]
+        )
+        context = self.repository_context.collect(
+            repo=str(record["repo"]),
+            branch=str(record["default_branch"]),
+            request_text=search_text,
+        )
+        raw = self.llm.chat_json(
+            SYSTEM_PROMPT,
+            build_revision_prompt(
+                original_request=str(record["request_text"]),
+                current_issue=dict(record["issue_json"]),
+                feedback_history=feedback_history,
+                new_feedback=new_feedback,
+                repo=str(record["repo"]),
+                repository_context=context.to_prompt(),
+            ),
+            response_schema=ISSUE_DRAFT_RESPONSE_SCHEMA,
+        )
+        return IssueDraft.from_llm(
+            raw,
+            context_branch=context.branch,
+            context_commit_sha=context.commit_sha,
+            allowed_paths=context.paths,
+        )

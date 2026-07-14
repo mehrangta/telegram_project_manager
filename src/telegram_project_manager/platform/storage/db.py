@@ -26,6 +26,9 @@ class Database:
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -127,6 +130,22 @@ class Database:
                     FOREIGN KEY(draft_id) REFERENCES issue_drafts(id) ON DELETE CASCADE,
                     UNIQUE(draft_id, position)
                 );
+
+                CREATE TABLE IF NOT EXISTS issue_draft_revisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    draft_id TEXT NOT NULL,
+                    revision_number INTEGER NOT NULL,
+                    feedback_text TEXT NOT NULL,
+                    issue_json TEXT NOT NULL,
+                    added_attachments_json TEXT NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(draft_id) REFERENCES issue_drafts(id) ON DELETE CASCADE,
+                    UNIQUE(draft_id, revision_number)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_issue_draft_revisions_draft_number
+                ON issue_draft_revisions (draft_id, revision_number);
                 """
             )
 
@@ -382,6 +401,21 @@ class Database:
                     for item in attachments
                 ],
             )
+            conn.execute(
+                """
+                INSERT INTO issue_draft_revisions (
+                    draft_id, revision_number, feedback_text, issue_json,
+                    added_attachments_json, telegram_user_id, created_at
+                ) VALUES (?, 1, '', ?, ?, ?, ?)
+                """,
+                (
+                    draft["id"],
+                    json.dumps(draft["issue_json"], separators=(",", ":")),
+                    json.dumps(attachments, separators=(",", ":")),
+                    draft["telegram_user_id"],
+                    draft["created_at"],
+                ),
+            )
 
     def get_issue_draft(self, draft_id: str) -> dict[str, Any] | None:
         with self.session() as conn:
@@ -390,12 +424,135 @@ class Database:
                 "SELECT * FROM issue_attachments WHERE draft_id = ? ORDER BY position",
                 (draft_id,),
             ).fetchall()
+            revision_row = conn.execute(
+                "SELECT MAX(revision_number) AS revision_number FROM issue_draft_revisions WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
         if not row:
             return None
         draft = dict(row)
         draft["issue_json"] = json.loads(str(draft["issue_json"]))
         draft["attachments"] = [dict(item) for item in attachment_rows]
+        draft["revision_number"] = int(revision_row["revision_number"] or 1)
         return draft
+
+    def get_issue_draft_revisions(self, draft_id: str) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM issue_draft_revisions
+                WHERE draft_id = ?
+                ORDER BY revision_number
+                """,
+                (draft_id,),
+            ).fetchall()
+        revisions = [dict(row) for row in rows]
+        for revision in revisions:
+            revision["issue_json"] = json.loads(str(revision["issue_json"]))
+            revision["added_attachments"] = json.loads(str(revision.pop("added_attachments_json")))
+        return revisions
+
+    def revise_issue_draft(
+        self,
+        *,
+        draft_id: str,
+        telegram_chat_id: int,
+        telegram_user_id: int,
+        feedback_text: str,
+        issue_json: dict[str, Any],
+        attachments: list[dict[str, Any]],
+        expires_at: int,
+    ) -> int:
+        now = int(time.time())
+        encoded_issue = json.dumps(issue_json, separators=(",", ":"))
+        encoded_attachments = json.dumps(attachments, separators=(",", ":"))
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM issue_drafts WHERE id = ?",
+                (draft_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Issue draft not found.")
+            if int(row["telegram_chat_id"]) != telegram_chat_id:
+                raise ValueError("Issue draft belongs to a different chat.")
+            if int(row["telegram_user_id"]) != telegram_user_id:
+                raise ValueError("Only the original author can edit this issue draft.")
+            if str(row["status"]) != "pending":
+                raise ValueError(f"Issue draft is not pending. Current status: {row['status']}")
+            if int(row["expires_at"]) < now:
+                conn.execute("UPDATE issue_drafts SET status = 'expired' WHERE id = ?", (draft_id,))
+                conn.commit()
+                raise ValueError("Issue draft expired. Create a new draft with /issue.")
+
+            revision_row = conn.execute(
+                "SELECT MAX(revision_number) AS revision_number FROM issue_draft_revisions WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            current_revision = int(revision_row["revision_number"] or 0)
+            if current_revision == 0:
+                conn.execute(
+                    """
+                    INSERT INTO issue_draft_revisions (
+                        draft_id, revision_number, feedback_text, issue_json,
+                        added_attachments_json, telegram_user_id, created_at
+                    ) VALUES (?, 1, '', ?, '[]', ?, ?)
+                    """,
+                    (
+                        draft_id,
+                        str(row["issue_json"]),
+                        int(row["telegram_user_id"]),
+                        int(row["created_at"]),
+                    ),
+                )
+                current_revision = 1
+
+            next_position_row = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM issue_attachments WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            next_position = int(next_position_row["position"])
+            conn.executemany(
+                """
+                INSERT INTO issue_attachments (
+                    draft_id, position, telegram_file_id, telegram_file_unique_id,
+                    mime_type, file_size
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        draft_id,
+                        next_position + offset,
+                        item["telegram_file_id"],
+                        item["telegram_file_unique_id"],
+                        item["mime_type"],
+                        item["file_size"],
+                    )
+                    for offset, item in enumerate(attachments)
+                ],
+            )
+            revision_number = current_revision + 1
+            conn.execute(
+                "UPDATE issue_drafts SET issue_json = ?, expires_at = ? WHERE id = ?",
+                (encoded_issue, expires_at, draft_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO issue_draft_revisions (
+                    draft_id, revision_number, feedback_text, issue_json,
+                    added_attachments_json, telegram_user_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft_id,
+                    revision_number,
+                    feedback_text,
+                    encoded_issue,
+                    encoded_attachments,
+                    telegram_user_id,
+                    now,
+                ),
+            )
+        return revision_number
 
     def update_issue_draft_status(
         self,

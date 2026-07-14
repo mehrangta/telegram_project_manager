@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from typing import Any
 
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage, TelegramRouter
+
+
+DRAFT_ID_PATTERN = re.compile(r"(?m)^Draft ID:\s*(i-[0-9a-f]{8})\s*$")
 
 
 class TelegramBotApiError(RuntimeError):
@@ -110,6 +114,7 @@ def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | No
         message_id=message.get("message_id") if isinstance(message.get("message_id"), int) else None,
         media_group_id=str(message["media_group_id"]) if message.get("media_group_id") is not None else None,
         thread_id=message.get("message_thread_id") if isinstance(message.get("message_thread_id"), int) else None,
+        reply_to_draft_id=_reply_to_draft_id(message),
     )
 
 
@@ -130,7 +135,24 @@ def incoming_message_from_updates(updates: list[dict[str, Any]]) -> IncomingMess
         message_id=base.message_id,
         media_group_id=base.media_group_id,
         thread_id=base.thread_id,
+        reply_to_draft_id=next(
+            (item.reply_to_draft_id for item in messages if item.reply_to_draft_id), None
+        ),
     )
+
+
+def _reply_to_draft_id(message: dict[str, Any]) -> str | None:
+    replied = message.get("reply_to_message")
+    if not isinstance(replied, dict):
+        return None
+    sender = replied.get("from")
+    if not isinstance(sender, dict) or sender.get("is_bot") is not True:
+        return None
+    text = replied.get("text") if isinstance(replied.get("text"), str) else replied.get("caption")
+    if not isinstance(text, str):
+        return None
+    match = DRAFT_ID_PATTERN.search(text)
+    return match.group(1) if match else None
 
 
 def _attachments_from_message(message: dict[str, Any]) -> tuple[IncomingAttachment, ...]:

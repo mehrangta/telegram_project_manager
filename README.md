@@ -94,13 +94,17 @@ issue-assets branch and are not sent to the LLM.
 
 ```text
 /issue <prompt>                Generate an issue draft (admin)
+/edit <i-draft_id> <feedback>  Revise a pending issue draft (original author)
 /confirm <i-draft_id>          Create the reviewed GitHub issue (requesting admin)
 /cancel <i-draft_id>           Cancel an issue draft (admin)
 ```
 
 For images, send one photo or a captioned Telegram album with /issue as its
 caption. JPEG, PNG, and GIF are supported, up to 10 images, 10 MB each, and
-20 MB total.
+20 MB total. Before confirmation, the original author can reply directly to any
+draft preview with feedback, images, or both. Text feedback regenerates the
+draft using fresh repository context; new images are appended. Each successful
+edit keeps the same draft ID, records a revision, and renews the one-hour expiry.
 
 ### Configuration
 

@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 
+from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
 from telegram_project_manager.platform.telegram_bot import (
     incoming_message_from_update,
     incoming_message_from_updates,
@@ -76,6 +78,43 @@ class TelegramBotTests(unittest.TestCase):
         assert incoming is not None
         self.assertEqual(incoming.text, "/issue bug")
         self.assertEqual([item.file_id for item in incoming.attachments], ["first", "second"])
+
+    def test_extracts_draft_id_only_from_bot_preview_reply(self):
+        def update(is_bot):
+            return {
+                "message": {
+                    "message_id": 22,
+                    "from": {"id": 30},
+                    "chat": {"id": 40, "type": "supergroup"},
+                    "text": "make the title shorter",
+                    "reply_to_message": {
+                        "from": {"id": 99, "is_bot": is_bot},
+                        "text": "Issue draft created.\nDraft ID: i-abcdef12\nRevision: 1",
+                    },
+                }
+            }
+
+        bot_reply = incoming_message_from_update(update(True))
+        user_reply = incoming_message_from_update(update(False))
+        assert bot_reply is not None and user_reply is not None
+        self.assertEqual(bot_reply.reply_to_draft_id, "i-abcdef12")
+        self.assertIsNone(user_reply.reply_to_draft_id)
+
+    def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
+        class Handler:
+            async def handle(self, message):
+                return f"edited {message.reply_to_draft_id}"
+
+        router = TelegramRouter(None, [Handler()])
+        response = asyncio.run(
+            router.handle_message(
+                IncomingMessage(
+                    1, 2, "admin", "make it clearer",
+                    reply_to_draft_id="i-abcdef12",
+                )
+            )
+        )
+        self.assertEqual(response, "edited i-abcdef12")
 
 
 if __name__ == "__main__":

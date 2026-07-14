@@ -1,3 +1,7 @@
+import json
+from typing import Any
+
+
 SYSTEM_PROMPT = """You improve rough Telegram messages into concise GitHub issue drafts.
 Return only JSON matching the requested schema.
 Preserve the user's intent and facts.
@@ -12,10 +16,14 @@ Return no more than three possible causes, or an empty list when evidence is ins
 """
 
 
-def build_user_prompt(request_text: str, repo: str, repository_context: str) -> str:
-    safe_context = repository_context.replace(
+def _safe_repository_context(repository_context: str) -> str:
+    return repository_context.replace(
         "<repository_evidence>", "&lt;repository_evidence&gt;"
     ).replace("</repository_evidence>", "&lt;/repository_evidence&gt;")
+
+
+def build_user_prompt(request_text: str, repo: str, repository_context: str) -> str:
+    safe_context = _safe_repository_context(repository_context)
     return f"""Improve this request into a GitHub issue for {repo}.
 
 Request:
@@ -28,4 +36,41 @@ Repository evidence:
 
 Return a concise title, summary, actual behavior, expected behavior, codebase context,
 relevant files with reasons, and evidence-backed possible causes.
+"""
+
+
+def build_revision_prompt(
+    *,
+    original_request: str,
+    current_issue: dict[str, Any],
+    feedback_history: list[str],
+    new_feedback: str,
+    repo: str,
+    repository_context: str,
+) -> str:
+    safe_context = _safe_repository_context(repository_context)
+    prior_feedback = "\n".join(f"- {item}" for item in feedback_history if item) or "(none)"
+    return f"""Revise the current GitHub issue draft for {repo}.
+
+Original request:
+{original_request}
+
+Current draft JSON:
+{json.dumps(current_issue, ensure_ascii=False, separators=(",", ":"))}
+
+Previous revision feedback:
+{prior_feedback}
+
+New feedback:
+{new_feedback}
+
+Repository evidence was refreshed for this revision:
+<repository_evidence>
+{safe_context}
+</repository_evidence>
+
+Apply the new feedback while preserving valid facts and intent from the original request
+and current draft. Return the complete revised draft, including concise title, summary,
+actual behavior, expected behavior, codebase context, relevant files with reasons, and
+evidence-backed possible causes.
 """
