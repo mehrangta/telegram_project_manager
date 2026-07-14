@@ -175,6 +175,10 @@ class Database:
                     pull_request_url TEXT,
                     latest_activity TEXT NOT NULL DEFAULT '',
                     result_json TEXT,
+                    ci_head_sha TEXT,
+                    ci_wait_started_at INTEGER,
+                    ci_repair_attempts INTEGER NOT NULL DEFAULT 0,
+                    ci_checks_json TEXT,
                     error TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -202,6 +206,12 @@ class Database:
             )
             self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
             self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
+            self._ensure_column(conn, "code_jobs", "ci_head_sha", "TEXT")
+            self._ensure_column(conn, "code_jobs", "ci_wait_started_at", "INTEGER")
+            self._ensure_column(
+                conn, "code_jobs", "ci_repair_attempts", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(conn, "code_jobs", "ci_checks_json", "TEXT")
 
     @staticmethod
     def _ensure_column(
@@ -755,7 +765,7 @@ class Database:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS count FROM code_jobs
-                WHERE status IN ('queued_plan', 'queued_plan_edit', 'queued_code')
+                WHERE status IN ('queued_plan', 'queued_plan_edit', 'queued_code', 'queued_checks')
                 """
             ).fetchone()
         return int(row["count"]) if row else 0
@@ -781,6 +791,10 @@ class Database:
             "pull_request_url",
             "latest_activity",
             "result_json",
+            "ci_head_sha",
+            "ci_wait_started_at",
+            "ci_repair_attempts",
+            "ci_checks_json",
             "error",
         }
         unknown = set(values) - allowed_columns
@@ -789,7 +803,7 @@ class Database:
         if not values:
             return False
         encoded = dict(values)
-        for key in ("plan_json", "feedback_json", "result_json"):
+        for key in ("plan_json", "feedback_json", "result_json", "ci_checks_json"):
             if key in encoded and encoded[key] is not None and not isinstance(encoded[key], str):
                 encoded[key] = json.dumps(encoded[key], separators=(",", ":"))
         encoded["updated_at"] = int(time.time())
@@ -828,6 +842,7 @@ class Database:
             "coding",
             "validating",
             "pushing",
+            "repairing_checks",
         )
         placeholders = ",".join("?" for _ in running)
         with self.session() as conn:
@@ -854,6 +869,7 @@ class Database:
             ("plan_json", None),
             ("feedback_json", []),
             ("result_json", None),
+            ("ci_checks_json", None),
         ):
             value = job.get(key)
             job[key] = json.loads(str(value)) if value else default

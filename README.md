@@ -134,8 +134,14 @@ Reply `approve` to the progress message to implement the plan. Reply with any
 other text to revise the plan on the same draft pull request, or reply `discard`
 to close the pull request and delete its branch. After approval, Codex works in
 a workspace-write sandbox, must report a successful validation command, removes
-the temporary plan file, pushes the implementation, and marks the pull request
-ready for review.
+  the temporary plan file, pushes the implementation, and marks the pull request
+  ready for review. The job then waits for every reported check on the current PR
+  head. Passed, neutral, and skipped checks are accepted; ordinary CI failures are
+  sent back to Codex for up to two focused repair commits. Cancelled, timed-out,
+  stale, action-required, and startup failures are reported for manual action.
+  Each pushed commit may wait up to 30 minutes, while repositories that publish no
+  checks remain supported after a 60-second discovery grace. The Telegram job is
+  reported as ready and its workspace is cleaned only after this gate succeeds.
 
 ```text
 /code #123                         Plan an issue in this chat's active repo

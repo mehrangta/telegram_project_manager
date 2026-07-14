@@ -15,6 +15,7 @@ from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.prompts import (
     DEVELOPER_INSTRUCTIONS,
+    ci_repair_prompt,
     coding_prompt,
     plan_edit_prompt,
     planning_prompt,
@@ -30,6 +31,7 @@ from telegram_project_manager.bots.code_manager.workspace import (
     CodeGitHubService,
     GitWorkspaceService,
     IssueContext,
+    PullRequestCheck,
     WorkspaceError,
 )
 from telegram_project_manager.integrations.gh.runner import GhError
@@ -40,11 +42,16 @@ PLAN_PATH_TEMPLATE = ".codex/plans/{job_id}.md"
 MAX_QUEUED_JOBS = 10
 PLAN_TIMEOUT_SECONDS = 15 * 60
 CODE_TIMEOUT_SECONDS = 45 * 60
+CHECK_POLL_SECONDS = 10
+CHECK_GRACE_SECONDS = 60
+CHECK_TIMEOUT_SECONDS = 30 * 60
+MAX_CI_REPAIR_ATTEMPTS = 2
 TERMINAL_STATUSES = {"ready", "discarded"}
 ACTIVE_STATUSES = {
     "queued_plan",
     "queued_plan_edit",
     "queued_code",
+    "queued_checks",
     "preparing",
     "planning",
     "editing_plan",
@@ -52,6 +59,8 @@ ACTIVE_STATUSES = {
     "coding",
     "validating",
     "pushing",
+    "waiting_checks",
+    "repairing_checks",
     "failed",
     "interrupted",
 }
@@ -67,19 +76,29 @@ class CodeJobService:
         github: CodeGitHubService,
         reporter: CodeProgressReporter,
         max_concurrent: int = 2,
+        check_poll_seconds: float = CHECK_POLL_SECONDS,
+        check_grace_seconds: float = CHECK_GRACE_SECONDS,
+        check_timeout_seconds: float = CHECK_TIMEOUT_SECONDS,
+        max_ci_repair_attempts: int = MAX_CI_REPAIR_ATTEMPTS,
     ) -> None:
         self.db = db
         self.codex = codex
         self.workspaces = workspaces
         self.github = github
         self.reporter = reporter
+        self.check_poll_seconds = check_poll_seconds
+        self.check_grace_seconds = check_grace_seconds
+        self.check_timeout_seconds = check_timeout_seconds
+        self.max_ci_repair_attempts = max_ci_repair_attempts
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def recover(self) -> None:
         self.db.mark_running_code_jobs_interrupted()
         for job in self.db.list_code_jobs(limit=100):
-            if job["status"] in {"queued_plan", "queued_plan_edit", "queued_code"}:
+            if job["status"] in {
+                "queued_plan", "queued_plan_edit", "queued_code", "queued_checks", "waiting_checks"
+            }:
                 self._schedule(str(job["id"]), str(job["resume_phase"]))
             elif job["status"] == "interrupted":
                 try:
@@ -191,9 +210,12 @@ class CodeJobService:
         if job["status"] not in {"failed", "interrupted"}:
             raise ValueError("Only failed or interrupted code jobs can be retried.")
         phase = str(job["resume_phase"])
-        status = "queued_code" if phase == "code" else (
-            "queued_plan_edit" if job.get("pull_request_number") else "queued_plan"
-        )
+        if phase == "checks":
+            status = "queued_checks"
+        elif phase == "code":
+            status = "queued_code"
+        else:
+            status = "queued_plan_edit" if job.get("pull_request_number") else "queued_plan"
         if not self.db.update_code_job(
             job_id,
             {"status": status, "error": None, "latest_activity": "Retry queued"},
@@ -243,19 +265,28 @@ class CodeJobService:
         task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
 
     async def _run(self, job_id: str, phase: str) -> None:
-        async with self._semaphore:
-            try:
-                if phase == "plan":
+        failure_phase = phase
+        try:
+            if phase == "plan":
+                async with self._semaphore:
                     await self._run_plan(job_id)
-                else:
+            elif phase == "code":
+                async with self._semaphore:
                     await self._run_code(job_id)
-            except asyncio.CancelledError:
-                raise
-            except (CodexSdkError, CodeJobValidationError, WorkspaceError, GhError, ValueError) as exc:
-                await self._fail(job_id, str(exc), phase)
-            except Exception as exc:
-                logging.exception("Unexpected code job failure: %s", job_id)
-                await self._fail(job_id, f"Unexpected failure: {exc}", phase)
+                job = self.db.get_code_job(job_id)
+                if job and job["status"] == "queued_checks":
+                    failure_phase = "checks"
+                    await self._run_checks(job_id)
+            else:
+                failure_phase = "checks"
+                await self._run_checks(job_id)
+        except asyncio.CancelledError:
+            raise
+        except (CodexSdkError, CodeJobValidationError, WorkspaceError, GhError, ValueError) as exc:
+            await self._fail(job_id, str(exc), failure_phase)
+        except Exception as exc:
+            logging.exception("Unexpected code job failure: %s", job_id)
+            await self._fail(job_id, f"Unexpected failure: {exc}", failure_phase)
 
     async def _run_plan(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -477,25 +508,267 @@ class CodeJobService:
             pr_url = str(pr["html_url"])
             pr_number = int(pr["number"])
         await asyncio.to_thread(self.github.mark_ready, pr_url)
-        self.db.update_code_job(
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "queued_checks",
+                "resume_phase": "checks",
+                "latest_activity": "Pull request ready; waiting for CI checks",
+                "pull_request_number": pr_number,
+                "pull_request_url": pr_url,
+                "result_json": {
+                    **result.to_json(),
+                    "files": files,
+                    "commit_sha": sha,
+                    "repairs": [],
+                },
+                "ci_head_sha": sha,
+                "ci_wait_started_at": int(time.time()),
+                "ci_repair_attempts": 0,
+                "ci_checks_json": [],
+                "error": None,
+            },
+            allowed_statuses=("pushing",),
+        ):
+            return
+        self.db.audit("code.checks", "queued", {"pr": pr_number, "sha": sha}, job_id)
+        await self.reporter.refresh(job_id, force=True)
+
+    async def _run_checks(self, job_id: str) -> None:
+        job = self._require_job(job_id)
+        if job["status"] == "queued_checks":
+            if not self.db.update_code_job(
+                job_id,
+                {"status": "waiting_checks", "resume_phase": "checks", "error": None},
+                allowed_statuses=("queued_checks",),
+            ):
+                return
+        elif job["status"] != "waiting_checks":
+            return
+        await self.reporter.refresh(job_id, force=True)
+        while True:
+            if self._discarded(job_id):
+                return
+            job = self._require_job(job_id)
+            pr_url = str(job["pull_request_url"])
+            remote_sha = await asyncio.to_thread(self.github.get_pr_head_sha, pr_url)
+            expected_sha = str(job.get("ci_head_sha") or "")
+            if remote_sha != expected_sha:
+                now = int(time.time())
+                self.db.update_code_job(
+                    job_id,
+                    {
+                        "ci_head_sha": remote_sha,
+                        "ci_wait_started_at": now,
+                        "ci_checks_json": [],
+                        "latest_activity": "PR head changed; waiting for its CI checks",
+                    },
+                )
+                job = self._require_job(job_id)
+            checks = await asyncio.to_thread(self.github.get_pr_checks, pr_url)
+            snapshot = [check.to_json() for check in checks]
+            self.db.update_code_job(job_id, {"ci_checks_json": snapshot})
+            started = int(job.get("ci_wait_started_at") or time.time())
+            elapsed = time.time() - started
+
+            failures = tuple(
+                check for check in checks if check.bucket in {"fail", "cancel"}
+            )
+            unknown = tuple(
+                check
+                for check in checks
+                if check.bucket not in {"pass", "skipping", "pending", "fail", "cancel"}
+            )
+            if failures or unknown:
+                rejected = failures + unknown
+                code_failures = tuple(
+                    check
+                    for check in rejected
+                    if check.bucket == "fail" and check.state in {"failure", "failed"}
+                )
+                infrastructure = tuple(check for check in rejected if check not in code_failures)
+                if infrastructure:
+                    raise WorkspaceError(_check_failure_message("CI infrastructure check failed", infrastructure))
+                attempts = int(job.get("ci_repair_attempts") or 0)
+                if attempts >= self.max_ci_repair_attempts:
+                    raise WorkspaceError(
+                        _check_failure_message(
+                            f"CI checks still fail after {attempts} automatic repairs", code_failures
+                        )
+                    )
+                diagnostics = await asyncio.to_thread(
+                    self.github.failed_check_diagnostics,
+                    repo=str(job["repo"]),
+                    checks=code_failures,
+                )
+                await self._repair_ci(job_id, diagnostics, attempts + 1)
+                continue
+
+            if checks and all(check.bucket in {"pass", "skipping"} for check in checks):
+                await self._complete_checks(job_id, checks)
+                return
+            if not checks and elapsed >= self.check_grace_seconds:
+                await self._complete_checks(job_id, checks)
+                return
+            if elapsed >= self.check_timeout_seconds:
+                pending = tuple(check for check in checks if check.bucket == "pending")
+                detail = _check_failure_message("Timed out waiting for CI checks", pending)
+                raise WorkspaceError(detail)
+
+            pending_count = sum(check.bucket == "pending" for check in checks)
+            activity = (
+                f"Waiting for {pending_count} pending CI check(s)"
+                if checks
+                else "Waiting for CI checks to appear"
+            )
+            self.db.update_code_job(job_id, {"latest_activity": activity})
+            await self.reporter.refresh(job_id)
+            await asyncio.sleep(self.check_poll_seconds)
+
+    async def _repair_ci(self, job_id: str, diagnostics: str, attempt: int) -> None:
+        job = self._require_job(job_id)
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "repairing_checks",
+                "latest_activity": f"Codex is repairing failed CI checks ({attempt}/{self.max_ci_repair_attempts})",
+            },
+            allowed_statuses=("waiting_checks",),
+        ):
+            return
+        await self.reporter.refresh(job_id, force=True)
+        path = Path(str(job["workspace_path"]))
+        source = self._ensure_source(job)
+        if not (path / ".git").exists():
+            await asyncio.to_thread(
+                self.workspaces.checkout_existing,
+                source_path=source,
+                repo=str(job["repo"]),
+                branch=str(job["target_branch"]),
+                path=path,
+            )
+        await asyncio.to_thread(
+            self.workspaces.sync_to_remote_head,
+            path=path,
+            branch=str(job["target_branch"]),
+            expected_sha=str(job["ci_head_sha"]),
+        )
+        implementation = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
+        plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
+        async with self._semaphore:
+            _, raw = await self.codex.run_turn(
+                job_id=job_id,
+                cwd=str(path),
+                prompt=ci_repair_prompt(
+                    dict(job["issue_context_json"]), plan, implementation, diagnostics, attempt
+                ),
+                output_schema=CODE_RESULT_SCHEMA,
+                sandbox=Sandbox.workspace_write,
+                effort=ReasoningEffort.medium,
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
+                timeout_seconds=CODE_TIMEOUT_SECONDS,
+                on_progress=lambda event: self.reporter.activity(job_id, event),
+                on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
+            )
+        result = CodeResult.from_json(raw)
+        if self._discarded(job_id):
+            return
+        files = await asyncio.to_thread(
+            self.workspaces.validate_code_changes,
+            path=path,
+            plan_path=PLAN_PATH_TEMPLATE.format(job_id=job_id),
+        )
+        sha = await asyncio.to_thread(
+            self.workspaces.commit_code,
+            path=path,
+            message=result.commit_message,
+            first_push=False,
+        )
+        job = self._require_job(job_id)
+        stored = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
+        all_files = sorted(
+            {
+                *(str(item) for item in stored.get("files") or []),
+                *(str(item) for item in files),
+            }
+        )
+        title = f"Fix #{job['issue_number']}: {job['issue_title']}"[:256]
+        await asyncio.to_thread(
+            self.github.update_pr,
+            repo=str(job["repo"]),
+            number=int(job["pull_request_number"]),
+            title=title,
+            body=_ready_pr_body(job, result, all_files, sha),
+        )
+        repairs = [dict(item) for item in stored.get("repairs") or [] if isinstance(item, dict)]
+        repairs.append({**result.to_json(), "files": files, "commit_sha": sha})
+        stored["repairs"] = repairs
+        stored["files"] = all_files
+        stored["commit_sha"] = sha
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "waiting_checks",
+                "resume_phase": "checks",
+                "latest_activity": f"Repair {attempt} pushed; waiting for new CI checks",
+                "result_json": stored,
+                "ci_head_sha": sha,
+                "ci_wait_started_at": int(time.time()),
+                "ci_repair_attempts": attempt,
+                "ci_checks_json": [],
+                "error": None,
+            },
+            allowed_statuses=("repairing_checks",),
+        ):
+            return
+        self.db.audit("code.checks.repair", "ok", {"attempt": attempt, "sha": sha}, job_id)
+        await self.reporter.refresh(job_id, force=True)
+
+    async def _complete_checks(
+        self, job_id: str, checks: tuple[PullRequestCheck, ...]
+    ) -> None:
+        job = self._require_job(job_id)
+        stored = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
+        stored["ci"] = {
+            "head_sha": str(job.get("ci_head_sha") or ""),
+            "repair_attempts": int(job.get("ci_repair_attempts") or 0),
+            "checks": [check.to_json() for check in checks],
+        }
+        if not self.db.update_code_job(
             job_id,
             {
                 "status": "ready",
-                "latest_activity": "Implementation ready for review",
-                "pull_request_number": pr_number,
-                "pull_request_url": pr_url,
-                "result_json": {**result.to_json(), "files": files, "commit_sha": sha},
+                "latest_activity": "All pull request checks passed",
+                "result_json": stored,
+                "ci_checks_json": [check.to_json() for check in checks],
                 "error": None,
             },
+            allowed_statuses=("waiting_checks",),
+        ):
+            return
+        self.db.audit(
+            "code.ready",
+            "ok",
+            {
+                "pr": int(job["pull_request_number"]),
+                "checks": len(checks),
+                "repairs": int(job.get("ci_repair_attempts") or 0),
+            },
+            job_id,
         )
-        self.db.audit("code.ready", "ok", {"pr": pr_number, "files": len(files)}, job_id)
         await self.reporter.refresh(job_id, force=True)
-        await asyncio.to_thread(
-            self.workspaces.cleanup,
-            source_path=source,
-            path=path,
-            target_branch=str(job["target_branch"]),
-        )
+        source = self._ensure_source(job)
+        path = Path(str(job["workspace_path"]))
+        try:
+            await asyncio.to_thread(
+                self.workspaces.cleanup,
+                source_path=source,
+                path=path,
+                target_branch=str(job["target_branch"]),
+            )
+        except Exception:
+            logging.exception("Failed to clean completed code workspace: %s", job_id)
 
     async def _fail(self, job_id: str, error: str, phase: str) -> None:
         safe_error = " ".join(error.split())[:1000]
@@ -597,3 +870,14 @@ def _ready_pr_body(job: dict[str, Any], result: CodeResult, files: list[str], sh
         ]
     )
     return "\n".join(lines)
+
+
+def _check_failure_message(prefix: str, checks: tuple[PullRequestCheck, ...]) -> str:
+    if not checks:
+        return prefix
+    details = ", ".join(
+        f"{check.name} ({check.state or check.bucket})"
+        + (f" {check.link}" if check.link else "")
+        for check in checks
+    )
+    return f"{prefix}: {details}"

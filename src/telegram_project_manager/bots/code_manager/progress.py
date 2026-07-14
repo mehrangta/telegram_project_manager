@@ -88,6 +88,25 @@ class CodeProgressReporter:
                 pass
         if job.get("pull_request_url"):
             lines.append(f"Pull request: {job['pull_request_url']}")
+        checks = job.get("ci_checks_json")
+        if isinstance(checks, list):
+            passed = sum(
+                isinstance(item, dict) and item.get("bucket") in {"pass", "skipping"}
+                for item in checks
+            )
+            pending = sum(
+                isinstance(item, dict) and item.get("bucket") == "pending" for item in checks
+            )
+            failed = sum(
+                isinstance(item, dict) and item.get("bucket") in {"fail", "cancel"}
+                for item in checks
+            )
+            lines.append(
+                f"CI checks: {passed} passed, {pending} pending, {failed} failed"
+            )
+            attempts = int(job.get("ci_repair_attempts") or 0)
+            if attempts:
+                lines.append(f"CI repair attempts: {attempts}")
         if job.get("error"):
             lines.extend(["", f"Error: {job['error']}"])
         status = str(job["status"])

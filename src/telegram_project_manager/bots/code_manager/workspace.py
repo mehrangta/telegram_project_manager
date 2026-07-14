@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -24,6 +26,11 @@ SENSITIVE_PATTERNS = (
 )
 MAX_CHANGED_FILES = 100
 MAX_CHANGED_BYTES = 5_000_000
+MAX_CI_DIAGNOSTIC_CHARS = 50_000
+ACTION_RUN_RE = re.compile(r"/actions/runs/(\d+)")
+API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", re.IGNORECASE)
+BEARER_TOKEN_RE = re.compile(r"(?i)(authorization:\s*bearer\s+)\S+")
 
 
 WorkspaceError = LocalRepositoryError
@@ -46,6 +53,26 @@ class IssueContext:
             "body": self.body,
             "url": self.url,
             "comments": list(self.comments),
+        }
+
+
+@dataclass(frozen=True)
+class PullRequestCheck:
+    name: str
+    state: str
+    bucket: str
+    link: str
+    workflow: str
+    description: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "state": self.state,
+            "bucket": self.bucket,
+            "link": self.link,
+            "workflow": self.workflow,
+            "description": self.description,
         }
 
 
@@ -145,6 +172,20 @@ class GitWorkspaceService:
 
     def is_dirty(self, path: Path) -> bool:
         return bool(self.commands.run(["git", "status", "--porcelain"], cwd=path).strip())
+
+    def sync_to_remote_head(self, *, path: Path, branch: str, expected_sha: str) -> None:
+        local_sha = self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
+        if local_sha == expected_sha:
+            return
+        if self.is_dirty(path):
+            raise WorkspaceError("workspace is dirty while the pull request head changed")
+        self.commands.run(["git", "fetch", "origin", branch], cwd=path, timeout=600)
+        remote_sha = self.commands.run(
+            ["git", "rev-parse", f"origin/{branch}"], cwd=path
+        ).strip()
+        if remote_sha != expected_sha:
+            raise WorkspaceError("pull request head changed again while preparing CI repair")
+        self.commands.run(["git", "reset", "--hard", expected_sha], cwd=path)
 
     def commit_plan(
         self,
@@ -309,6 +350,83 @@ class CodeGitHubService:
     def mark_ready(self, pr_url: str) -> None:
         self.gh.run(["pr", "ready", pr_url])
 
+    def get_pr_head_sha(self, pr_url: str) -> str:
+        result = self.gh.run(["pr", "view", pr_url, "--json", "headRefOid"])
+        try:
+            value = result.json()
+        except json.JSONDecodeError as exc:
+            raise GhError(result) from exc
+        sha = str(value.get("headRefOid") or "") if isinstance(value, dict) else ""
+        if not sha:
+            raise GhError(result)
+        return sha
+
+    def get_pr_checks(self, pr_url: str) -> tuple[PullRequestCheck, ...]:
+        result = self.gh.run(
+            [
+                "pr", "checks", pr_url, "--json",
+                "name,state,bucket,link,workflow,description",
+            ],
+            check=False,
+        )
+        raw: Any = None
+        if result.stdout.strip():
+            try:
+                raw = result.json()
+            except json.JSONDecodeError as exc:
+                raise GhError(result) from exc
+        if not isinstance(raw, list):
+            detail = f"{result.stderr}\n{result.stdout}".lower()
+            if "no checks reported" in detail:
+                return ()
+            raise GhError(result)
+        checks = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            checks.append(
+                PullRequestCheck(
+                    name=str(item.get("name") or "Unnamed check"),
+                    state=str(item.get("state") or "").lower(),
+                    bucket=str(item.get("bucket") or "").lower(),
+                    link=str(item.get("link") or ""),
+                    workflow=str(item.get("workflow") or ""),
+                    description=str(item.get("description") or ""),
+                )
+            )
+        return tuple(checks)
+
+    def failed_check_diagnostics(
+        self, *, repo: str, checks: tuple[PullRequestCheck, ...]
+    ) -> str:
+        parts: list[str] = []
+        seen_runs: set[str] = set()
+        for check in checks:
+            parts.append(
+                "\n".join(
+                    [
+                        f"Check: {check.name}",
+                        f"Workflow: {check.workflow or '(external check)'}",
+                        f"State: {check.state or check.bucket}",
+                        f"Description: {check.description or '(none)'}",
+                        f"Link: {check.link or '(none)'}",
+                    ]
+                )
+            )
+            match = ACTION_RUN_RE.search(check.link)
+            if not match or match.group(1) in seen_runs:
+                continue
+            run_id = match.group(1)
+            seen_runs.add(run_id)
+            result = self.gh.run(
+                ["run", "view", run_id, "--repo", repo, "--log-failed"],
+                check=False,
+            )
+            log = result.stdout.strip() if result.returncode == 0 else ""
+            if log:
+                parts.append(f"Failed GitHub Actions log for run {run_id}:\n{log}")
+        return _redact_ci_diagnostics("\n\n".join(parts))[:MAX_CI_DIAGNOSTIC_CHARS]
+
     def discard(self, *, repo: str, number: int | None, branch: str) -> None:
         if number is not None:
             try:
@@ -323,3 +441,9 @@ class CodeGitHubService:
             self.gh.api_value(f"repos/{repo}/git/refs/heads/{branch}", method="DELETE")
         except GhError:
             pass
+
+
+def _redact_ci_diagnostics(value: str) -> str:
+    value = API_KEY_RE.sub("[REDACTED_API_KEY]", value)
+    value = GITHUB_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", value)
+    return BEARER_TOKEN_RE.sub(r"\1[REDACTED]", value)
