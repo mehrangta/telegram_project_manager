@@ -7,7 +7,7 @@ from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
-from telegram_project_manager.bots.code_manager.codex_sdk import _safe_progress
+from telegram_project_manager.bots.code_manager.codex_sdk import _codex_config, _safe_progress
 from telegram_project_manager.bots.code_manager.schemas import CodeJobValidationError, CodeResult
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import (
@@ -204,6 +204,22 @@ class CodeSafetyTests(unittest.TestCase):
         assert event is not None
         self.assertNotIn("sk-example-secret-value", event["text"])
         self.assertIn("[REDACTED_API_KEY]", event["text"])
+
+    def test_progress_redacts_sdk_masked_api_keys(self):
+        event = _safe_progress(
+            "error",
+            {"error": {"message": "invalid sk-prefix****************suffix"}},
+        )
+        assert event is not None
+        self.assertEqual(event["text"], "invalid [REDACTED_API_KEY]")
+
+    def test_codex_config_sets_environment_and_runtime_base_url(self):
+        config = _codex_config("secret", "http://codex.example.test")
+        self.assertEqual(config.env["OPENAI_BASE_URL"], "http://codex.example.test")
+        self.assertEqual(
+            config.config_overrides,
+            ('openai_base_url="http://codex.example.test"',),
+        )
 
     def test_result_requires_a_successful_validation(self):
         with self.assertRaises(CodeJobValidationError):

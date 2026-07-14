@@ -53,14 +53,7 @@ class CodexSdkAdapter:
                 raise CodexSdkError(
                     "Codex provider is incomplete. Configure codex_base_url and codex_model."
                 )
-            client = AsyncCodex(
-                CodexConfig(
-                    env={
-                        "OPENAI_API_KEY": api_key,
-                        "OPENAI_BASE_URL": base_url,
-                    }
-                )
-            )
+            client = AsyncCodex(_codex_config(api_key, base_url))
             try:
                 await client.__aenter__()
                 await client.login_api_key(api_key)
@@ -229,6 +222,20 @@ def _safe_progress(method: str, payload: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def _sanitize_text(value: str) -> str:
-    value = re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED_API_KEY]", value)
+    value = re.sub(
+        r"sk-[A-Za-z0-9_-]+(?:\*+[A-Za-z0-9_-]+)?",
+        "[REDACTED_API_KEY]",
+        value,
+    )
     value = re.sub(r"(?i)(authorization:\s*bearer\s+)\S+", r"\1[REDACTED]", value)
     return value
+
+
+def _codex_config(api_key: str, base_url: str) -> CodexConfig:
+    return CodexConfig(
+        env={
+            "OPENAI_API_KEY": api_key,
+            "OPENAI_BASE_URL": base_url,
+        },
+        config_overrides=(f"openai_base_url={json.dumps(base_url)}",),
+    )
