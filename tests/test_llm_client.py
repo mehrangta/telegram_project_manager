@@ -70,6 +70,38 @@ class LlmClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(LlmError, "provider unavailable"):
                     client.chat_json("system", "user")
 
+    def test_uses_caller_supplied_json_schema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.set_setting("openai_model", "test-model")
+            db.set_secret("openai_api_key", "test-key")
+            schema = {
+                "title": "issue",
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            }
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content='{"title":"Bug"}'),
+                    "parsed": {"title": "Bug"},
+                    "parsing_error": None,
+                }
+                result = OpenAICompatibleClient(db).chat_json(
+                    "system",
+                    "user",
+                    response_schema=schema,
+                )
+            self.assertEqual(result, {"title": "Bug"})
+            chat_openai.return_value.with_structured_output.assert_called_once_with(
+                schema,
+                method="json_schema",
+                include_raw=True,
+            )
+
     def test_replays_persistent_memory_for_same_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

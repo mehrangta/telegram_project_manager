@@ -82,6 +82,22 @@ Generated plans include current actual behavior and expected behavior after the 
 /cancel <plan_id>              Cancel a plan (requester or admin)
 ```
 
+### Issue workflow
+
+Issue drafts use the active repository for the current chat. The LLM improves the
+prompt into a title, summary, actual behavior, and expected behavior. Images are
+embedded from an isolated issue-assets branch and are not sent to the LLM.
+
+```text
+/issue <prompt>                Generate an issue draft (admin)
+/confirm <i-draft_id>          Create the reviewed GitHub issue (requesting admin)
+/cancel <i-draft_id>           Cancel an issue draft (admin)
+```
+
+For images, send one photo or a captioned Telegram album with /issue as its
+caption. JPEG, PNG, and GIF are supported, up to 10 images, 10 MB each, and
+20 MB total.
+
 ### Configuration
 
 ```text

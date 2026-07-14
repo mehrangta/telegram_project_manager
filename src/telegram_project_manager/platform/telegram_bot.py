@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
+from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage, TelegramRouter
 
 
 class TelegramBotApiError(RuntimeError):
@@ -32,6 +32,30 @@ class TelegramBotApi:
         if not isinstance(result, list):
             raise TelegramBotApiError("Telegram Bot API getUpdates returned invalid data")
         return result
+
+    def get_file(self, file_id: str) -> dict[str, Any]:
+        result = self._call("getFile", {"file_id": file_id})
+        if not isinstance(result, dict) or not isinstance(result.get("file_path"), str):
+            raise TelegramBotApiError("Telegram Bot API getFile returned invalid data")
+        return result
+
+    def download_file(self, file_id: str, max_bytes: int = 10_000_000) -> bytes:
+        file_info = self.get_file(file_id)
+        file_path = str(file_info["file_path"])
+        request = urllib.request.Request(f"{self.base_url.replace('/bot', '/file/bot')}/{file_path}")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                declared_size = response.headers.get("Content-Length")
+                if declared_size and int(declared_size) > max_bytes:
+                    raise TelegramBotApiError("Telegram image exceeds the size limit")
+                content = response.read(max_bytes + 1)
+        except TelegramBotApiError:
+            raise
+        except OSError as exc:
+            raise TelegramBotApiError(f"Telegram file download failed: {exc}") from exc
+        if len(content) > max_bytes:
+            raise TelegramBotApiError("Telegram image exceeds the size limit")
+        return content
 
     def send_message(self, chat_id: int, text: str, message_thread_id: int | None = None) -> None:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
@@ -63,7 +87,7 @@ class TelegramBotApi:
 
 def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | None:
     message = update.get("message")
-    if not isinstance(message, dict) or not isinstance(message.get("text"), str):
+    if not isinstance(message, dict):
         return None
     sender = message.get("from")
     chat = message.get("chat")
@@ -71,13 +95,77 @@ def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | No
         return None
     if not isinstance(sender.get("id"), int) or not isinstance(chat.get("id"), int):
         return None
+    text = message.get("text") if isinstance(message.get("text"), str) else message.get("caption")
+    text = text if isinstance(text, str) else ""
+    attachments = _attachments_from_message(message)
+    if not text and not attachments:
+        return None
     return IncomingMessage(
         chat_id=chat["id"],
         user_id=sender["id"],
         username=str(sender.get("username") or ""),
-        text=message["text"].strip(),
+        text=text.strip(),
         is_private=chat.get("type") == "private",
+        attachments=attachments,
+        message_id=message.get("message_id") if isinstance(message.get("message_id"), int) else None,
+        media_group_id=str(message["media_group_id"]) if message.get("media_group_id") is not None else None,
+        thread_id=message.get("message_thread_id") if isinstance(message.get("message_thread_id"), int) else None,
     )
+
+
+def incoming_message_from_updates(updates: list[dict[str, Any]]) -> IncomingMessage | None:
+    messages = [item for item in (incoming_message_from_update(update) for update in updates) if item]
+    if not messages:
+        return None
+    messages.sort(key=lambda item: item.message_id or 0)
+    base = next((item for item in messages if item.text), messages[0])
+    attachments = tuple(attachment for item in messages for attachment in item.attachments)
+    return IncomingMessage(
+        chat_id=base.chat_id,
+        user_id=base.user_id,
+        username=base.username,
+        text=base.text,
+        is_private=base.is_private,
+        attachments=attachments,
+        message_id=base.message_id,
+        media_group_id=base.media_group_id,
+        thread_id=base.thread_id,
+    )
+
+
+def _attachments_from_message(message: dict[str, Any]) -> tuple[IncomingAttachment, ...]:
+    photo = message.get("photo")
+    if isinstance(photo, list):
+        sizes = [item for item in photo if isinstance(item, dict) and isinstance(item.get("file_id"), str)]
+        if sizes:
+            largest = max(
+                sizes,
+                key=lambda item: (
+                    int(item.get("file_size") or 0),
+                    int(item.get("width") or 0) * int(item.get("height") or 0),
+                ),
+            )
+            return (
+                IncomingAttachment(
+                    file_id=str(largest["file_id"]),
+                    file_unique_id=str(largest.get("file_unique_id") or largest["file_id"]),
+                    mime_type="image/jpeg",
+                    file_size=int(largest.get("file_size") or 0),
+                ),
+            )
+    document = message.get("document")
+    if isinstance(document, dict) and isinstance(document.get("file_id"), str):
+        mime_type = str(document.get("mime_type") or "")
+        if mime_type.startswith("image/"):
+            return (
+                IncomingAttachment(
+                    file_id=str(document["file_id"]),
+                    file_unique_id=str(document.get("file_unique_id") or document["file_id"]),
+                    mime_type=mime_type,
+                    file_size=int(document.get("file_size") or 0),
+                ),
+            )
+    return ()
 
 
 async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
@@ -87,6 +175,27 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
     logging.info("bot running as @%s", router.bot_username)
 
     offset: int | None = None
+    pending_albums: dict[str, list[dict[str, Any]]] = {}
+    album_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def dispatch(incoming: IncomingMessage | None) -> None:
+        if incoming is None:
+            return
+        response = await router.handle_message(incoming)
+        if response:
+            await asyncio.to_thread(bot.send_message, incoming.chat_id, response, incoming.thread_id)
+
+    async def flush_album(media_group_id: str) -> None:
+        await asyncio.sleep(0.75)
+        updates = pending_albums.pop(media_group_id, [])
+        album_tasks.pop(media_group_id, None)
+        try:
+            await dispatch(incoming_message_from_updates(updates))
+        except TelegramBotApiError:
+            logging.exception("Telegram album response failed")
+        except Exception:
+            logging.exception("Unexpected Telegram album processing failure")
+
     while True:
         try:
             updates = await asyncio.to_thread(bot.get_updates, offset)
@@ -94,19 +203,19 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
-                incoming = incoming_message_from_update(update)
-                if incoming is None:
+                raw_message = update.get("message")
+                media_group_id = (
+                    str(raw_message["media_group_id"])
+                    if isinstance(raw_message, dict) and raw_message.get("media_group_id") is not None
+                    else None
+                )
+                if media_group_id:
+                    pending_albums.setdefault(media_group_id, []).append(update)
+                    if media_group_id not in album_tasks:
+                        album_tasks[media_group_id] = asyncio.create_task(flush_album(media_group_id))
                     continue
-                response = await router.handle_message(incoming)
-                if response:
-                    message = update["message"]
-                    thread_id = message.get("message_thread_id")
-                    await asyncio.to_thread(
-                        bot.send_message,
-                        incoming.chat_id,
-                        response,
-                        thread_id if isinstance(thread_id, int) else None,
-                    )
+                incoming = incoming_message_from_update(update)
+                await dispatch(incoming)
         except TelegramBotApiError:
             logging.exception("Telegram polling failed; retrying in 5 seconds")
             await asyncio.sleep(5)

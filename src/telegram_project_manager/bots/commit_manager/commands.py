@@ -60,6 +60,7 @@ Commands:
 /repo set owner/repository
 /repo show
 /commit <request>
+/issue <prompt> (text or photo/album caption)
 /confirm <plan_id>
 /cancel <plan_id>
 /config show
@@ -169,15 +170,18 @@ Commands:
     def memory(self, message: IncomingMessage, rest: str) -> str:
         action = rest.strip().lower() or "status"
         session_id = memory_session_id(message.chat_id)
+        issue_session_id = f"issue-manager:{message.chat_id}"
         limit = int(self.db.get_setting("llm_memory_max_messages", str(DEFAULT_MEMORY_MAX_MESSAGES)))
         if action in {"status", "show"}:
-            count = self.db.count_llm_messages(session_id)
-            return f"LLM memory: {count}/{limit} messages for this chat."
+            commit_count = self.db.count_llm_messages(session_id)
+            issue_count = self.db.count_llm_messages(issue_session_id)
+            return f"LLM memory: commits {commit_count}/{limit}; issues {issue_count}/{limit}."
         if action == "clear":
             admin_error = self.permissions.require_admin(message.user_id)
             if admin_error:
                 return admin_error
             self.db.clear_llm_messages(session_id)
+            self.db.clear_llm_messages(issue_session_id)
             return "LLM memory cleared for this chat."
         return "Usage: /memory status | /memory clear"
 

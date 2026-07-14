@@ -7,12 +7,24 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 @dataclass(frozen=True)
+class IncomingAttachment:
+    file_id: str
+    file_unique_id: str
+    mime_type: str
+    file_size: int
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     chat_id: int
     user_id: int
     username: str
     text: str
     is_private: bool = False
+    attachments: tuple[IncomingAttachment, ...] = ()
+    message_id: int | None = None
+    media_group_id: str | None = None
+    thread_id: int | None = None
 
 
 class BotHandler(Protocol):
@@ -39,6 +51,10 @@ class TelegramRouter:
             username=message.username,
             text=cleaned,
             is_private=message.is_private,
+            attachments=message.attachments,
+            message_id=message.message_id,
+            media_group_id=message.media_group_id,
+            thread_id=message.thread_id,
         )
         for handler in self.handlers:
             response = await handler.handle(message)

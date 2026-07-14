@@ -68,7 +68,13 @@ class OpenAICompatibleClient:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def chat_json(self, system_prompt: str, user_prompt: str, memory_key: str | None = None) -> dict:
+    def chat_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        memory_key: str | None = None,
+        response_schema: dict | None = None,
+    ) -> dict:
         configured_base_url = self.db.get_setting("openai_base_url", "https://api.openai.com/v1")
         try:
             base_url = normalize_config_value("openai_base_url", configured_base_url)
@@ -92,7 +98,7 @@ class OpenAICompatibleClient:
                 timeout=90,
                 max_retries=2,
             ).with_structured_output(
-                COMMIT_PLAN_RESPONSE_SCHEMA,
+                response_schema or COMMIT_PLAN_RESPONSE_SCHEMA,
                 method="json_schema",
                 include_raw=True,
             )

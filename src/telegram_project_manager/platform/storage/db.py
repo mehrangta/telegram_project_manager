@@ -99,6 +99,34 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_llm_messages_session_id_id
                 ON llm_messages (session_id, id);
+
+                CREATE TABLE IF NOT EXISTS issue_drafts (
+                    id TEXT PRIMARY KEY,
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    repo TEXT NOT NULL,
+                    default_branch TEXT NOT NULL,
+                    request_text TEXT NOT NULL,
+                    issue_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    github_issue_number INTEGER,
+                    github_issue_url TEXT,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS issue_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    draft_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    telegram_file_id TEXT NOT NULL,
+                    telegram_file_unique_id TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    asset_path TEXT,
+                    FOREIGN KEY(draft_id) REFERENCES issue_drafts(id) ON DELETE CASCADE,
+                    UNIQUE(draft_id, position)
+                );
                 """
             )
 
@@ -312,6 +340,88 @@ class Database:
     def update_plan_status(self, plan_id: str, status: str) -> None:
         with self.session() as conn:
             conn.execute("UPDATE plans SET status = ? WHERE id = ?", (status, plan_id))
+
+    def create_issue_draft(self, draft: dict[str, Any], attachments: list[dict[str, Any]]) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO issue_drafts (
+                    id, telegram_chat_id, telegram_user_id, repo, default_branch,
+                    request_text, issue_json, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft["id"],
+                    draft["telegram_chat_id"],
+                    draft["telegram_user_id"],
+                    draft["repo"],
+                    draft["default_branch"],
+                    draft["request_text"],
+                    json.dumps(draft["issue_json"], separators=(",", ":")),
+                    draft["status"],
+                    draft["created_at"],
+                    draft["expires_at"],
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO issue_attachments (
+                    draft_id, position, telegram_file_id, telegram_file_unique_id,
+                    mime_type, file_size
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        draft["id"],
+                        item["position"],
+                        item["telegram_file_id"],
+                        item["telegram_file_unique_id"],
+                        item["mime_type"],
+                        item["file_size"],
+                    )
+                    for item in attachments
+                ],
+            )
+
+    def get_issue_draft(self, draft_id: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute("SELECT * FROM issue_drafts WHERE id = ?", (draft_id,)).fetchone()
+            attachment_rows = conn.execute(
+                "SELECT * FROM issue_attachments WHERE draft_id = ? ORDER BY position",
+                (draft_id,),
+            ).fetchall()
+        if not row:
+            return None
+        draft = dict(row)
+        draft["issue_json"] = json.loads(str(draft["issue_json"]))
+        draft["attachments"] = [dict(item) for item in attachment_rows]
+        return draft
+
+    def update_issue_draft_status(
+        self,
+        draft_id: str,
+        status: str,
+        issue_number: int | None = None,
+        issue_url: str | None = None,
+    ) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                UPDATE issue_drafts
+                SET status = ?,
+                    github_issue_number = COALESCE(?, github_issue_number),
+                    github_issue_url = COALESCE(?, github_issue_url)
+                WHERE id = ?
+                """,
+                (status, issue_number, issue_url, draft_id),
+            )
+
+    def set_issue_attachment_paths(self, draft_id: str, paths: list[str]) -> None:
+        with self.session() as conn:
+            conn.executemany(
+                "UPDATE issue_attachments SET asset_path = ? WHERE draft_id = ? AND position = ?",
+                [(path, draft_id, position) for position, path in enumerate(paths)],
+            )
 
     def audit(self, action: str, status: str, details: dict[str, Any], plan_id: str | None = None) -> None:
         now = int(time.time())

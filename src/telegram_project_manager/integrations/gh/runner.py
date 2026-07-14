@@ -60,17 +60,20 @@ class GhRunner:
         return result
 
     def api_json(self, endpoint: str, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:
+        value = self.api_value(endpoint, method=method, body=body)
+        if not isinstance(value, dict):
+            result = GhResult(["gh", "api", endpoint], 1, json.dumps(value), "Expected JSON object", 0)
+            raise GhError(result)
+        return value
+
+    def api_value(self, endpoint: str, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
         args = ["api", endpoint]
         if method != "GET":
             args.extend(["--method", method])
         if body is not None:
             args.extend(["--input", "-"])
         result = self.run(args, input_json=body)
-        value = result.json()
-        if not isinstance(value, dict):
-            raise GhError(result)
-        return value
+        return result.json()
 
     def auth_status(self) -> GhResult:
         return self.run(["auth", "status"], check=False)
-
