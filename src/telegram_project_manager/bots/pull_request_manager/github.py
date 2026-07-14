@@ -83,7 +83,14 @@ class DeploymentGitHubService:
             checks=tuple(_parse_check(item) for item in raw_checks if isinstance(item, dict)),
         )
 
-    def squash_merge(self, *, pr_url: str, head_sha: str) -> None:
+    def squash_merge(
+        self,
+        *,
+        pr_url: str,
+        head_sha: str,
+        commit_subject: str,
+        commit_body: str,
+    ) -> None:
         self.gh.run(
             [
                 "pr",
@@ -93,6 +100,10 @@ class DeploymentGitHubService:
                 "--delete-branch",
                 "--match-head-commit",
                 head_sha,
+                "--subject",
+                commit_subject,
+                "--body",
+                commit_body,
             ]
         )
 

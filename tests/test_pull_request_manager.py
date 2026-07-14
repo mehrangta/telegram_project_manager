@@ -147,7 +147,14 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deployed["deployment_run_url"], "https://run/91")
         self.assertEqual(
             self.github.merges,
-            [{"pr_url": "https://github.com/owner/repo/pull/42", "head_sha": "checked-sha"}],
+            [
+                {
+                    "pr_url": "https://github.com/owner/repo/pull/42",
+                    "head_sha": "checked-sha",
+                    "commit_subject": "Fix #12: Issue (#42)",
+                    "commit_body": "Closes #12",
+                }
+            ],
         )
         self.assertEqual(
             self.github.dispatches,
@@ -284,6 +291,34 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeploymentGitHubAdapterTests(unittest.TestCase):
+    def test_squash_merge_uses_explicit_commit_message(self):
+        class Runner:
+            def __init__(self):
+                self.args = None
+
+            def run(self, args):
+                self.args = args
+                return GhResult(["gh", *args], 0, "", "", 10)
+
+        runner = Runner()
+        github = DeploymentGitHubService(runner)
+        github.squash_merge(
+            pr_url="https://github.com/owner/repo/pull/42",
+            head_sha="checked-sha",
+            commit_subject="Fix #12: Issue (#42)",
+            commit_body="Closes #12",
+        )
+
+        self.assertEqual(
+            runner.args,
+            [
+                "pr", "merge", "https://github.com/owner/repo/pull/42",
+                "--squash", "--delete-branch", "--match-head-commit", "checked-sha",
+                "--subject", "Fix #12: Issue (#42)",
+                "--body", "Closes #12",
+            ],
+        )
+
     def test_dispatch_passes_merge_sha_and_parses_created_run_url(self):
         class Runner:
             def __init__(self):

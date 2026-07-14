@@ -191,8 +191,10 @@ After a `/code` job reports `ready`, an admin in the originating chat may run
 requires the PR to target `main`, verifies that its
 head is still the exact SHA accepted by the code-job CI gate, honors reviews,
 branch protection, and merge queues, then performs a squash merge and deletes
-the feature branch. It dispatches the configured workflow with the merge SHA as
-its `ref`, waits up to two minutes for the run to appear, and allows up to 30
+the feature branch. The squash commit uses an explicit issue-closing message so
+GitHub does not add the automation account as a co-author. It dispatches the
+configured workflow with the merge SHA as its `ref`, waits up to two minutes for
+the run to appear, and allows up to 30
 minutes for successful completion.
 The bot reports merge and deployment failures separately and resumes an active
 monitor after restart.

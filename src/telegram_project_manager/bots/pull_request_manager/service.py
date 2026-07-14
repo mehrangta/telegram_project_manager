@@ -128,10 +128,17 @@ class MergeDeploymentService:
         snapshot = await asyncio.to_thread(self.github.get_pr, pr_url)
         if not snapshot.merged:
             self._validate_preflight(job, snapshot)
+            pr_number = int(job["pull_request_number"])
+            suffix = f" (#{pr_number})"
+            subject = (
+                f"Fix #{job['issue_number']}: {job['issue_title']}"
+            )[: 256 - len(suffix)] + suffix
             await asyncio.to_thread(
                 self.github.squash_merge,
                 pr_url=pr_url,
                 head_sha=snapshot.head_sha,
+                commit_subject=subject,
+                commit_body=f"Closes #{job['issue_number']}",
             )
             deadline = time.time() + self.merge_timeout_seconds
             while True:
