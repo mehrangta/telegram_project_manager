@@ -4,11 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openai_codex import Sandbox
+from openai_codex import LocalImageInput, Sandbox, TextInput
 from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
-from telegram_project_manager.bots.code_manager.codex_sdk import _codex_config, _safe_progress
+from telegram_project_manager.bots.code_manager.codex_sdk import (
+    _codex_config,
+    _safe_progress,
+    _turn_input,
+)
 from telegram_project_manager.bots.code_manager.prompts import (
     ci_repair_prompt,
     coding_prompt,
@@ -22,8 +26,10 @@ from telegram_project_manager.bots.code_manager.workspace import (
     IssueContext,
     PullRequestCheck,
     WorkspaceError,
+    _managed_issue_asset_paths,
 )
 from telegram_project_manager.integrations.gh.runner import GhResult
+from telegram_project_manager.integrations.git.local_repository import GitTreeEntry
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
@@ -99,6 +105,9 @@ class FakeWorkspaces:
         self.rebase_continuation_results = []
         self.rebase_started = []
         self.rebase_pushed = []
+        self.image_paths = []
+        self.staged_images = []
+        self.removed_images = []
 
     def validate_source(self, *, source_path, repo):
         if not source_path:
@@ -133,6 +142,13 @@ class FakeWorkspaces:
 
     def is_dirty(self, path):
         return False
+
+    def stage_issue_images(self, **kwargs):
+        self.staged_images.append(kwargs)
+        return list(self.image_paths)
+
+    def remove_issue_images(self, *, path):
+        self.removed_images.append(path)
 
     def sync_to_remote_head(self, **kwargs):
         self.synced_heads.append(kwargs)
@@ -304,6 +320,25 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
             str(self.bot.sent_options[-1]["reply_markup"]),
         )
 
+    async def test_issue_images_are_attached_to_codex_and_cleaned(self):
+        image_path = str(Path(self.temp.name) / "repo" / ".codex" / "issue-images" / "1.png")
+        self.workspaces.image_paths = [image_path]
+
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=True,
+        )
+        await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(self.codex.calls[0]["image_paths"], (image_path,))
+        self.assertEqual(len(self.workspaces.staged_images), 1)
+        self.assertEqual(len(self.workspaces.removed_images), 1)
+
     async def test_skip_plan_codes_immediately_and_creates_pr(self):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=None, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
         ready = await wait_for_status(self.db, job_id, "ready")
@@ -469,6 +504,81 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodeSafetyTests(unittest.TestCase):
+    def test_codex_turn_input_combines_text_and_local_images(self):
+        turn_input = _turn_input("Implement issue", ("/tmp/one.png", "/tmp/two.jpg"))
+
+        self.assertIsInstance(turn_input, list)
+        assert isinstance(turn_input, list)
+        self.assertEqual(turn_input[0], TextInput("Implement issue"))
+        self.assertEqual(
+            turn_input[1:],
+            [LocalImageInput("/tmp/one.png"), LocalImageInput("/tmp/two.jpg")],
+        )
+
+    def test_managed_issue_images_are_staged_from_asset_branch(self):
+        png = bytes.fromhex("89504e470d0a1a0a") + b"image"
+
+        class Repositories:
+            def validate(self, source_path, repo):
+                return Path(source_path)
+
+            def fetch(self, source_path, branch):
+                self.branch = branch
+                return Path(source_path), "asset-commit"
+
+            def tree(self, source_path, commit):
+                return [
+                    GitTreeEntry(
+                        path=".issue-assets/i-12345678/1-deadbeef.png",
+                        sha="a" * 40,
+                        size=len(png),
+                        type="blob",
+                    )
+                ]
+
+            def read_blob(self, source_path, sha):
+                return png
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.git"
+            workspace = root / "repo"
+            source.mkdir()
+            workspace.mkdir()
+            repositories = Repositories()
+            service = GitWorkspaceService(repositories=repositories)
+            issue = {
+                "body": "![Issue image 1](../blob/issue-assets/.issue-assets/i-12345678/1-deadbeef.png?raw=true)",
+                "comments": [],
+            }
+
+            staged = service.stage_issue_images(
+                source_path=str(source),
+                repo="owner/repo",
+                issue=issue,
+                path=workspace,
+            )
+
+            self.assertEqual(repositories.branch, "issue-assets")
+            self.assertEqual(Path(staged[0]).read_bytes(), png)
+            service.remove_issue_images(path=workspace)
+            self.assertFalse((workspace / ".codex" / "issue-images").exists())
+
+    def test_issue_image_parser_rejects_external_and_traversal_links(self):
+        issue = {
+            "body": (
+                "![ok](https://github.com/owner/repo/blob/issue-assets/.issue-assets/i-1/one.jpg?raw=true)\n"
+                "![external](https://example.com/image.png)\n"
+                "![escape](../blob/issue-assets/../secret.png?raw=true)"
+            ),
+            "comments": [],
+        }
+
+        self.assertEqual(
+            _managed_issue_asset_paths(issue, "owner/repo"),
+            [".issue-assets/i-1/one.jpg"],
+        )
+
     def test_coding_prompt_excludes_plan_from_model_validation(self):
         prompt = coding_prompt(
             {"title": "Issue", "body": "Body", "comments": []},

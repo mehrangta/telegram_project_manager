@@ -6,7 +6,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from openai_codex import ApprovalMode, AsyncCodex, Sandbox
+from openai_codex import ApprovalMode, AsyncCodex, LocalImageInput, Sandbox, TextInput
 from openai_codex.client import CodexConfig
 from openai_codex.types import ReasoningEffort
 
@@ -87,6 +87,7 @@ class CodexSdkAdapter:
         job_id: str,
         cwd: str,
         prompt: str,
+        image_paths: tuple[str, ...] = (),
         output_schema: dict[str, Any],
         sandbox: Sandbox,
         effort: ReasoningEffort,
@@ -117,7 +118,7 @@ class CodexSdkAdapter:
                 )
             await on_thread(str(thread.id))
             turn = await thread.turn(
-                prompt,
+                _turn_input(prompt, image_paths),
                 approval_mode=ApprovalMode.auto_review,
                 cwd=cwd,
                 effort=effort,
@@ -162,6 +163,14 @@ class CodexSdkAdapter:
             raise CodexSdkError(f"Codex SDK failed: {exc}") from exc
         finally:
             self._active_turns.pop(job_id, None)
+
+
+def _turn_input(
+    prompt: str, image_paths: tuple[str, ...]
+) -> str | list[TextInput | LocalImageInput]:
+    if not image_paths:
+        return prompt
+    return [TextInput(prompt), *(LocalImageInput(path) for path in image_paths)]
 
 
 def _notification_data(notification: Any) -> dict[str, Any]:

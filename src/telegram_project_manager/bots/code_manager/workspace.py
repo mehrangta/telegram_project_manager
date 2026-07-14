@@ -6,8 +6,9 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError, LocalRepositoryService
@@ -27,6 +28,11 @@ SENSITIVE_PATTERNS = (
 MAX_CHANGED_FILES = 100
 MAX_CHANGED_BYTES = 5_000_000
 MAX_CI_DIAGNOSTIC_CHARS = 50_000
+MAX_ISSUE_IMAGES = 10
+MAX_ISSUE_IMAGE_BYTES = 10_000_000
+MAX_ISSUE_IMAGE_TOTAL_BYTES = 20_000_000
+ISSUE_IMAGE_DIRECTORY = ".codex/issue-images"
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
 ACTION_RUN_RE = re.compile(r"/actions/runs/(\d+)")
 API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", re.IGNORECASE)
@@ -320,6 +326,55 @@ class GitWorkspaceService:
         if target.exists() or target.is_symlink():
             target.unlink()
 
+    def stage_issue_images(
+        self,
+        *,
+        source_path: str,
+        repo: str,
+        issue: dict[str, Any],
+        path: Path,
+    ) -> list[str]:
+        asset_paths = _managed_issue_asset_paths(issue, repo)
+        self.remove_issue_images(path=path)
+        if not asset_paths:
+            return []
+        source = self.repositories.validate(source_path, repo)
+        source, commit = self.repositories.fetch(source, "issue-assets")
+        entries = {item.path: item for item in self.repositories.tree(source, commit)}
+        destination = path / ISSUE_IMAGE_DIRECTORY
+        staged: list[str] = []
+        total = 0
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            for position, asset_path in enumerate(asset_paths, start=1):
+                entry = entries.get(asset_path)
+                if entry is None or entry.type != "blob":
+                    raise WorkspaceError(f"Issue image is missing from issue-assets: {asset_path}")
+                if entry.size > MAX_ISSUE_IMAGE_BYTES:
+                    raise WorkspaceError("Each issue image must be 10 MB or smaller")
+                total += entry.size
+                if total > MAX_ISSUE_IMAGE_TOTAL_BYTES:
+                    raise WorkspaceError("Issue images must be 20 MB or smaller in total")
+                content = self.repositories.read_blob(source, entry.sha)
+                extension = PurePosixPath(asset_path).suffix.lower()
+                _validate_issue_image(content, extension)
+                image_path = destination / f"{position}{extension}"
+                image_path.write_bytes(content)
+                staged.append(str(image_path.resolve()))
+            return staged
+        except Exception:
+            self.remove_issue_images(path=path)
+            raise
+
+    @staticmethod
+    def remove_issue_images(*, path: Path) -> None:
+        workspace = path.resolve()
+        target = workspace / ".codex" / "issue-images"
+        if target.is_symlink():
+            target.unlink()
+        elif target.exists():
+            shutil.rmtree(target)
+
     def commit_code(self, *, path: Path, message: str, first_push: bool) -> str:
         self.commands.run(["git", "add", "-A"], cwd=path)
         self.commands.run(["git", "commit", "-m", message], cwd=path)
@@ -354,6 +409,61 @@ class GitWorkspaceService:
             ["git", "config", "user.email", "telegram-project-manager[bot]@users.noreply.github.com"],
             cwd=path,
         )
+
+
+def _managed_issue_asset_paths(issue: dict[str, Any], repo: str) -> list[str]:
+    prefix = f"/{repo.lower()}/blob/issue-assets/"
+    paths: list[str] = []
+    seen: set[str] = set()
+    values = [
+        str(issue.get("body") or ""),
+        *(str(item) for item in issue.get("comments") or []),
+    ]
+    for text in values:
+        for match in MARKDOWN_IMAGE_RE.finditer(text):
+            raw_url = match.group(1)
+            parsed = urlsplit(raw_url)
+            if parsed.scheme or parsed.netloc:
+                if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
+                    continue
+                url_path = unquote(parsed.path)
+                if not url_path.lower().startswith(prefix):
+                    continue
+                asset_path = url_path[len(prefix):]
+            else:
+                marker = "../blob/issue-assets/"
+                relative = unquote(parsed.path)
+                if not relative.startswith(marker):
+                    continue
+                asset_path = relative[len(marker):]
+            candidate = PurePosixPath(asset_path)
+            if (
+                candidate.is_absolute()
+                or not candidate.parts
+                or ".." in candidate.parts
+                or candidate.parts[0] != ".issue-assets"
+                or candidate.suffix.lower() not in {".jpg", ".jpeg", ".png", ".gif"}
+            ):
+                continue
+            normalized = candidate.as_posix()
+            if normalized not in seen:
+                seen.add(normalized)
+                paths.append(normalized)
+                if len(paths) == MAX_ISSUE_IMAGES:
+                    return paths
+    return paths
+
+
+def _validate_issue_image(content: bytes, extension: str) -> None:
+    header = content[:16].hex()
+    valid = {
+        ".jpg": header.startswith("ffd8ff"),
+        ".jpeg": header.startswith("ffd8ff"),
+        ".png": header.startswith("89504e470d0a1a0a"),
+        ".gif": header.startswith(("474946383761", "474946383961")),
+    }
+    if not valid.get(extension, False):
+        raise WorkspaceError(f"Issue image content does not match {extension}")
 
 
 class CodeGitHubService:

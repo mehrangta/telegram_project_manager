@@ -384,6 +384,42 @@ class CodeJobService:
             logging.exception("Unexpected code job failure: %s", job_id)
             await self._fail(job_id, f"Unexpected failure: {exc}", failure_phase)
 
+    async def _run_codex_turn(
+        self,
+        *,
+        job: dict[str, Any],
+        path: Path,
+        prompt: str,
+        output_schema: dict[str, Any],
+        sandbox: Sandbox,
+        effort: ReasoningEffort,
+        timeout_seconds: int,
+    ) -> tuple[str, dict[str, Any]]:
+        image_paths = await asyncio.to_thread(
+            self.workspaces.stage_issue_images,
+            source_path=self._ensure_source(job),
+            repo=str(job["repo"]),
+            issue=dict(job["issue_context_json"]),
+            path=path,
+        )
+        try:
+            return await self.codex.run_turn(
+                job_id=str(job["id"]),
+                cwd=str(path),
+                prompt=prompt,
+                image_paths=tuple(image_paths),
+                output_schema=output_schema,
+                sandbox=sandbox,
+                effort=effort,
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
+                timeout_seconds=timeout_seconds,
+                on_progress=lambda event: self.reporter.activity(str(job["id"]), event),
+                on_thread=lambda thread_id: self._store_thread(str(job["id"]), thread_id),
+            )
+        finally:
+            await asyncio.to_thread(self.workspaces.remove_issue_images, path=path)
+
     async def _run_rebase(self, job_id: str) -> None:
         job = self._require_job(job_id)
         if not self.db.update_code_job(
@@ -426,18 +462,14 @@ class CodeJobService:
                 {"latest_activity": f"Codex is resolving rebase conflicts ({rounds})"},
             )
             await self.reporter.refresh(job_id, force=True)
-            _, raw = await self.codex.run_turn(
-                job_id=job_id,
-                cwd=str(path),
+            _, raw = await self._run_codex_turn(
+                job=job,
+                path=path,
                 prompt=rebase_conflict_prompt(dict(job["issue_context_json"]), conflicts, rounds),
                 output_schema=CODE_RESULT_SCHEMA,
                 sandbox=Sandbox.workspace_write,
                 effort=ReasoningEffort.high,
-                developer_instructions=DEVELOPER_INSTRUCTIONS,
-                thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
                 timeout_seconds=CODE_TIMEOUT_SECONDS,
-                on_progress=lambda event: self.reporter.activity(job_id, event),
-                on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
             )
             result = CodeResult.from_json(raw)
             resolutions.append({**result.to_json(), "files": list(conflicts), "round": rounds})
@@ -528,18 +560,14 @@ class CodeJobService:
             if editing and isinstance(job.get("plan_json"), dict)
             else planning_prompt(issue, feedback)
         )
-        _, raw = await self.codex.run_turn(
-            job_id=job_id,
-            cwd=str(path),
+        _, raw = await self._run_codex_turn(
+            job=job,
+            path=path,
             prompt=prompt,
             output_schema=CODE_PLAN_SCHEMA,
             sandbox=Sandbox.read_only,
             effort=ReasoningEffort.high,
-            developer_instructions=DEVELOPER_INSTRUCTIONS,
-            thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
             timeout_seconds=PLAN_TIMEOUT_SECONDS,
-            on_progress=lambda event: self.reporter.activity(job_id, event),
-            on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
         )
         plan = CodePlan.from_json(raw)
         if self._discarded(job_id):
@@ -638,18 +666,14 @@ class CodeJobService:
         job = self._require_job(job_id)
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
         plan_path = PLAN_PATH_TEMPLATE.format(job_id=job_id)
-        _, raw = await self.codex.run_turn(
-            job_id=job_id,
-            cwd=str(path),
+        _, raw = await self._run_codex_turn(
+            job=job,
+            path=path,
             prompt=coding_prompt(dict(job["issue_context_json"]), plan, plan_path),
             output_schema=CODE_RESULT_SCHEMA,
             sandbox=Sandbox.workspace_write,
             effort=ReasoningEffort.medium,
-            developer_instructions=DEVELOPER_INSTRUCTIONS,
-            thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
             timeout_seconds=CODE_TIMEOUT_SECONDS,
-            on_progress=lambda event: self.reporter.activity(job_id, event),
-            on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
         )
         await asyncio.to_thread(
             self.workspaces.remove_plan,
@@ -843,20 +867,16 @@ class CodeJobService:
         implementation = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
         async with self._semaphore:
-            _, raw = await self.codex.run_turn(
-                job_id=job_id,
-                cwd=str(path),
+            _, raw = await self._run_codex_turn(
+                job=job,
+                path=path,
                 prompt=ci_repair_prompt(
                     dict(job["issue_context_json"]), plan, implementation, diagnostics, attempt
                 ),
                 output_schema=CODE_RESULT_SCHEMA,
                 sandbox=Sandbox.workspace_write,
                 effort=ReasoningEffort.medium,
-                developer_instructions=DEVELOPER_INSTRUCTIONS,
-                thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
                 timeout_seconds=CODE_TIMEOUT_SECONDS,
-                on_progress=lambda event: self.reporter.activity(job_id, event),
-                on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
             )
         result = CodeResult.from_json(raw)
         if self._discarded(job_id):
