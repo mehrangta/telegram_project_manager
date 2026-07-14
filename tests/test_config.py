@@ -35,6 +35,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "even number"):
             normalize_config_value("llm_memory_max_messages", "3")
 
+    def test_normalizes_issue_body_llm_boolean(self):
+        self.assertEqual(normalize_config_value("issue_body_llm_enabled", " TRUE "), "true")
+        self.assertEqual(normalize_config_value("issue_body_llm_enabled", "false"), "false")
+        with self.assertRaisesRegex(ValueError, "true or false"):
+            normalize_config_value("issue_body_llm_enabled", "yes")
+
     def test_cli_sets_openai_base_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "bot.db"

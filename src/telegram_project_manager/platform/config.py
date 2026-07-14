@@ -16,6 +16,7 @@ SUPPORTED_CONFIG_KEYS = frozenset(
         "max_files_per_commit",
         "max_bytes_per_commit",
         "require_confirmation",
+        "issue_body_llm_enabled",
         "llm_memory_max_messages",
     }
 )
@@ -45,5 +46,10 @@ def normalize_config_value(key: str, value: str) -> str:
         if message_limit % 2:
             raise ValueError("LLM memory limit must be an even number of messages.")
         normalized = str(message_limit)
+
+    if key == "issue_body_llm_enabled":
+        normalized = normalized.lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError("Issue body LLM setting must be true or false.")
 
     return normalized

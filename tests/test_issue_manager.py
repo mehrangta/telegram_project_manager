@@ -171,6 +171,27 @@ class IssueManagerTests(unittest.TestCase):
         self.assertIn("## Images", body)
         self.assertTrue(body.endswith("<!-- marker -->"))
 
+    def test_original_body_preview_omits_generated_fields(self):
+        issue = IssueDraft(
+            "Generated title",
+            "",
+            "",
+            "",
+            body_mode="original",
+            raw_body="exact user body",
+        )
+        preview = IssueManager._format_preview(
+            heading="Issue draft created.",
+            draft_id="i-12345678",
+            repo="owner/repo",
+            issue=issue,
+            revision=1,
+            image_count=0,
+        )
+        self.assertIn("Body mode: original prompt", preview)
+        self.assertIn("Body: exact user body", preview)
+        self.assertNotIn("Actual behavior:", preview)
+
     def test_issue_body_renders_pinned_context_and_hypotheses(self):
         issue = IssueDraft(
             "Title",

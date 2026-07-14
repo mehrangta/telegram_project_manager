@@ -85,6 +85,7 @@ Commands:
 /config set codex_api_key <key> (private chat only)
 /config set codex_base_url <url>
 /config set codex_model <model>
+/config set issue_body_llm_enabled <true|false>
 /config set llm_memory_max_messages <count>
 /memory status
 /memory clear

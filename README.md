@@ -100,6 +100,12 @@ context, relevant files, and evidence-backed possible causes. Context retrieval
 must succeed before a draft is created. Images are embedded from an isolated
 issue-assets branch and are not sent to the LLM.
 
+Issue body generation is enabled by default. Set
+`/config set issue_body_llm_enabled false` to skip repository analysis and use
+the original Telegram prompt verbatim as the GitHub issue body. In this mode the
+LLM generates only the title; text feedback retitles the draft without changing
+its body. The mode is pinned when each draft is created.
+
 ```text
 /issue <prompt>                Generate an issue draft (admin)
 /edit <i-draft_id> <feedback>  Revise a pending issue draft (original author)
@@ -193,6 +199,7 @@ Then run in the Telegram chat:
 /config set codex_api_key <key>             Set Codex API key (admin, private chat only)
 /config set codex_base_url <url>            Set Codex provider URL (admin)
 /config set codex_model <model>             Set Codex model (admin)
+/config set issue_body_llm_enabled <value>  Enable/disable LLM issue bodies (admin)
 /config set llm_memory_max_messages <count> Set even memory limit, minimum 2 (admin)
 /config set max_files_per_commit <count>    Set file limit (admin)
 /config set max_bytes_per_commit <count>    Set byte limit (admin)

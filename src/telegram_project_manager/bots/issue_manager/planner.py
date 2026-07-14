@@ -5,10 +5,18 @@ import uuid
 
 from telegram_project_manager.bots.issue_manager.prompts import (
     SYSTEM_PROMPT,
+    TITLE_SYSTEM_PROMPT,
     build_revision_prompt,
+    build_title_prompt,
+    build_title_revision_prompt,
     build_user_prompt,
 )
-from telegram_project_manager.bots.issue_manager.schemas import ISSUE_DRAFT_RESPONSE_SCHEMA, IssueDraft
+from telegram_project_manager.bots.issue_manager.schemas import (
+    BODY_MODE_ORIGINAL,
+    ISSUE_DRAFT_RESPONSE_SCHEMA,
+    ISSUE_TITLE_RESPONSE_SCHEMA,
+    IssueDraft,
+)
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.platform.llm.client import OpenAICompatibleClient
 from telegram_project_manager.platform.router import IncomingAttachment
@@ -41,24 +49,44 @@ class IssuePlanner:
         local_repo_path: str,
         attachments: tuple[IncomingAttachment, ...],
     ) -> tuple[str, IssueDraft]:
-        context = self.repository_context.collect(
-            repo=repo,
-            branch=default_branch,
-            request_text=request_text,
-            source_path=local_repo_path,
-        )
-        raw = self.llm.chat_json(
-            SYSTEM_PROMPT,
-            build_user_prompt(request_text, repo, context.to_prompt()),
-            memory_key=issue_memory_session_id(chat_id, repo),
-            response_schema=ISSUE_DRAFT_RESPONSE_SCHEMA,
-        )
-        issue = IssueDraft.from_llm(
-            raw,
-            context_branch=context.branch,
-            context_commit_sha=context.commit_sha,
-            allowed_paths=context.paths,
-        )
+        if self.db.get_setting("issue_body_llm_enabled", "true") == "false":
+            raw = self.llm.chat_json(
+                TITLE_SYSTEM_PROMPT,
+                build_title_prompt(request_text, repo),
+                response_schema=ISSUE_TITLE_RESPONSE_SCHEMA,
+            )
+            issue = IssueDraft(
+                title=str(raw.get("title") or "").strip(),
+                summary="",
+                actual_behavior="",
+                expected_behavior="",
+                body_mode=BODY_MODE_ORIGINAL,
+                raw_body=request_text,
+            )
+            issue.validate()
+            context_commit_sha = ""
+            context_paths: list[str] = []
+        else:
+            context = self.repository_context.collect(
+                repo=repo,
+                branch=default_branch,
+                request_text=request_text,
+                source_path=local_repo_path,
+            )
+            raw = self.llm.chat_json(
+                SYSTEM_PROMPT,
+                build_user_prompt(request_text, repo, context.to_prompt()),
+                memory_key=issue_memory_session_id(chat_id, repo),
+                response_schema=ISSUE_DRAFT_RESPONSE_SCHEMA,
+            )
+            issue = IssueDraft.from_llm(
+                raw,
+                context_branch=context.branch,
+                context_commit_sha=context.commit_sha,
+                allowed_paths=context.paths,
+            )
+            context_commit_sha = context.commit_sha
+            context_paths = sorted(context.paths)
         draft_id = f"i-{uuid.uuid4().hex[:8]}"
         now = int(time.time())
         self.db.create_issue_draft(
@@ -91,8 +119,9 @@ class IssuePlanner:
             {
                 "repo": repo,
                 "images": len(attachments),
-                "context_commit_sha": context.commit_sha,
-                "context_paths": sorted(context.paths),
+                "body_mode": issue.body_mode,
+                "context_commit_sha": context_commit_sha,
+                "context_paths": context_paths,
             },
             draft_id,
         )
@@ -106,6 +135,29 @@ class IssuePlanner:
         new_feedback: str,
         local_repo_path: str,
     ) -> IssueDraft:
+        current_issue = IssueDraft.from_llm(dict(record["issue_json"]))
+        if current_issue.body_mode == BODY_MODE_ORIGINAL:
+            raw = self.llm.chat_json(
+                TITLE_SYSTEM_PROMPT,
+                build_title_revision_prompt(
+                    repo=str(record["repo"]),
+                    raw_body=current_issue.raw_body,
+                    current_title=current_issue.title,
+                    feedback_history=feedback_history,
+                    new_feedback=new_feedback,
+                ),
+                response_schema=ISSUE_TITLE_RESPONSE_SCHEMA,
+            )
+            revised = IssueDraft(
+                title=str(raw.get("title") or "").strip(),
+                summary="",
+                actual_behavior="",
+                expected_behavior="",
+                body_mode=BODY_MODE_ORIGINAL,
+                raw_body=current_issue.raw_body,
+            )
+            revised.validate()
+            return revised
         search_text = "\n".join(
             [str(record["request_text"]), *feedback_history, new_feedback]
         )

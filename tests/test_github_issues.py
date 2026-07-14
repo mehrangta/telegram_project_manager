@@ -67,6 +67,23 @@ def record(with_image=True):
 
 
 class GitHubIssueTests(unittest.TestCase):
+    def test_title_only_mode_preserves_raw_body_and_appends_marker(self):
+        gh = FakeGh()
+        value = record(False)
+        value["issue_json"] = {
+            "title": "Fix button",
+            "summary": "",
+            "actual_behavior": "",
+            "expected_behavior": "",
+            "body_mode": "original",
+            "raw_body": "exact user text\nsecond line",
+        }
+        GhIssueExecutor(gh, FakeTelegram()).create_issue(value)
+        issue_call = next(call for call in gh.calls if call[0].endswith("/issues") and call[1] == "POST")
+        self.assertTrue(issue_call[2]["body"].startswith("exact user text\nsecond line"))
+        self.assertIn("telegram-project-manager:draft=i-12345678", issue_call[2]["body"])
+        self.assertNotIn("## Summary", issue_call[2]["body"])
+
     def test_uploads_image_and_embeds_asset_branch_link(self):
         gh = FakeGh()
         result, paths = GhIssueExecutor(gh, FakeTelegram()).create_issue(record())

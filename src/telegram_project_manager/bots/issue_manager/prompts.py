@@ -15,6 +15,49 @@ Possible causes must be clearly framed as hypotheses and grounded in cited evide
 Return no more than three possible causes, or an empty list when evidence is insufficient.
 """
 
+TITLE_SYSTEM_PROMPT = """You create concise GitHub issue titles.
+Return only JSON matching the requested schema.
+Preserve the user's intent and facts.
+Do not invent implementation details, logs, versions, or behavior.
+"""
+
+
+def build_title_prompt(request_text: str, repo: str) -> str:
+    return f"""Create a concise GitHub issue title for {repo}.
+
+Issue body:
+{request_text}
+
+Return the title only.
+"""
+
+
+def build_title_revision_prompt(
+    *,
+    repo: str,
+    raw_body: str,
+    current_title: str,
+    feedback_history: list[str],
+    new_feedback: str,
+) -> str:
+    prior_feedback = "\n".join(f"- {item}" for item in feedback_history if item) or "(none)"
+    return f"""Revise a GitHub issue title for {repo}.
+
+Issue body (must remain unchanged):
+{raw_body}
+
+Current title:
+{current_title}
+
+Previous title feedback:
+{prior_feedback}
+
+New title feedback:
+{new_feedback}
+
+Return the revised title only. Do not rewrite the issue body.
+"""
+
 
 def _safe_repository_context(repository_context: str) -> str:
     return repository_context.replace(

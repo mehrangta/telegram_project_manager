@@ -49,6 +49,18 @@ ISSUE_DRAFT_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+ISSUE_TITLE_RESPONSE_SCHEMA = {
+    "title": "issue_title",
+    "description": "A concise GitHub issue title.",
+    "type": "object",
+    "properties": {"title": {"type": "string"}},
+    "required": ["title"],
+    "additionalProperties": False,
+}
+
+BODY_MODE_GENERATED = "generated"
+BODY_MODE_ORIGINAL = "original"
+
 
 class IssueDraftValidationError(ValueError):
     pass
@@ -77,6 +89,8 @@ class IssueDraft:
     possible_causes: tuple[PossibleCause, ...] = ()
     context_branch: str = ""
     context_commit_sha: str = ""
+    body_mode: str = BODY_MODE_GENERATED
+    raw_body: str = ""
 
     @classmethod
     def from_llm(
@@ -115,6 +129,8 @@ class IssueDraft:
             possible_causes=possible_causes,
             context_branch=context_branch or str(raw.get("context_branch") or "").strip(),
             context_commit_sha=context_commit_sha or str(raw.get("context_commit_sha") or "").strip(),
+            body_mode=str(raw.get("body_mode") or BODY_MODE_GENERATED).strip(),
+            raw_body=str(raw.get("raw_body") or ""),
         )
         draft.validate(allowed_paths=allowed_paths)
         return draft
@@ -124,6 +140,12 @@ class IssueDraft:
             raise IssueDraftValidationError("issue title is required")
         if len(self.title) > 256:
             raise IssueDraftValidationError("issue title must be 256 characters or fewer")
+        if self.body_mode not in {BODY_MODE_GENERATED, BODY_MODE_ORIGINAL}:
+            raise IssueDraftValidationError("unsupported issue body mode")
+        if self.body_mode == BODY_MODE_ORIGINAL:
+            if not self.raw_body.strip():
+                raise IssueDraftValidationError("original issue body is required")
+            return
         if not self.summary:
             raise IssueDraftValidationError("issue summary is required")
         if not self.actual_behavior:
@@ -179,9 +201,17 @@ class IssueDraft:
             ],
             "context_branch": self.context_branch,
             "context_commit_sha": self.context_commit_sha,
+            "body_mode": self.body_mode,
+            "raw_body": self.raw_body,
         }
 
     def body(self, image_links: list[str], marker: str, repo: str = "") -> str:
+        if self.body_mode == BODY_MODE_ORIGINAL:
+            sections = [self.raw_body]
+            if image_links:
+                sections.extend(["", "## Images", "", *image_links])
+            sections.extend(["", marker])
+            return chr(10).join(sections)
         sections = [
             "## Summary",
             "",

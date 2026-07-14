@@ -6,7 +6,11 @@ from typing import Any
 
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
-from telegram_project_manager.bots.issue_manager.schemas import IssueDraft, IssueDraftValidationError
+from telegram_project_manager.bots.issue_manager.schemas import (
+    BODY_MODE_ORIGINAL,
+    IssueDraft,
+    IssueDraftValidationError,
+)
 from telegram_project_manager.integrations.gh.runner import GhError
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextError
 from telegram_project_manager.platform.llm.client import LlmError
@@ -261,14 +265,18 @@ class IssueManager:
         revision: int,
         image_count: int,
     ) -> str:
-        return truncate(
-            "\n".join(
+        lines = [
+            heading,
+            f"Draft ID: {draft_id}",
+            f"Revision: {revision}",
+            f"Repo: {repo}",
+            f"Title: {issue.title}",
+        ]
+        if issue.body_mode == BODY_MODE_ORIGINAL:
+            lines.extend(["Body mode: original prompt", f"Body: {issue.raw_body}"])
+        else:
+            lines.extend(
                 [
-                    heading,
-                    f"Draft ID: {draft_id}",
-                    f"Revision: {revision}",
-                    f"Repo: {repo}",
-                    f"Title: {issue.title}",
                     f"Summary: {issue.summary}",
                     f"Actual behavior: {issue.actual_behavior}",
                     f"Expected behavior: {issue.expected_behavior}",
@@ -276,11 +284,17 @@ class IssueManager:
                     f"Relevant files: {len(issue.relevant_files)}",
                     f"Possible causes: {len(issue.possible_causes)}",
                     f"Context commit: {issue.context_commit_sha[:12]}",
-                    f"Images: {image_count}",
-                    "",
-                    "Reply to this preview with feedback or images, or run:",
-                    f"/edit {draft_id} <feedback>",
-                    f"/confirm {draft_id}",
                 ]
             )
+        lines.extend(
+            [
+                f"Images: {image_count}",
+                "",
+                "Reply to this preview with feedback or images, or run:",
+                f"/edit {draft_id} <feedback>",
+                f"/confirm {draft_id}",
+            ]
+        )
+        return truncate(
+            "\n".join(lines)
         )

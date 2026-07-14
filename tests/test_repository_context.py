@@ -157,7 +157,80 @@ class FakeLlm:
         }
 
 
+class TitleOnlyLlm:
+    def __init__(self, title="Fix save button") -> None:
+        self.title = title
+        self.calls = []
+
+    def chat_json(self, system_prompt, user_prompt, **kwargs):
+        self.calls.append((system_prompt, user_prompt, kwargs))
+        return {"title": self.title}
+
+
 class IssuePlannerContextTests(unittest.TestCase):
+    def test_disabled_body_generation_uses_raw_prompt_and_skips_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.set_setting("issue_body_llm_enabled", "false")
+            llm = TitleOnlyLlm()
+            context = FakeRepositoryContext()
+            planner = IssuePlanner(db, llm, context)
+            request = "button broken\nkeep this wording"
+
+            draft_id, issue = planner.create_draft(
+                request_text=request,
+                chat_id=20,
+                user_id=10,
+                repo="owner/repo",
+                default_branch="main",
+                local_repo_path="/cache/repo.git",
+                attachments=(),
+            )
+
+            self.assertEqual(context.calls, [])
+            self.assertEqual(issue.body_mode, "original")
+            self.assertEqual(issue.raw_body, request)
+            self.assertEqual(issue.body([], "<!-- marker -->"), request + "\n\n<!-- marker -->")
+            self.assertNotIn("memory_key", llm.calls[0][2])
+            self.assertEqual(llm.calls[0][2]["response_schema"]["required"], ["title"])
+            stored = db.get_issue_draft(draft_id)
+            assert stored is not None
+            self.assertEqual(stored["issue_json"]["raw_body"], request)
+
+    def test_original_body_revision_retitles_without_context_or_body_change(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.set_setting("issue_body_llm_enabled", "true")
+            llm = TitleOnlyLlm("Short title")
+            context = FakeRepositoryContext()
+            planner = IssuePlanner(db, llm, context)
+
+            issue = planner.revise_draft(
+                record={
+                    "request_text": "button broken",
+                    "repo": "owner/repo",
+                    "default_branch": "main",
+                    "issue_json": {
+                        "title": "Original title",
+                        "summary": "",
+                        "actual_behavior": "",
+                        "expected_behavior": "",
+                        "body_mode": "original",
+                        "raw_body": "button broken",
+                    },
+                },
+                feedback_history=["focus title"],
+                new_feedback="make it shorter",
+                local_repo_path="/cache/repo.git",
+            )
+
+            self.assertEqual(issue.title, "Short title")
+            self.assertEqual(issue.raw_body, "button broken")
+            self.assertEqual(context.calls, [])
+            self.assertIn("make it shorter", llm.calls[0][1])
+
     def test_persists_pinned_context_and_scopes_memory_by_repo(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
