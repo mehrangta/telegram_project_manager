@@ -48,7 +48,7 @@ class CodeManager:
         rest = rest.strip()
         action, _, action_rest = rest.partition(" ")
         action = action.lower()
-        if action in {"approve", "discard", "retry", "status", "edit"}:
+        if action in {"approve", "discard", "retry", "rebase", "status", "edit"}:
             return await self._command_control(message, action, action_rest.strip())
         return await self._start(message, rest)
 
@@ -129,6 +129,8 @@ class CodeManager:
                 await self.service.discard(job_id)
             elif action == "retry":
                 await self.service.retry(job_id)
+            elif action == "rebase":
+                await self.service.rebase(job_id)
             elif action == "status":
                 return self.reporter.render(job)
             else:

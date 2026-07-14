@@ -19,6 +19,7 @@ from telegram_project_manager.bots.code_manager.prompts import (
     coding_prompt,
     plan_edit_prompt,
     planning_prompt,
+    rebase_conflict_prompt,
 )
 from telegram_project_manager.bots.code_manager.schemas import (
     CODE_PLAN_SCHEMA,
@@ -46,12 +47,14 @@ CHECK_POLL_SECONDS = 10
 CHECK_GRACE_SECONDS = 60
 CHECK_TIMEOUT_SECONDS = 30 * 60
 MAX_CI_REPAIR_ATTEMPTS = 2
+MAX_REBASE_CONFLICT_ROUNDS = 20
 TERMINAL_STATUSES = {"ready", "discarded"}
 ACTIVE_STATUSES = {
     "queued_plan",
     "queued_plan_edit",
     "queued_code",
     "queued_checks",
+    "queued_rebase",
     "preparing",
     "planning",
     "editing_plan",
@@ -61,6 +64,7 @@ ACTIVE_STATUSES = {
     "pushing",
     "waiting_checks",
     "repairing_checks",
+    "rebasing",
     "failed",
     "interrupted",
 }
@@ -97,7 +101,8 @@ class CodeJobService:
         self.db.mark_running_code_jobs_interrupted()
         for job in self.db.list_code_jobs(limit=100):
             if job["status"] in {
-                "queued_plan", "queued_plan_edit", "queued_code", "queued_checks", "waiting_checks"
+                "queued_plan", "queued_plan_edit", "queued_code", "queued_checks",
+                "queued_rebase", "waiting_checks"
             }:
                 self._schedule(str(job["id"]), str(job["resume_phase"]))
             elif job["status"] == "interrupted":
@@ -210,7 +215,9 @@ class CodeJobService:
         if job["status"] not in {"failed", "interrupted"}:
             raise ValueError("Only failed or interrupted code jobs can be retried.")
         phase = str(job["resume_phase"])
-        if phase == "checks":
+        if phase == "rebase":
+            status = "queued_rebase"
+        elif phase == "checks":
             status = "queued_checks"
         elif phase == "code":
             status = "queued_code"
@@ -225,6 +232,46 @@ class CodeJobService:
         self.db.audit("code.retry", "ok", {"phase": phase}, job_id)
         await self.reporter.refresh(job_id, force=True)
         self._schedule(job_id, phase)
+
+    async def rebase(self, job_id: str) -> None:
+        job = self._require_job(job_id)
+        if job["status"] != "ready":
+            raise ValueError("Only a ready, checked code job can be rebased.")
+        if not job.get("pull_request_url"):
+            raise ValueError("Code job has no pull request to rebase.")
+        if job.get("deployment_merge_sha"):
+            raise ValueError("This pull request was already merged and cannot be rebased.")
+        if str(job.get("deployment_status") or "") in {
+            "queued", "merging", "waiting_workflow", "dispatching", "deploying", "succeeded"
+        }:
+            raise ValueError("Code job is already deploying or deployed.")
+        active = self.db.get_active_code_job(str(job["repo"]), int(job["issue_number"]))
+        if active and str(active["id"]) != job_id:
+            raise ValueError(f"A newer active code job exists: {active['id']}")
+        remote_sha = await asyncio.to_thread(
+            self.github.get_pr_head_sha, str(job["pull_request_url"])
+        )
+        if remote_sha != str(job.get("ci_head_sha") or ""):
+            raise ValueError("Pull request head changed after checks; run or wait for checks first.")
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "queued_rebase",
+                "resume_phase": "rebase",
+                "latest_activity": "Rebase queued",
+                "error": None,
+                "deployment_status": None,
+                "deployment_error": None,
+                "deployment_run_id": None,
+                "deployment_run_url": None,
+                "deployment_started_at": None,
+            },
+            allowed_statuses=("ready",),
+        ):
+            raise ValueError("Code job changed concurrently; retry the rebase command.")
+        self.db.audit("code.rebase", "queued", {"head_sha": remote_sha}, job_id)
+        await self.reporter.refresh(job_id, force=True)
+        self._schedule(job_id, "rebase")
 
     async def discard(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -259,10 +306,24 @@ class CodeJobService:
     def _schedule(self, job_id: str, phase: str) -> None:
         existing = self._tasks.get(job_id)
         if existing and not existing.done():
-            return
-        task = asyncio.create_task(self._run(job_id, phase), name=f"code-job-{job_id}-{phase}")
+            task = asyncio.create_task(
+                self._run_after(existing, job_id, phase),
+                name=f"code-job-{job_id}-{phase}-deferred",
+            )
+        else:
+            task = asyncio.create_task(self._run(job_id, phase), name=f"code-job-{job_id}-{phase}")
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
+        task.add_done_callback(lambda finished: self._forget_task(job_id, finished))
+
+    async def _run_after(
+        self, previous: asyncio.Task[None], job_id: str, phase: str
+    ) -> None:
+        await previous
+        await self._run(job_id, phase)
+
+    def _forget_task(self, job_id: str, finished: asyncio.Task[None]) -> None:
+        if self._tasks.get(job_id) is finished:
+            self._tasks.pop(job_id, None)
 
     async def _run(self, job_id: str, phase: str) -> None:
         failure_phase = phase
@@ -277,6 +338,13 @@ class CodeJobService:
                 if job and job["status"] == "queued_checks":
                     failure_phase = "checks"
                     await self._run_checks(job_id)
+            elif phase == "rebase":
+                async with self._semaphore:
+                    await self._run_rebase(job_id)
+                job = self.db.get_code_job(job_id)
+                if job and job["status"] == "queued_checks":
+                    failure_phase = "checks"
+                    await self._run_checks(job_id)
             else:
                 failure_phase = "checks"
                 await self._run_checks(job_id)
@@ -287,6 +355,97 @@ class CodeJobService:
         except Exception as exc:
             logging.exception("Unexpected code job failure: %s", job_id)
             await self._fail(job_id, f"Unexpected failure: {exc}", failure_phase)
+
+    async def _run_rebase(self, job_id: str) -> None:
+        job = self._require_job(job_id)
+        if not self.db.update_code_job(
+            job_id,
+            {"status": "rebasing", "resume_phase": "rebase", "latest_activity": "Preparing rebase workspace"},
+            allowed_statuses=("queued_rebase",),
+        ):
+            return
+        await self.reporter.refresh(job_id, force=True)
+        path = Path(str(job["workspace_path"]))
+        source = self._ensure_source(job)
+        checked_sha = str(job.get("ci_head_sha") or "")
+        remote_sha = await asyncio.to_thread(
+            self.github.get_pr_head_sha, str(job["pull_request_url"])
+        )
+        if remote_sha != checked_sha:
+            raise ValueError("Pull request head changed after the rebase was queued.")
+        checkout_sha = await asyncio.to_thread(
+            self.workspaces.checkout_existing,
+            source_path=source,
+            repo=str(job["repo"]),
+            branch=str(job["target_branch"]),
+            path=path,
+        )
+        if checkout_sha != checked_sha:
+            raise ValueError("Remote branch no longer matches the checked pull request head.")
+        base_sha, conflicts = await asyncio.to_thread(
+            self.workspaces.start_conflict_aware_rebase, path, str(job["base_branch"])
+        )
+        resolutions: list[dict[str, Any]] = []
+        rounds = 0
+        while conflicts:
+            rounds += 1
+            if rounds > MAX_REBASE_CONFLICT_ROUNDS:
+                raise WorkspaceError(
+                    f"Rebase exceeded {MAX_REBASE_CONFLICT_ROUNDS} conflict-resolution rounds"
+                )
+            self.db.update_code_job(
+                job_id,
+                {"latest_activity": f"Codex is resolving rebase conflicts ({rounds})"},
+            )
+            await self.reporter.refresh(job_id, force=True)
+            _, raw = await self.codex.run_turn(
+                job_id=job_id,
+                cwd=str(path),
+                prompt=rebase_conflict_prompt(dict(job["issue_context_json"]), conflicts, rounds),
+                output_schema=CODE_RESULT_SCHEMA,
+                sandbox=Sandbox.workspace_write,
+                effort=ReasoningEffort.high,
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                thread_id=str(job["codex_thread_id"]) if job.get("codex_thread_id") else None,
+                timeout_seconds=CODE_TIMEOUT_SECONDS,
+                on_progress=lambda event: self.reporter.activity(job_id, event),
+                on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
+            )
+            result = CodeResult.from_json(raw)
+            resolutions.append({**result.to_json(), "files": list(conflicts), "round": rounds})
+            conflicts = await asyncio.to_thread(
+                self.workspaces.continue_conflict_aware_rebase, path, conflicts
+            )
+        sha = await asyncio.to_thread(self.workspaces.head_sha, path)
+        await asyncio.to_thread(self.workspaces.push_rebased_branch, path)
+        stored = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
+        stored["rebase"] = {
+            "previous_head_sha": checked_sha,
+            "base_sha": base_sha,
+            "head_sha": sha,
+            "conflict_resolutions": resolutions,
+        }
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "queued_checks",
+                "resume_phase": "checks",
+                "latest_activity": "Rebased pull request pushed; waiting for CI checks",
+                "base_sha": base_sha,
+                "result_json": stored,
+                "ci_head_sha": sha,
+                "ci_wait_started_at": int(time.time()),
+                "ci_repair_attempts": 0,
+                "ci_checks_json": [],
+                "error": None,
+            },
+            allowed_statuses=("rebasing",),
+        ):
+            return
+        self.db.audit(
+            "code.rebase", "ok", {"sha": sha, "base_sha": base_sha, "rounds": rounds}, job_id
+        )
+        await self.reporter.refresh(job_id, force=True)
 
     async def _run_plan(self, job_id: str) -> None:
         job = self._require_job(job_id)

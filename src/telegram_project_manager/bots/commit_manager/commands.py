@@ -76,7 +76,7 @@ Commands:
 /commit <request>
 /issue <prompt> (text or photo/album caption)
 /code #123 [--skip-plan]
-/code approve|edit|discard|retry|status <code_job_id>
+/code approve|edit|discard|retry|rebase|status <code_job_id>
 /deploy <code_job_id> (or reply /deploy to a code-job message)
 /confirm <plan_id>
 /cancel <plan_id>

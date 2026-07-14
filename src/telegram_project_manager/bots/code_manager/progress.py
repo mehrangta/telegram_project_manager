@@ -168,6 +168,8 @@ class CodeProgressReporter:
             )
         elif status in {"failed", "interrupted"}:
             lines.extend(["", f"Retry: /code retry {job['id']}", f"Discard: /code discard {job['id']}"])
+        elif status == "ready" and not job.get("deployment_merge_sha"):
+            lines.extend(["", f"Rebase onto latest base: /code rebase {job['id']}"])
         return truncate("\n".join(lines), 4096)
 
 

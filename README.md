@@ -153,6 +153,7 @@ a workspace-write sandbox, must report a successful validation command, removes
 /code edit <c-job_id> <feedback>   Revise the plan on the same draft PR
 /code discard <c-job_id>           Close the draft PR and delete its branch
 /code retry <c-job_id>             Retry a failed or interrupted phase
+/code rebase <c-job_id>            Rebase a ready PR onto main and rerun CI
 /code status [c-job_id]            Show one job or recent jobs in this chat
 /deploy c-job_id                   Squash-merge a ready PR and watch deployment
 /deploy                            Same action when replying to its code-job message

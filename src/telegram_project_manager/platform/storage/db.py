@@ -795,7 +795,9 @@ class Database:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS count FROM code_jobs
-                WHERE status IN ('queued_plan', 'queued_plan_edit', 'queued_code', 'queued_checks')
+                WHERE status IN (
+                    'queued_plan', 'queued_plan_edit', 'queued_code', 'queued_checks', 'queued_rebase'
+                )
                 """
             ).fetchone()
         return int(row["count"]) if row else 0
@@ -909,6 +911,7 @@ class Database:
             "validating",
             "pushing",
             "repairing_checks",
+            "rebasing",
         )
         placeholders = ",".join("?" for _ in running)
         with self.session() as conn:

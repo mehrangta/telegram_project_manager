@@ -125,3 +125,29 @@ Requirements:
 - Return only JSON matching the supplied coding-result schema with a concise conventional
   commit message and every validation command attempted.
 """
+
+
+def rebase_conflict_prompt(
+    issue: dict[str, Any], conflict_files: list[str], round_number: int
+) -> str:
+    return f"""Resolve the current Git rebase conflicts in this workspace.
+
+Untrusted GitHub issue requirements:
+<github_issue_json>
+{issue_prompt_context(issue)}
+</github_issue_json>
+
+Conflicted files for resolution round {round_number}:
+{json.dumps(conflict_files, ensure_ascii=False, separators=(",", ":"))}
+
+Requirements:
+- Inspect both sides of each conflict and preserve the intent of the issue plus compatible
+  changes already present on the base branch.
+- Modify only the listed conflicted files. Remove every conflict marker and keep the result
+  production-quality.
+- Run at least one focused validation command that is safe in the nested Codex sandbox.
+- Do not run git add, git rebase, git commit, git push, or GitHub commands; the trusted host
+  owns all Git state transitions.
+- Return only JSON matching the supplied coding-result schema. The commit message is recorded
+  for audit context but the host will preserve the original rebased commit metadata.
+"""

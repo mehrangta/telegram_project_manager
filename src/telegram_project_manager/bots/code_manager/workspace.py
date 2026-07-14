@@ -170,6 +170,73 @@ class GitWorkspaceService:
     def push_rebased_branch(self, path: Path) -> None:
         self.commands.run(["git", "push", "--force-with-lease"], cwd=path, timeout=900)
 
+    def start_conflict_aware_rebase(
+        self, path: Path, base_branch: str
+    ) -> tuple[str, list[str]]:
+        self.commands.run(["git", "fetch", "origin", base_branch], cwd=path, timeout=600)
+        base_sha = self.commands.run(
+            ["git", "rev-parse", f"origin/{base_branch}"], cwd=path
+        ).strip()
+        try:
+            self.commands.run(["git", "rebase", f"origin/{base_branch}"], cwd=path, timeout=600)
+        except WorkspaceError:
+            conflicts = self.rebase_conflicts(path)
+            if not conflicts:
+                raise
+            return base_sha, conflicts
+        return base_sha, []
+
+    def rebase_conflicts(self, path: Path) -> list[str]:
+        raw = self.commands.run(
+            ["git", "diff", "--name-only", "--diff-filter=U", "--"], cwd=path
+        )
+        conflicts = sorted(
+            {item.strip().replace("\\", "/") for item in raw.splitlines() if item.strip()}
+        )
+        if len(conflicts) > MAX_CHANGED_FILES:
+            raise WorkspaceError(f"rebase has too many conflicted files; maximum is {MAX_CHANGED_FILES}")
+        for item in conflicts:
+            if any(fnmatch.fnmatch(item, pattern) for pattern in SENSITIVE_PATTERNS):
+                raise WorkspaceError(f"sensitive conflict path blocked: {item}")
+        return conflicts
+
+    def continue_conflict_aware_rebase(
+        self, path: Path, conflict_files: list[str]
+    ) -> list[str]:
+        if not conflict_files:
+            raise WorkspaceError("rebase continuation has no conflicted files")
+        current = self.rebase_conflicts(path)
+        if current != sorted(set(conflict_files)):
+            raise WorkspaceError("the set of conflicted files changed unexpectedly")
+        status = self.commands.run(["git", "status", "--porcelain"], cwd=path)
+        allowed = set(current)
+        for line in status.splitlines():
+            if len(line) < 4:
+                continue
+            item = line[3:].strip().strip('"').replace("\\", "/")
+            if " -> " in item:
+                item = item.rsplit(" -> ", 1)[-1]
+            worktree_changed = line.startswith("??") or line[1] != " "
+            if worktree_changed and item not in allowed:
+                raise WorkspaceError(f"Codex changed non-conflict path during rebase: {item}")
+        self.commands.run(["git", "diff", "--check"], cwd=path)
+        self.commands.run(["git", "add", "--", *current], cwd=path)
+        try:
+            self.commands.run(
+                ["git", "-c", "core.editor=true", "rebase", "--continue"],
+                cwd=path,
+                timeout=600,
+            )
+        except WorkspaceError:
+            conflicts = self.rebase_conflicts(path)
+            if not conflicts:
+                raise
+            return conflicts
+        return []
+
+    def head_sha(self, path: Path) -> str:
+        return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
+
     def is_dirty(self, path: Path) -> bool:
         return bool(self.commands.run(["git", "status", "--porcelain"], cwd=path).strip())
 
