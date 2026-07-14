@@ -133,5 +133,5 @@ sudo -u telegram-pm -H gh auth status --hostname github.com
 ```
 
 OpenAI credentials and provider configuration are stored in SQLite and managed through admin `/config set` commands. Only the Telegram bot token lives in `data/secrets.json`.
-LLM requests use LangChain's `langchain-openai` integration in JSON mode.
+LLM requests use LangChain's `langchain-openai` integration with JSON Schema structured output.
 LangChain message history is stored in SQLite per Telegram chat. The latest 12 messages are retained by default; admins can change the limit or clear the current chat's memory.

@@ -6,7 +6,11 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
-from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
+from telegram_project_manager.platform.llm.client import (
+    COMMIT_PLAN_RESPONSE_SCHEMA,
+    LlmError,
+    OpenAICompatibleClient,
+)
 from telegram_project_manager.platform.storage.db import Database
 
 
@@ -22,8 +26,12 @@ class LlmClientTests(unittest.TestCase):
             client = OpenAICompatibleClient(db)
 
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
-                bound = chat_openai.return_value.bind.return_value
-                bound.invoke.return_value.content = "{}"
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content="{}"),
+                    "parsed": {},
+                    "parsing_error": None,
+                }
                 self.assertEqual(client.chat_json("system", "user"), {})
 
             chat_openai.assert_called_once_with(
@@ -34,8 +42,12 @@ class LlmClientTests(unittest.TestCase):
                 timeout=90,
                 max_retries=2,
             )
-            chat_openai.return_value.bind.assert_called_once_with(response_format={"type": "json_object"})
-            bound.invoke.assert_called_once_with(
+            chat_openai.return_value.with_structured_output.assert_called_once_with(
+                COMMIT_PLAN_RESPONSE_SCHEMA,
+                method="json_schema",
+                include_raw=True,
+            )
+            structured.invoke.assert_called_once_with(
                 [
                     ("system", "system"),
                     ("human", "user"),
@@ -52,7 +64,9 @@ class LlmClientTests(unittest.TestCase):
             client = OpenAICompatibleClient(db)
 
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
-                chat_openai.return_value.bind.return_value.invoke.side_effect = RuntimeError("provider unavailable")
+                chat_openai.return_value.with_structured_output.return_value.invoke.side_effect = RuntimeError(
+                    "provider unavailable"
+                )
                 with self.assertRaisesRegex(LlmError, "provider unavailable"):
                     client.chat_json("system", "user")
 
@@ -69,10 +83,15 @@ class LlmClientTests(unittest.TestCase):
 
             def respond(prompt):
                 prompts.append(prompt.to_messages())
-                return AIMessage(content=next(responses))
+                content = next(responses)
+                return {
+                    "raw": AIMessage(content=content),
+                    "parsed": __import__("json").loads(content),
+                    "parsing_error": None,
+                }
 
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
-                chat_openai.return_value.bind.return_value = RunnableLambda(respond)
+                chat_openai.return_value.with_structured_output.return_value = RunnableLambda(respond)
                 self.assertEqual(client.chat_json("system", "first", memory_key="chat:1"), {"turn": 1})
                 self.assertEqual(client.chat_json("system", "second", memory_key="chat:1"), {"turn": 2})
 

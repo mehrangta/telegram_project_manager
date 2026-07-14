@@ -15,6 +15,51 @@ class LlmError(RuntimeError):
     pass
 
 
+COMMIT_PLAN_RESPONSE_SCHEMA = {
+    "title": "commit_plan",
+    "description": "A safe GitHub commit plan generated from the user's request.",
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["create_commit"]},
+        "repo": {"type": "string"},
+        "base_branch": {"type": "string"},
+        "target_branch": {"type": "string"},
+        "commit_message": {"type": "string"},
+        "changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "operation": {
+                        "type": "string",
+                        "enum": ["create", "update", "create_or_update"],
+                    },
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "operation", "content"],
+                "additionalProperties": False,
+            },
+        },
+        "github_comment": {"type": "string"},
+        "requires_confirmation": {"type": "boolean"},
+        "questions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "intent",
+        "repo",
+        "base_branch",
+        "target_branch",
+        "commit_message",
+        "changes",
+        "github_comment",
+        "requires_confirmation",
+        "questions",
+    ],
+    "additionalProperties": False,
+}
+
+
 class OpenAICompatibleClient:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -42,7 +87,11 @@ class OpenAICompatibleClient:
                 temperature=0.1,
                 timeout=90,
                 max_retries=2,
-            ).bind(response_format={"type": "json_object"})
+            ).with_structured_output(
+                COMMIT_PLAN_RESPONSE_SCHEMA,
+                method="json_schema",
+                include_raw=True,
+            )
             if memory_key:
                 max_messages = self._memory_limit()
                 history = SQLiteChatMessageHistory(self.db, memory_key, max_messages)
@@ -71,11 +120,19 @@ class OpenAICompatibleClient:
         except Exception as exc:
             raise LlmError(f"LLM request failed: {exc}") from exc
 
-        content = response.content
-        if not isinstance(content, str):
-            raise LlmError("LLM response missing text content")
-        parsed = parse_json_object(content)
+        if not isinstance(response, dict):
+            raise LlmError("LLM structured response is invalid")
+        parsing_error = response.get("parsing_error")
+        if parsing_error:
+            raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
+        parsed = response.get("parsed")
+        if hasattr(parsed, "model_dump"):
+            parsed = parsed.model_dump()
+        if not isinstance(parsed, dict):
+            raise LlmError("LLM structured response missing parsed object")
         if history is not None:
+            raw = response.get("raw")
+            content = raw.content if isinstance(raw, AIMessage) and isinstance(raw.content, str) else json.dumps(parsed)
             history.add_messages([HumanMessage(content=user_prompt), AIMessage(content=content)])
         return parsed
 
