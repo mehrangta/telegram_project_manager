@@ -71,6 +71,7 @@ class FakeWorkspaces:
         self.plan_commits = []
         self.code_commits = []
         self.cleaned = []
+        self.removed_plans = []
 
     def prepare(self, *, path, **kwargs):
         (path / ".git").mkdir(parents=True)
@@ -95,6 +96,9 @@ class FakeWorkspaces:
 
     def validate_code_changes(self, **kwargs):
         return ["src/handler.py", "tests/test_handler.py"]
+
+    def remove_plan(self, **kwargs):
+        self.removed_plans.append(kwargs)
 
     def commit_code(self, **kwargs):
         self.code_commits.append(kwargs)
@@ -179,6 +183,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.github.created), 1)
         self.assertEqual(len(self.github.updated), 1)
         self.assertEqual(self.github.ready, ["https://github.com/owner/repo/pull/42"])
+        self.assertEqual(
+            self.workspaces.removed_plans[0]["plan_path"],
+            f".codex/plans/{job_id}.md",
+        )
         for _ in range(100):
             if self.workspaces.cleaned:
                 break
@@ -196,6 +204,28 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodeSafetyTests(unittest.TestCase):
+    def test_trusted_host_removes_only_workspace_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            plan = path / ".codex" / "plans" / "c-test.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("temporary", encoding="utf-8")
+            GitWorkspaceService.remove_plan(
+                path=path,
+                plan_path=".codex/plans/c-test.md",
+            )
+            self.assertFalse(plan.exists())
+
+    def test_trusted_host_rejects_plan_path_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "repo"
+            path.mkdir()
+            with self.assertRaisesRegex(WorkspaceError, "escapes the workspace"):
+                GitWorkspaceService.remove_plan(
+                    path=path,
+                    plan_path="../outside.md",
+                )
+
     def test_progress_redacts_api_keys(self):
         event = _safe_progress(
             "error",

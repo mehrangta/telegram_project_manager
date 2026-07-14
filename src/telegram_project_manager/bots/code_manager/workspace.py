@@ -162,8 +162,21 @@ class GitWorkspaceService:
         if total_bytes > MAX_CHANGED_BYTES:
             raise WorkspaceError("Codex changes exceed the 5 MB safety limit")
         if (path / plan_path).exists():
-            raise WorkspaceError(f"Codex must remove the temporary plan file: {plan_path}")
+            raise WorkspaceError(f"Host failed to remove the temporary plan file: {plan_path}")
         return code_paths
+
+    @staticmethod
+    def remove_plan(*, path: Path, plan_path: str) -> None:
+        workspace = path.resolve()
+        target = (workspace / plan_path).resolve()
+        try:
+            relative = target.relative_to(workspace)
+        except ValueError as exc:
+            raise WorkspaceError("temporary plan path escapes the workspace") from exc
+        if not relative.parts or relative.parts[:2] != (".codex", "plans"):
+            raise WorkspaceError("temporary plan path is outside .codex/plans")
+        if target.exists() or target.is_symlink():
+            target.unlink()
 
     def commit_code(self, *, path: Path, message: str, first_push: bool) -> str:
         self.commands.run(["git", "add", "-A"], cwd=path)

@@ -413,6 +413,11 @@ class CodeJobService:
             on_progress=lambda event: self.reporter.activity(job_id, event),
             on_thread=lambda thread_id: self._store_thread(job_id, thread_id),
         )
+        await asyncio.to_thread(
+            self.workspaces.remove_plan,
+            path=path,
+            plan_path=plan_path,
+        )
         result = CodeResult.from_json(raw)
         if self._discarded(job_id):
             return
