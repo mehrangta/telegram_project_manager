@@ -94,11 +94,13 @@ Generated plans include current actual behavior and expected behavior after the 
 Issue drafts use the active repository and local Git cache for the current chat.
 Before drafting, the bot fetches branch deltas and reads a bounded, read-only
 snapshot of project documentation and relevant source files at the fetched
-commit. The LLM improves the
+commit. The issue-drafting LLM improves the
 prompt into a title, summary, actual behavior, expected behavior, codebase
 context, relevant files, and evidence-backed possible causes. Context retrieval
 must succeed before a draft is created. Images are embedded from an isolated
-issue-assets branch and are not sent to the LLM.
+issue-assets branch and are not sent to the issue-drafting LLM. When `/code`
+runs on the created issue, those managed images are validated, staged
+temporarily, and supplied to Codex as vision inputs.
 
 Issue body generation is enabled by default. Set
 `/config set issue_body_llm_enabled false` to skip repository analysis and use
@@ -143,8 +145,10 @@ a workspace-write sandbox, must report a successful validation command, removes
   checks remain supported after a 60-second discovery grace. The Telegram job is
   reported as ready and its workspace is cleaned only after this gate succeeds.
   A separate short Telegram alert is sent when the job becomes ready or fails.
-Job, draft, and plan messages also include native copy buttons for their IDs and
-currently valid commands, plus direct buttons for relevant GitHub links.
+Job, draft, and plan messages include native controls. IDs remain copyable,
+valid commands run when tapped, and GitHub buttons open their target directly.
+Commands that need typed input, such as edit feedback, remain copyable. Deploy
+always asks for confirmation before merging.
 
 ```text
 /code #123                         Plan an issue in this chat's active repo
@@ -186,16 +190,14 @@ workflow name or workflow file:
 /repo deploy clear owner/repository
 ```
 
-After a `/code` job reports `ready`, an admin in the originating chat may run
-`/deploy c-job_id`, or reply `/deploy` to that job's progress message. The bot
-requires the PR to target `main`, verifies that its
-head is still the exact SHA accepted by the code-job CI gate, honors reviews,
-branch protection, and merge queues, then performs a squash merge and deletes
-the feature branch. The squash commit uses an explicit issue-closing message so
-GitHub does not add the automation account as a co-author. It dispatches the
-configured workflow with the merge SHA as its `ref`, waits up to two minutes for
-the run to appear, and allows up to 30
-minutes for successful completion.
+After a `/code` job reports `ready`, an admin in the originating chat may tap
+**Deploy** and confirm, run `/deploy c-job_id`, or reply `/deploy` to the job
+message. The bot requires a PR targeting `main`, verifies that its head is the
+exact SHA accepted by the CI gate, honors reviews, branch protection, and merge
+queues, then squash-merges and deletes the feature branch. The squash commit
+uses an explicit issue-closing message so GitHub does not add the automation
+account as a co-author. The bot dispatches the configured workflow at the merge
+SHA, waits up to two minutes for it to appear, and allows 30 minutes to finish.
 The bot reports merge and deployment failures separately and resumes an active
 monitor after restart.
 
