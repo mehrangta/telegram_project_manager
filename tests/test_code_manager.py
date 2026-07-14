@@ -451,29 +451,48 @@ class CodeSafetyTests(unittest.TestCase):
 
 
 class CodeGitHubCheckTests(unittest.TestCase):
-    def test_failed_checks_parse_json_even_with_nonzero_exit(self):
+    def test_failed_checks_parse_status_rollup(self):
         payload = json.dumps(
-            [
-                {
-                    "name": "CI / Dashboard (Bun)",
-                    "state": "FAILURE",
-                    "bucket": "fail",
-                    "link": "https://github.com/o/r/actions/runs/123",
-                    "workflow": "CI",
-                    "description": "build failed",
-                }
-            ]
+            {
+                "statusCheckRollup": [
+                    {
+                        "__typename": "CheckRun",
+                        "name": "CI / Dashboard (Bun)",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.com/o/r/actions/runs/123",
+                        "workflowName": "CI",
+                    }
+                ]
+            }
         )
-        service = CodeGitHubService(StubGh(GhResult([], 1, payload, "", 20)))
+        service = CodeGitHubService(StubGh(GhResult([], 0, payload, "", 20)))
         checks = service.get_pr_checks("https://github.com/o/r/pull/1")
         self.assertEqual(checks[0].state, "failure")
         self.assertEqual(checks[0].bucket, "fail")
 
-    def test_no_checks_reported_is_an_empty_snapshot(self):
-        service = CodeGitHubService(
-            StubGh(GhResult([], 1, "", "no checks reported on the 'main' branch", 20))
-        )
+    def test_empty_status_rollup_is_an_empty_snapshot(self):
+        payload = json.dumps({"statusCheckRollup": []})
+        service = CodeGitHubService(StubGh(GhResult([], 0, payload, "", 20)))
         self.assertEqual(service.get_pr_checks("https://github.com/o/r/pull/1"), ())
+
+    def test_pending_legacy_status_context_is_supported(self):
+        payload = json.dumps(
+            {
+                "statusCheckRollup": [
+                    {
+                        "__typename": "StatusContext",
+                        "context": "external/ci",
+                        "state": "PENDING",
+                        "targetUrl": "https://ci.example.test/build/1",
+                    }
+                ]
+            }
+        )
+        service = CodeGitHubService(StubGh(GhResult([], 0, payload, "", 20)))
+        checks = service.get_pr_checks("https://github.com/o/r/pull/1")
+        self.assertEqual(checks[0].name, "external/ci")
+        self.assertEqual(checks[0].bucket, "pending")
 
     def test_failed_action_log_is_redacted(self):
         runner = StubGh(

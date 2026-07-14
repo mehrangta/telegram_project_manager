@@ -362,35 +362,27 @@ class CodeGitHubService:
         return sha
 
     def get_pr_checks(self, pr_url: str) -> tuple[PullRequestCheck, ...]:
-        result = self.gh.run(
-            [
-                "pr", "checks", pr_url, "--json",
-                "name,state,bucket,link,workflow,description",
-            ],
-            check=False,
-        )
-        raw: Any = None
-        if result.stdout.strip():
-            try:
-                raw = result.json()
-            except json.JSONDecodeError as exc:
-                raise GhError(result) from exc
+        result = self.gh.run(["pr", "view", pr_url, "--json", "statusCheckRollup"])
+        try:
+            value = result.json()
+        except json.JSONDecodeError as exc:
+            raise GhError(result) from exc
+        raw = value.get("statusCheckRollup") if isinstance(value, dict) else None
         if not isinstance(raw, list):
-            detail = f"{result.stderr}\n{result.stdout}".lower()
-            if "no checks reported" in detail:
-                return ()
             raise GhError(result)
         checks = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
+            state = str(item.get("conclusion") or item.get("state") or item.get("status") or "").lower()
+            status = str(item.get("status") or "").lower()
             checks.append(
                 PullRequestCheck(
-                    name=str(item.get("name") or "Unnamed check"),
-                    state=str(item.get("state") or "").lower(),
-                    bucket=str(item.get("bucket") or "").lower(),
-                    link=str(item.get("link") or ""),
-                    workflow=str(item.get("workflow") or ""),
+                    name=str(item.get("name") or item.get("context") or "Unnamed check"),
+                    state=state,
+                    bucket=_check_bucket(state, status),
+                    link=str(item.get("detailsUrl") or item.get("targetUrl") or ""),
+                    workflow=str(item.get("workflowName") or ""),
                     description=str(item.get("description") or ""),
                 )
             )
@@ -447,3 +439,17 @@ def _redact_ci_diagnostics(value: str) -> str:
     value = API_KEY_RE.sub("[REDACTED_API_KEY]", value)
     value = GITHUB_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", value)
     return BEARER_TOKEN_RE.sub(r"\1[REDACTED]", value)
+
+
+def _check_bucket(state: str, status: str) -> str:
+    if status and status != "completed":
+        return "pending"
+    if state == "success":
+        return "pass"
+    if state in {"neutral", "skipped"}:
+        return "skipping"
+    if state in {"queued", "in_progress", "pending", "expected", "requested", "waiting", ""}:
+        return "pending"
+    if state == "cancelled":
+        return "cancel"
+    return "fail"
