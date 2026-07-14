@@ -214,7 +214,25 @@ def _safe_progress(method: str, payload: dict[str, Any]) -> dict[str, Any] | Non
             return {"kind": "files", "paths": paths, "status": state}
     if method == "error":
         error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-        return {"kind": "error", "text": _sanitize_text(str(error.get("message") or "Codex error"))[:500]}
+        message = _sanitize_text(str(error.get("message") or "Codex error"))[:500]
+        reconnect = re.fullmatch(r"Reconnecting\.\.\.\s*(\d+)/(\d+)", message, re.IGNORECASE)
+        if reconnect:
+            attempt, maximum = reconnect.groups()
+            return {
+                "kind": "connection",
+                "text": (
+                    "Codex provider stream interrupted; "
+                    f"reconnecting {attempt}/{maximum} (job still running)"
+                ),
+            }
+        details = [
+            str(error.get(key) or "").strip()
+            for key in ("code", "type", "status")
+            if error.get(key)
+        ]
+        if details:
+            message = f"{message} ({', '.join(details)})"[:500]
+        return {"kind": "error", "text": message}
     if method == "turn/completed":
         turn = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
         return {"kind": "phase", "text": f"Codex turn {turn.get('status') or 'completed'}"}

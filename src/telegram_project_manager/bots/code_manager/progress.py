@@ -108,7 +108,7 @@ class CodeProgressReporter:
 
 def _event_summary(event: dict[str, Any]) -> str:
     kind = str(event.get("kind") or "")
-    if kind in {"phase", "error"}:
+    if kind in {"phase", "error", "connection"}:
         return str(event.get("text") or "")[:500]
     if kind == "command":
         return f"Command {event.get('status')}: {str(event.get('text') or '')[:240]}"

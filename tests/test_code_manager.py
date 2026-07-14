@@ -260,6 +260,26 @@ class CodeSafetyTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(event["text"], "invalid [REDACTED_API_KEY]")
 
+    def test_reconnect_progress_explains_transient_provider_stream_failure(self):
+        event = _safe_progress(
+            "error",
+            {"error": {"message": "Reconnecting... 5/5"}},
+        )
+        assert event is not None
+        self.assertEqual(event["kind"], "connection")
+        self.assertEqual(
+            event["text"],
+            "Codex provider stream interrupted; reconnecting 5/5 (job still running)",
+        )
+
+    def test_error_progress_includes_safe_provider_metadata(self):
+        event = _safe_progress(
+            "error",
+            {"error": {"message": "stream failed", "code": "upstream_reset", "status": 502}},
+        )
+        assert event is not None
+        self.assertEqual(event["text"], "stream failed (upstream_reset, 502)")
+
     def test_codex_config_sets_environment_and_runtime_base_url(self):
         config = _codex_config("secret", "http://codex.example.test")
         self.assertEqual(config.env["OPENAI_BASE_URL"], "http://codex.example.test")
