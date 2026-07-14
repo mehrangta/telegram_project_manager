@@ -21,6 +21,7 @@ from telegram_project_manager.bots.code_manager.workspace import (
 )
 from telegram_project_manager.integrations.gh.runner import GhResult
 from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
 
 PLAN = {
@@ -42,8 +43,13 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.send_calls = 0
+        self.fail_send_at = None
 
     def send_message(self, chat_id, text, thread_id=None):
+        self.send_calls += 1
+        if self.send_calls == self.fail_send_at:
+            raise TelegramBotApiError("send failed")
         self.sent.append((chat_id, text, thread_id))
         return {"message_id": 77}
 
@@ -79,6 +85,7 @@ class FakeWorkspaces:
         self.removed_plans = []
         self.commit_number = 0
         self.synced_heads = []
+        self.validation_error = None
 
     def validate_source(self, *, source_path, repo):
         if not source_path:
@@ -110,6 +117,8 @@ class FakeWorkspaces:
         return "plan-sha"
 
     def validate_code_changes(self, **kwargs):
+        if self.validation_error:
+            raise self.validation_error
         return ["src/handler.py", "tests/test_handler.py"]
 
     def remove_plan(self, **kwargs):
@@ -196,6 +205,14 @@ async def wait_for_status(db, job_id, expected):
     raise AssertionError(f"expected {expected}, got {actual}")
 
 
+async def wait_for_send_count(bot, expected):
+    for _ in range(200):
+        if len(bot.sent) >= expected:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"expected {expected} sent messages, got {len(bot.sent)}")
+
+
 class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -250,8 +267,18 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
             if self.workspaces.cleaned:
                 break
             await asyncio.sleep(0.01)
+        await wait_for_send_count(self.bot, 2)
         self.assertTrue(self.workspaces.cleaned)
         self.assertTrue(any("All pull request checks passed" in item[2] for item in self.bot.edited))
+        self.assertEqual(
+            self.bot.sent[-1],
+            (
+                10,
+                f"✅ Code job ready\nCode Job ID: {job_id}\n"
+                "Pull request: https://github.com/owner/repo/pull/42",
+                30,
+            ),
+        )
 
     async def test_skip_plan_codes_immediately_and_creates_pr(self):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=None, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
@@ -300,6 +327,9 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("after 2 automatic repairs", failed["error"])
         self.assertEqual(len(self.codex.calls), 3)
         self.assertFalse(self.workspaces.cleaned)
+        await wait_for_send_count(self.bot, 2)
+        self.assertIn("❌ Code job failed", self.bot.sent[-1][1])
+        self.assertIn("Pull request: https://github.com/owner/repo/pull/42", self.bot.sent[-1][1])
 
     async def test_cancelled_check_fails_without_codex_repair(self):
         self.github.check_sequences = [(_check("cancelled", "cancel"),)]
@@ -316,6 +346,29 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         failed = await wait_for_status(self.db, job_id, "failed")
         self.assertIn("Timed out", failed["error"])
         self.assertFalse(self.workspaces.cleaned)
+
+    async def test_pre_pr_failure_sends_short_alert_without_pr_link(self):
+        self.workspaces.validation_error = WorkspaceError("invalid changes")
+        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
+        await wait_for_status(self.db, job_id, "failed")
+        await wait_for_send_count(self.bot, 2)
+        self.assertEqual(
+            self.bot.sent[-1],
+            (10, f"❌ Code job failed\nCode Job ID: {job_id}", 30),
+        )
+
+    async def test_terminal_alert_failure_does_not_change_ready_state_or_block_cleanup(self):
+        self.bot.fail_send_at = 2
+        job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=None, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True)
+        ready = await wait_for_status(self.db, job_id, "ready")
+        for _ in range(200):
+            if self.workspaces.cleaned:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(ready["status"], "ready")
+        self.assertTrue(self.workspaces.cleaned)
+        self.assertEqual(self.bot.send_calls, 2)
+        self.assertEqual(len(self.bot.sent), 1)
 
     async def test_waiting_check_monitor_resumes_after_service_restart(self):
         self.service.check_poll_seconds = 60

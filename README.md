@@ -142,6 +142,7 @@ a workspace-write sandbox, must report a successful validation command, removes
   Each pushed commit may wait up to 30 minutes, while repositories that publish no
   checks remain supported after a 60-second discovery grace. The Telegram job is
   reported as ready and its workspace is cleaned only after this gate succeeds.
+  A separate short Telegram alert is sent when the job becomes ready or fails.
 
 ```text
 /code #123                         Plan an issue in this chat's active repo

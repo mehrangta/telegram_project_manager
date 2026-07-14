@@ -757,7 +757,7 @@ class CodeJobService:
             },
             job_id,
         )
-        await self.reporter.refresh(job_id, force=True)
+        await self._report_terminal(job_id)
         source = self._ensure_source(job)
         path = Path(str(job["workspace_path"]))
         try:
@@ -773,9 +773,9 @@ class CodeJobService:
     async def _fail(self, job_id: str, error: str, phase: str) -> None:
         safe_error = " ".join(error.split())[:1000]
         job = self.db.get_code_job(job_id)
-        if not job or job["status"] == "discarded":
+        if not job or job["status"] in TERMINAL_STATUSES or job["status"] == "failed":
             return
-        self.db.update_code_job(
+        if not self.db.update_code_job(
             job_id,
             {
                 "status": "failed",
@@ -783,7 +783,9 @@ class CodeJobService:
                 "latest_activity": f"{phase.title()} failed",
                 "error": safe_error,
             },
-        )
+            allowed_statuses=tuple(sorted(ACTIVE_STATUSES - {"failed"})),
+        ):
+            return
         self.db.audit("code.job", "failed", {"phase": phase, "error": safe_error}, job_id)
         if phase == "plan" and not job.get("pull_request_number"):
             try:
@@ -795,10 +797,17 @@ class CodeJobService:
                 )
             except Exception:
                 logging.exception("Failed to clean an unpublished plan branch: %s", job_id)
+        await self._report_terminal(job_id)
+
+    async def _report_terminal(self, job_id: str) -> None:
         try:
             await self.reporter.refresh(job_id, force=True)
         except Exception:
-            logging.exception("Failed to report code job error: %s", job_id)
+            logging.exception("Failed to refresh terminal code job status: %s", job_id)
+        try:
+            await self.reporter.notify_terminal(job_id)
+        except Exception:
+            logging.exception("Failed to send terminal code job alert: %s", job_id)
 
     async def _store_thread(self, job_id: str, thread_id: str) -> None:
         self.db.update_code_job(job_id, {"codex_thread_id": thread_id})

@@ -63,6 +63,21 @@ class CodeProgressReporter:
             self._last_text[job_id] = text
             self._last_update[job_id] = now
 
+    async def notify_terminal(self, job_id: str) -> None:
+        job = self.db.get_code_job(job_id)
+        if not job or job["status"] not in {"ready", "failed"}:
+            return
+        outcome = "✅ Code job ready" if job["status"] == "ready" else "❌ Code job failed"
+        lines = [outcome, f"Code Job ID: {job['id']}"]
+        if job.get("pull_request_url"):
+            lines.append(f"Pull request: {job['pull_request_url']}")
+        await asyncio.to_thread(
+            self.bot.send_message,
+            int(job["telegram_chat_id"]),
+            "\n".join(lines),
+            job.get("telegram_thread_id"),
+        )
+
     @staticmethod
     def render(job: dict[str, Any]) -> str:
         created = int(job.get("created_at") or time.time())
