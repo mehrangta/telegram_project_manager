@@ -213,6 +213,8 @@ class CodeSafetyTests(unittest.TestCase):
         )
         self.assertIn("Do not inspect, validate, modify, or remove", prompt)
         self.assertIn("not a validation result", prompt)
+        self.assertIn("Do not run Vite production", prompt)
+        self.assertIn("builds inside Codex", prompt)
 
     def test_trusted_host_removes_only_workspace_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
