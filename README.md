@@ -122,7 +122,10 @@ workflow remain global.
 
 /issues lists up to 20 open issues for the current chat or topic's active
 repository, ordered by most recently updated. Each issue number links to GitHub
-and can be passed directly to `/code`.
+and includes a copyable, repository-qualified `/code owner/repository#123`
+command. Every successful `/issues` call sends a new list; only the newest list
+in each chat or topic refreshes automatically every 60 seconds. Older lists stay
+visible but stop updating.
 
 /issue uses the current chat or topic's active repository and managed cache to build a
 repository-aware draft. Reply to the preview with text or images to revise it,
