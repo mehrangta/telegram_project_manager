@@ -910,6 +910,55 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["result_json"]["rebase"]["conflict_resolutions"], [])
         self.assertTrue(self.workspaces.rebase_pushed)
 
+    async def test_operation_rebase_preserves_pending_merge_state(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
+        )
+        await wait_for_status(self.db, job_id, "ready")
+        self.db.update_code_job(
+            job_id,
+            {
+                "deployment_mode": "merge",
+                "deployment_status": "resolving_conflicts",
+                "deployment_conflict_attempts": 1,
+            },
+        )
+        self.github.head_shas = ["code-sha", "code-sha", "rebase-sha"]
+
+        await self.service.rebase_for_operation(job_id)
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["ci_head_sha"], "rebase-sha")
+        self.assertEqual(ready["deployment_mode"], "merge")
+        self.assertEqual(ready["deployment_status"], "resolving_conflicts")
+        self.assertEqual(ready["deployment_conflict_attempts"], 1)
+
+    async def test_operation_rebase_restarts_after_service_interruption(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
+        )
+        await wait_for_status(self.db, job_id, "ready")
+        self.db.update_code_job(
+            job_id,
+            {
+                "status": "rebasing",
+                "resume_phase": "rebase",
+                "deployment_mode": "merge",
+                "deployment_status": "resolving_conflicts",
+                "deployment_conflict_attempts": 1,
+            },
+        )
+        self.github.head_shas = ["code-sha", "rebase-sha"]
+
+        await self.service.recover()
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["ci_head_sha"], "rebase-sha")
+        self.assertEqual(ready["deployment_status"], "resolving_conflicts")
+        self.assertIsNone(ready["error"])
+
     async def test_rebase_conflict_is_resolved_by_codex_before_ci(self):
         job_id = await self.service.create_job(
             chat_id=10, user_id=20, thread_id=None, issue=self.issue,

@@ -201,6 +201,7 @@ class Database:
                     ci_checks_json TEXT,
                     deployment_mode TEXT,
                     deployment_status TEXT,
+                    deployment_conflict_attempts INTEGER NOT NULL DEFAULT 0,
                     deployment_merge_sha TEXT,
                     deployment_run_id INTEGER,
                     deployment_run_url TEXT,
@@ -268,6 +269,12 @@ class Database:
             self._ensure_column(conn, "code_jobs", "ci_checks_json", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_mode", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_status", "TEXT")
+            self._ensure_column(
+                conn,
+                "code_jobs",
+                "deployment_conflict_attempts",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             self._ensure_column(conn, "code_jobs", "deployment_merge_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_run_id", "INTEGER")
             self._ensure_column(conn, "code_jobs", "deployment_run_url", "TEXT")
@@ -1068,6 +1075,7 @@ class Database:
             "ci_checks_json",
             "deployment_mode",
             "deployment_status",
+            "deployment_conflict_attempts",
             "deployment_merge_sha",
             "deployment_run_id",
             "deployment_run_url",
@@ -1238,7 +1246,8 @@ class Database:
                 return "not_ready"
             operation_status = str(job["deployment_status"] or "")
             if operation_status in {
-                "queued", "merging", "waiting_workflow", "dispatching", "deploying"
+                "queued", "merging", "resolving_conflicts", "waiting_workflow",
+                "dispatching", "deploying"
             }:
                 return "active"
             merge_sha = str(job["deployment_merge_sha"] or "")
@@ -1249,6 +1258,7 @@ class Database:
                 """
                 UPDATE code_jobs SET
                     deployment_mode = ?, deployment_status = ?, deployment_error = NULL,
+                    deployment_conflict_attempts = 0,
                     deployment_run_id = NULL, deployment_run_url = NULL,
                     deployment_started_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'ready'
@@ -1263,7 +1273,8 @@ class Database:
                 """
                 SELECT * FROM code_jobs
                 WHERE deployment_status IN (
-                    'queued', 'merging', 'waiting_workflow', 'dispatching', 'deploying'
+                    'queued', 'merging', 'resolving_conflicts', 'waiting_workflow',
+                    'dispatching', 'deploying'
                 )
                 ORDER BY updated_at ASC LIMIT ?
                 """,

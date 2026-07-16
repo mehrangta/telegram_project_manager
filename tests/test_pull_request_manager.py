@@ -4,6 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
+from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.workspace import PullRequestCheck
 from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
 from telegram_project_manager.bots.pull_request_manager.github import (
@@ -24,14 +25,23 @@ def check(bucket="pass", state="success"):
     return PullRequestCheck("CI", state, bucket, "", "CI", "")
 
 
-def pr(*, state="OPEN", head="checked-sha", base="main", merge_sha="", checks=(check(),)):
+def pr(
+    *,
+    state="OPEN",
+    head="checked-sha",
+    base="main",
+    merge_sha="",
+    checks=(check(),),
+    mergeable="MERGEABLE",
+    merge_state_status="CLEAN",
+):
     return PullRequestSnapshot(
         state=state,
         is_draft=False,
         base_branch=base,
         head_sha=head,
-        mergeable="MERGEABLE",
-        merge_state_status="CLEAN",
+        mergeable=mergeable,
+        merge_state_status=merge_state_status,
         review_decision="APPROVED",
         merged_at="2026-01-01T00:00:00Z" if state == "MERGED" else "",
         merge_sha=merge_sha,
@@ -129,6 +139,14 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.github = FakeGitHub()
         self.reporter = FakeReporter()
+        self.conflict_rebase_calls = []
+        self.conflict_rebase_handler = None
+
+        async def conflict_rebaser(job_id):
+            self.conflict_rebase_calls.append(job_id)
+            if self.conflict_rebase_handler:
+                await self.conflict_rebase_handler(job_id)
+
         self.service = MergeDeploymentService(
             db=self.db,
             github=self.github,
@@ -137,6 +155,7 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
             merge_timeout_seconds=1,
             discovery_seconds=1,
             deploy_timeout_seconds=1,
+            conflict_rebaser=conflict_rebaser,
         )
 
     async def asyncTearDown(self):
@@ -250,6 +269,187 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
         self.assertIn("head changed", failed["deployment_error"])
         self.assertEqual(self.github.merges, [])
+
+    async def test_conflict_is_rebased_checked_and_merge_resumes(self):
+        async def complete_rebase(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "ready",
+                    "resume_phase": "checks",
+                    "ci_head_sha": "rebased-sha",
+                    "ci_checks_json": [check().to_json()],
+                },
+            )
+
+        self.conflict_rebase_handler = complete_rebase
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY"),
+            pr(head="rebased-sha"),
+            pr(state="MERGED", head="rebased-sha", merge_sha="merge-sha"),
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(self.conflict_rebase_calls, ["c-abcdef12"])
+        self.assertEqual(merged["deployment_conflict_attempts"], 1)
+        self.assertEqual(merged["ci_head_sha"], "rebased-sha")
+        self.assertEqual(self.github.merges[0]["head_sha"], "rebased-sha")
+
+    async def test_conflict_recovery_resumes_deployment(self):
+        async def complete_rebase(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "ready",
+                    "resume_phase": "checks",
+                    "ci_head_sha": "rebased-sha",
+                    "ci_checks_json": [check().to_json()],
+                },
+            )
+
+        self.conflict_rebase_handler = complete_rebase
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY"),
+            pr(head="rebased-sha"),
+            pr(state="MERGED", head="rebased-sha", merge_sha="merge-sha"),
+        ]
+
+        await self.service.start_deploy("c-abcdef12")
+        deployed = await wait_for_deployment(self.db, "c-abcdef12", "succeeded")
+
+        self.assertEqual(deployed["deployment_conflict_attempts"], 1)
+        self.assertEqual(
+            self.github.dispatches,
+            [{"repo": "owner/repo", "workflow": "deploy.yml", "commit_sha": "merge-sha"}],
+        )
+
+    async def test_conflict_recovery_failure_leaves_pr_open(self):
+        async def fail_rebase(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "resume_phase": "rebase",
+                    "error": "sensitive conflict path blocked",
+                },
+            )
+
+        self.conflict_rebase_handler = fail_rebase
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY")
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
+
+        self.assertIn("sensitive conflict path blocked", failed["deployment_error"])
+        self.assertEqual(self.github.merges, [])
+        self.assertEqual(self.reporter.merge_notified, ["c-abcdef12"])
+
+    async def test_conflict_failure_notification_offers_admin_recovery(self):
+        class Bot:
+            def __init__(self):
+                self.sent = []
+
+            def send_message(self, chat_id, text, thread_id=None, **options):
+                self.sent.append((chat_id, text, thread_id, options))
+                return {"message_id": 1}
+
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "status": "failed",
+                "resume_phase": "rebase",
+                "error": "sensitive conflict path blocked",
+                "deployment_mode": "merge",
+                "deployment_status": "failed",
+                "deployment_conflict_attempts": 1,
+                "deployment_error": "Automatic conflict resolution failed",
+            },
+        )
+        bot = Bot()
+        reporter = CodeProgressReporter(self.db, bot, min_interval=0)
+
+        await reporter.notify_merge("c-abcdef12")
+
+        text = bot.sent[0][1]
+        callbacks = [
+            button["callback_data"]
+            for row in bot.sent[0][3]["reply_markup"]["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
+        self.assertIn("Automatic conflict resolution could not complete", text)
+        self.assertIn("command:/code retry c-abcdef12", callbacks)
+        self.assertIn("confirm_merge:c-abcdef12", callbacks)
+
+    async def test_unknown_mergeability_does_not_trigger_conflict_recovery(self):
+        self.github.prs = [pr(mergeable="UNKNOWN")]
+
+        await self.service.start_merge("c-abcdef12")
+        failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
+
+        self.assertIn("not mergeable: UNKNOWN", failed["deployment_error"])
+        self.assertEqual(self.conflict_rebase_calls, [])
+
+    async def test_conflict_recovery_stops_after_two_attempts(self):
+        rebased_heads = iter(("rebased-one", "rebased-two"))
+
+        async def complete_rebase(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "ready",
+                    "resume_phase": "checks",
+                    "ci_head_sha": next(rebased_heads),
+                    "ci_checks_json": [check().to_json()],
+                },
+            )
+
+        self.conflict_rebase_handler = complete_rebase
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY"),
+            pr(
+                head="rebased-one",
+                mergeable="CONFLICTING",
+                merge_state_status="DIRTY",
+            ),
+            pr(
+                head="rebased-two",
+                mergeable="CONFLICTING",
+                merge_state_status="DIRTY",
+            ),
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
+
+        self.assertEqual(len(self.conflict_rebase_calls), 2)
+        self.assertEqual(failed["deployment_conflict_attempts"], 2)
+        self.assertIn("stopped after 2 attempts", failed["deployment_error"])
+        self.assertEqual(self.github.merges, [])
+
+    async def test_recovery_resumes_operation_waiting_after_conflict_ci(self):
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "deployment_mode": "merge",
+                "deployment_status": "resolving_conflicts",
+                "deployment_conflict_attempts": 1,
+            },
+        )
+        self.github.prs = [
+            pr(),
+            pr(state="MERGED", merge_sha="merge-sha"),
+        ]
+
+        await self.service.recover()
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(merged["deployment_merge_sha"], "merge-sha")
+        self.assertEqual(self.conflict_rebase_calls, [])
 
     async def test_already_merged_pr_still_requires_checked_head_identity(self):
         self.github.prs = [

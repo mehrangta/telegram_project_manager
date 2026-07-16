@@ -165,6 +165,7 @@ async def run_bot(db: Database) -> None:
         db=db,
         github=DeploymentGitHubService(gh),
         reporter=code_reporter,
+        conflict_rebaser=code_service.rebase_for_operation,
     )
     pull_request_manager = PullRequestManager(db=db, service=deployment_service)
     router = TelegramRouter(

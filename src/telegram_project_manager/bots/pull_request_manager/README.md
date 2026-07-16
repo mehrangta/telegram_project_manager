@@ -8,3 +8,9 @@ configured base branch and stops after merging; deploy remains restricted to
 and watches its run. A later deploy can reuse a main-branch merge created by
 `/merge`. Operation, merge, and workflow state are persisted so work resumes
 after a bot restart.
+
+When GitHub explicitly reports a conflicting pull request, the manager queues
+the guarded code-job rebase flow, reruns CI for the rebased head, and resumes
+the original merge or deploy operation. It makes at most two automatic rebase
+attempts; unsafe conflicts or failed checks leave the pull request open and
+send the admin retry controls.

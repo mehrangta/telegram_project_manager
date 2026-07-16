@@ -118,6 +118,29 @@ class CodeJobService:
                 self._schedule(str(job["id"]), str(job["resume_phase"]))
             elif job["status"] == "interrupted":
                 if (
+                    str(job.get("resume_phase") or "") == "rebase"
+                    and str(job.get("deployment_status") or "") == "resolving_conflicts"
+                    and self.db.update_code_job(
+                        str(job["id"]),
+                        {
+                            "status": "queued_rebase",
+                            "error": None,
+                            "latest_activity": (
+                                "Restarting automatic conflict-resolution rebase"
+                            ),
+                        },
+                        allowed_statuses=("interrupted",),
+                    )
+                ):
+                    self.db.audit(
+                        "code.rebase",
+                        "queued",
+                        {"reason": "automatic_conflict_recovery_restart"},
+                        str(job["id"]),
+                    )
+                    self._schedule(str(job["id"]), "rebase")
+                    continue
+                if (
                     str(job.get("resume_phase") or "") == "plan"
                     and self.db.list_pending_code_plan_feedback(str(job["id"]))
                     and self.db.update_code_job(
@@ -281,6 +304,12 @@ class CodeJobService:
         self._schedule(job_id, phase)
 
     async def rebase(self, job_id: str) -> None:
+        await self._queue_rebase(job_id, preserve_operation=False)
+
+    async def rebase_for_operation(self, job_id: str) -> None:
+        await self._queue_rebase(job_id, preserve_operation=True)
+
+    async def _queue_rebase(self, job_id: str, *, preserve_operation: bool) -> None:
         job = self._require_job(job_id)
         if job["status"] != "ready":
             raise ValueError("Only a ready, checked code job can be rebased.")
@@ -288,8 +317,13 @@ class CodeJobService:
             raise ValueError("Code job has no pull request to rebase.")
         if job.get("deployment_merge_sha"):
             raise ValueError("This pull request was already merged and cannot be rebased.")
-        if str(job.get("deployment_status") or "") in {
-            "queued", "merging", "waiting_workflow", "dispatching", "deploying", "succeeded"
+        operation_status = str(job.get("deployment_status") or "")
+        if preserve_operation:
+            if operation_status != "resolving_conflicts":
+                raise ValueError("Code job is not awaiting automatic conflict resolution.")
+        elif operation_status in {
+            "queued", "merging", "resolving_conflicts", "waiting_workflow",
+            "dispatching", "deploying", "succeeded"
         }:
             raise ValueError("Code job is already deploying or deployed.")
         active = self.db.get_active_code_job(str(job["repo"]), int(job["issue_number"]))
@@ -298,23 +332,35 @@ class CodeJobService:
         remote_sha = await asyncio.to_thread(
             self.github.get_pr_head_sha, str(job["pull_request_url"])
         )
+        operation_reset = (
+            {}
+            if preserve_operation
+            else {
+                "deployment_status": None,
+                "deployment_conflict_attempts": 0,
+                "deployment_error": None,
+                "deployment_run_id": None,
+                "deployment_run_url": None,
+                "deployment_started_at": None,
+            }
+        )
         if remote_sha != str(job.get("ci_head_sha") or ""):
             if not self.db.update_code_job(
                 job_id,
                 {
                     "status": "queued_checks",
                     "resume_phase": "checks",
-                    "latest_activity": "PR head changed; checking the new commit",
+                    "latest_activity": (
+                        "PR head changed during conflict recovery; checking the new commit"
+                        if preserve_operation
+                        else "PR head changed; checking the new commit"
+                    ),
                     "ci_head_sha": remote_sha,
                     "ci_wait_started_at": int(time.time()),
                     "ci_repair_attempts": 0,
                     "ci_checks_json": [],
                     "error": None,
-                    "deployment_status": None,
-                    "deployment_error": None,
-                    "deployment_run_id": None,
-                    "deployment_run_url": None,
-                    "deployment_started_at": None,
+                    **operation_reset,
                 },
                 allowed_statuses=("ready",),
             ):
@@ -322,7 +368,14 @@ class CodeJobService:
             self.db.audit(
                 "code.checks",
                 "queued",
-                {"head_sha": remote_sha, "reason": "pr_head_changed_before_rebase"},
+                {
+                    "head_sha": remote_sha,
+                    "reason": (
+                        "pr_head_changed_during_conflict_recovery"
+                        if preserve_operation
+                        else "pr_head_changed_before_rebase"
+                    ),
+                },
                 job_id,
             )
             await self.reporter.refresh(job_id, force=True)
@@ -333,18 +386,28 @@ class CodeJobService:
             {
                 "status": "queued_rebase",
                 "resume_phase": "rebase",
-                "latest_activity": "Rebase queued",
+                "latest_activity": (
+                    "Automatic conflict-resolution rebase queued"
+                    if preserve_operation
+                    else "Rebase queued"
+                ),
                 "error": None,
-                "deployment_status": None,
-                "deployment_error": None,
-                "deployment_run_id": None,
-                "deployment_run_url": None,
-                "deployment_started_at": None,
+                **operation_reset,
             },
             allowed_statuses=("ready",),
         ):
             raise ValueError("Code job changed concurrently; retry the rebase command.")
-        self.db.audit("code.rebase", "queued", {"head_sha": remote_sha}, job_id)
+        self.db.audit(
+            "code.rebase",
+            "queued",
+            {
+                "head_sha": remote_sha,
+                "reason": (
+                    "automatic_conflict_recovery" if preserve_operation else "admin"
+                ),
+            },
+            job_id,
+        )
         await self.reporter.refresh(job_id, force=True)
         self._schedule(job_id, "rebase")
 
@@ -1186,6 +1249,9 @@ class CodeJobService:
             await self.reporter.refresh(job_id, force=True)
         except Exception:
             logging.exception("Failed to refresh terminal code job status: %s", job_id)
+        job = self.db.get_code_job(job_id)
+        if job and str(job.get("deployment_status") or "") == "resolving_conflicts":
+            return
         try:
             await self.reporter.notify_terminal(job_id)
         except Exception:

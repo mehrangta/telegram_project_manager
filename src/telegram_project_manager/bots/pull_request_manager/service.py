@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
@@ -19,8 +20,13 @@ WORKFLOW_DISCOVERY_SECONDS = 2 * 60
 DEPLOY_TIMEOUT_SECONDS = 30 * 60
 POLL_SECONDS = 10
 ACTIVE_DEPLOYMENT_STATUSES = {
-    "queued", "merging", "waiting_workflow", "dispatching", "deploying"
+    "queued", "merging", "resolving_conflicts", "waiting_workflow",
+    "dispatching", "deploying"
 }
+ACTIVE_CONFLICT_RECOVERY_STATUSES = {
+    "queued_rebase", "rebasing", "queued_checks", "waiting_checks", "repairing_checks"
+}
+MAX_CONFLICT_RESOLUTION_ATTEMPTS = 2
 MERGE_MODE = "merge"
 DEPLOY_MODE = "deploy"
 
@@ -40,6 +46,8 @@ class MergeDeploymentService:
         merge_timeout_seconds: float = MERGE_TIMEOUT_SECONDS,
         discovery_seconds: float = WORKFLOW_DISCOVERY_SECONDS,
         deploy_timeout_seconds: float = DEPLOY_TIMEOUT_SECONDS,
+        conflict_rebaser: Callable[[str], Awaitable[None]] | None = None,
+        max_conflict_resolution_attempts: int = MAX_CONFLICT_RESOLUTION_ATTEMPTS,
     ) -> None:
         self.db = db
         self.github = github
@@ -48,6 +56,8 @@ class MergeDeploymentService:
         self.merge_timeout_seconds = merge_timeout_seconds
         self.discovery_seconds = discovery_seconds
         self.deploy_timeout_seconds = deploy_timeout_seconds
+        self.conflict_rebaser = conflict_rebaser
+        self.max_conflict_resolution_attempts = max_conflict_resolution_attempts
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def recover(self) -> None:
@@ -140,9 +150,16 @@ class MergeDeploymentService:
 
     async def _run(self, job_id: str) -> None:
         try:
-            job = self._require_job(job_id)
-            if str(job.get("deployment_status") or "") in {"queued", "merging"}:
-                await self._merge(job_id)
+            while True:
+                job = self._require_job(job_id)
+                operation_status = str(job.get("deployment_status") or "")
+                if operation_status in {"queued", "merging"}:
+                    await self._merge(job_id)
+                    continue
+                if operation_status == "resolving_conflicts":
+                    await self._wait_for_conflict_recovery(job_id)
+                    continue
+                break
             job = self._require_job(job_id)
             if _operation_mode(job) == DEPLOY_MODE and str(job.get("deployment_status") or "") in {
                 "waiting_workflow", "dispatching", "deploying"
@@ -174,6 +191,9 @@ class MergeDeploymentService:
         require_main = _operation_mode(job) == DEPLOY_MODE
         self._validate_checked_identity(job, snapshot, require_main=require_main)
         if not snapshot.merged:
+            if _has_explicit_conflict(snapshot):
+                await self._queue_conflict_recovery(job_id, job)
+                return
             self._validate_preflight(snapshot)
             pr_number = int(job["pull_request_number"])
             suffix = f" (#{pr_number})"
@@ -230,6 +250,74 @@ class MergeDeploymentService:
         await self.reporter.refresh(job_id, force=True)
         if mode == MERGE_MODE:
             await self._notify_merge(job_id)
+
+    async def _queue_conflict_recovery(
+        self, job_id: str, job: dict[str, Any]
+    ) -> None:
+        attempts = int(job.get("deployment_conflict_attempts") or 0)
+        if attempts >= self.max_conflict_resolution_attempts:
+            raise DeploymentError(
+                "Automatic conflict resolution stopped after "
+                f"{self.max_conflict_resolution_attempts} attempts because the pull request "
+                "is still conflicting."
+            )
+        if self.conflict_rebaser is None:
+            raise DeploymentError("Automatic conflict resolution is not configured.")
+        attempt = attempts + 1
+        self.db.update_code_job(
+            job_id,
+            {
+                "deployment_status": "resolving_conflicts",
+                "deployment_conflict_attempts": attempt,
+                "deployment_error": None,
+                "latest_activity": (
+                    "Conflict detected; resolving automatically "
+                    f"({attempt}/{self.max_conflict_resolution_attempts})"
+                ),
+            },
+        )
+        self.db.audit(
+            f"{_operation_mode(job)}.conflict",
+            "queued",
+            {"attempt": attempt, "head_sha": str(job.get("ci_head_sha") or "")},
+            job_id,
+        )
+        await self.reporter.refresh(job_id, force=True)
+        try:
+            await self.conflict_rebaser(job_id)
+        except (GhError, ValueError) as exc:
+            raise DeploymentError(
+                f"Automatic conflict resolution could not start: {exc}"
+            ) from exc
+
+    async def _wait_for_conflict_recovery(self, job_id: str) -> None:
+        while True:
+            job = self._require_job(job_id)
+            code_status = str(job.get("status") or "")
+            if code_status == "ready":
+                self.db.update_code_job(
+                    job_id,
+                    {
+                        "deployment_status": "merging",
+                        "deployment_error": None,
+                        "latest_activity": (
+                            "Conflict resolution passed CI; retrying pull request merge"
+                        ),
+                    },
+                )
+                await self.reporter.refresh(job_id, force=True)
+                return
+            if code_status in {"failed", "interrupted", "discarded"}:
+                detail = str(job.get("error") or code_status)
+                raise DeploymentError(
+                    f"Automatic conflict resolution failed during {code_status}: {detail}"
+                )
+            if code_status not in ACTIVE_CONFLICT_RECOVERY_STATUSES:
+                raise DeploymentError(
+                    "Automatic conflict resolution entered an unexpected code-job "
+                    f"state: {code_status or 'unknown'}."
+                )
+            await asyncio.sleep(self.poll_seconds)
 
     def _validate_preflight(
         self,
@@ -445,3 +533,7 @@ def _operation_mode(job: dict[str, Any]) -> str:
     if mode in {MERGE_MODE, DEPLOY_MODE}:
         return mode
     return DEPLOY_MODE if job.get("deployment_status") else ""
+
+
+def _has_explicit_conflict(pr: PullRequestSnapshot) -> bool:
+    return pr.mergeable == "CONFLICTING" or pr.merge_state_status == "DIRTY"

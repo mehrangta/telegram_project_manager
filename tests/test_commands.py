@@ -87,6 +87,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("github_plan_question_revision", code_job_columns)
             self.assertIn("github_plan_comment_cursor", code_job_columns)
             self.assertIn("deployment_mode", code_job_columns)
+            self.assertIn("deployment_conflict_attempts", code_job_columns)
             self.assertIsNotNone(feedback_table)
 
     def test_database_upgrade_marks_existing_delivery_operations_as_deploy(self):

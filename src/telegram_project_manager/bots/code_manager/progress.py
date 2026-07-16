@@ -212,6 +212,10 @@ class CodeProgressReporter:
             lines.append(f"Deployment: {job['deployment_run_url']}")
         if job.get("deployment_error"):
             lines.append(f"Error: {job['deployment_error']}")
+        recovery_actions = _conflict_recovery_failure_actions(job)
+        if not succeeded and recovery_actions:
+            lines.extend(recovery_actions)
+            lines.append(f"Deploy after the code job is ready: /deploy {job['id']}")
         lines.append(f"Status command: /code status {job['id']}")
         outgoing = outgoing_message("\n".join(lines), expandable_prefixes=("Error:",))
         await asyncio.to_thread(
@@ -242,6 +246,8 @@ class CodeProgressReporter:
             lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
         if job.get("deployment_error"):
             lines.append(f"Error: {job['deployment_error']}")
+        if not merged:
+            lines.extend(_conflict_recovery_failure_actions(job))
         if (
             merged
             and str(job.get("base_branch") or "") == "main"
@@ -349,6 +355,9 @@ class CodeProgressReporter:
         if operation_status:
             label = "Merge" if operation_mode == "merge" else "Deployment"
             lines.append(f"{label}: {operation_status.replace('_', ' ')}")
+        conflict_attempts = int(job.get("deployment_conflict_attempts") or 0)
+        if conflict_attempts:
+            lines.append(f"Automatic conflict-resolution attempts: {conflict_attempts}")
         if job.get("deployment_merge_sha"):
             lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
         if job.get("deployment_run_url"):
@@ -381,7 +390,8 @@ class CodeProgressReporter:
         elif status in {"failed", "interrupted"}:
             lines.extend(["", f"Retry: /code retry {job['id']}", f"Discard: /code discard {job['id']}"])
         elif status == "ready" and operation_status not in {
-            "queued", "merging", "waiting_workflow", "dispatching", "deploying"
+            "queued", "merging", "resolving_conflicts", "waiting_workflow",
+            "dispatching", "deploying"
         }:
             if not job.get("deployment_merge_sha"):
                 lines.extend(
@@ -420,6 +430,23 @@ def _status_heading(status: str, deployment_status: str, deployment_mode: str = 
     if status == "ready":
         return "✅ Codex code job"
     return "🧭 Codex code job"
+
+
+def _conflict_recovery_failure_actions(job: dict[str, Any]) -> list[str]:
+    if (
+        int(job.get("deployment_conflict_attempts") or 0) <= 0
+        or job.get("deployment_merge_sha")
+    ):
+        return []
+    lines = [
+        "",
+        "Automatic conflict resolution could not complete.",
+    ]
+    if str(job.get("status") or "") in {"failed", "interrupted"}:
+        lines.append(f"Retry resolution: /code retry {job['id']}")
+    else:
+        lines.append(f"Rebase manually: /code rebase {job['id']}")
+    return lines
 
 
 def _event_summary(event: dict[str, Any]) -> str:
