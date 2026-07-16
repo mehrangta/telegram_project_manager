@@ -1,6 +1,13 @@
+import json
 import unittest
 
-from telegram_project_manager.integrations.gh.issues import GhIssueExecutor, _validate_image
+from telegram_project_manager.integrations.gh.issues import (
+    ISSUE_TITLE_LIMIT,
+    GhIssueExecutor,
+    GhIssueReader,
+    _validate_image,
+)
+from telegram_project_manager.integrations.gh.runner import GhError, GhResult
 
 
 class FakeTelegram:
@@ -40,6 +47,21 @@ class FakeGh:
         raise AssertionError(endpoint)
 
 
+class FakeIssueListGh:
+    def __init__(self, value=None, *, stdout=None, error=None):
+        self.value = [] if value is None else value
+        self.stdout = stdout
+        self.error = error
+        self.calls = []
+
+    def run(self, args):
+        self.calls.append(args)
+        if self.error:
+            raise self.error
+        stdout = self.stdout if self.stdout is not None else json.dumps(self.value)
+        return GhResult(["gh", *args], 0, stdout, "", 1)
+
+
 def record(with_image=True):
     return {
         "id": "i-12345678",
@@ -67,6 +89,68 @@ def record(with_image=True):
 
 
 class GitHubIssueTests(unittest.TestCase):
+    def test_lists_open_issues_in_cli_order(self):
+        gh = FakeIssueListGh(
+            [
+                {"number": 9, "title": "  Newest\n issue  "},
+                {"number": 4, "title": "Older issue"},
+            ]
+        )
+
+        issues = GhIssueReader(gh).list_open_issues("owner/repo")
+
+        self.assertEqual(
+            gh.calls,
+            [[
+                "issue", "list", "--repo", "owner/repo", "--state", "open",
+                "--limit", "20", "--search", "sort:updated-desc", "--json",
+                "number,title",
+            ]],
+        )
+        self.assertEqual([issue.number for issue in issues], [9, 4])
+        self.assertEqual(issues[0].title, "Newest issue")
+        self.assertEqual(issues[0].url, "https://github.com/owner/repo/issues/9")
+
+    def test_issue_list_truncates_long_titles(self):
+        issue = GhIssueReader(FakeIssueListGh([{"number": 1, "title": "x" * 200}])).list_open_issues(
+            "owner/repo"
+        )[0]
+
+        self.assertEqual(len(issue.title), ISSUE_TITLE_LIMIT)
+        self.assertTrue(issue.title.endswith("..."))
+
+    def test_issue_list_defensively_enforces_limit(self):
+        issues = GhIssueReader(
+            FakeIssueListGh(
+                [{"number": number, "title": f"Issue {number}"} for number in range(1, 26)]
+            )
+        ).list_open_issues("owner/repo")
+
+        self.assertEqual(len(issues), 20)
+        self.assertEqual(issues[-1].number, 20)
+
+    def test_issue_list_accepts_empty_output(self):
+        self.assertEqual(GhIssueReader(FakeIssueListGh()).list_open_issues("owner/repo"), [])
+
+    def test_issue_list_rejects_malformed_output(self):
+        invalid_values = [
+            ({"number": 1}, "unexpected response"),
+            (["invalid"], "invalid issue"),
+            ([{"number": 0, "title": "Title"}], "invalid issue number"),
+            ([{"number": 1, "title": "  "}], "empty issue title"),
+        ]
+        for value, message in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, message):
+                    GhIssueReader(FakeIssueListGh(value)).list_open_issues("owner/repo")
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            GhIssueReader(FakeIssueListGh(stdout="not json")).list_open_issues("owner/repo")
+
+    def test_issue_list_propagates_gh_error(self):
+        error = GhError(GhResult(["gh", "issue", "list"], 1, "", "auth failed", 1))
+        with self.assertRaises(GhError):
+            GhIssueReader(FakeIssueListGh(error=error)).list_open_issues("owner/repo")
+
     def test_title_only_mode_preserves_raw_body_and_appends_marker(self):
         gh = FakeGh()
         value = record(False)

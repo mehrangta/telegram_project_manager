@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import html
+
 from telegram_project_manager.bots.commit_manager.executor import CommitExecutionService
 from telegram_project_manager.bots.commit_manager.planner import CommitPlanner
 from telegram_project_manager.bots.commit_manager.repository_setup import RepositorySetupService
 from telegram_project_manager.bots.commit_manager.schemas import PlanValidationError, validate_repo
 from telegram_project_manager.bots.issue_manager.planner import issue_memory_session_id
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
+from telegram_project_manager.integrations.gh.issues import GhIssueReader
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
 from telegram_project_manager.integrations.git.local_repository import (
     LocalRepositoryError,
@@ -19,7 +23,7 @@ from telegram_project_manager.platform.config import (
 from telegram_project_manager.platform.llm.client import LlmError, OpenAICompatibleClient
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, memory_session_id
 from telegram_project_manager.platform.permissions import PermissionService
-from telegram_project_manager.platform.responses import bullet_list, truncate
+from telegram_project_manager.platform.responses import OutgoingMessage, bullet_list, truncate
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -33,6 +37,7 @@ class CommitManager:
         executor: GhCommitExecutor,
         repositories: LocalRepositoryService,
         repository_setup: RepositorySetupService,
+        issue_reader: GhIssueReader,
     ) -> None:
         self.db = db
         self.permissions = PermissionService(db)
@@ -41,8 +46,9 @@ class CommitManager:
         self.execution = CommitExecutionService(db, executor)
         self.repositories = repositories
         self.repository_setup = repository_setup
+        self.issue_reader = issue_reader
 
-    async def handle(self, message: IncomingMessage) -> str | None:
+    async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         text = message.text.strip()
         if not text:
             return None
@@ -58,6 +64,8 @@ class CommitManager:
             return self.repo(message, rest)
         if command == "/repos":
             return self.repos()
+        if command == "/issues":
+            return await self.issues(message, rest)
         if command == "/config":
             return self.config(message, rest)
         if command == "/memory":
@@ -87,6 +95,7 @@ Commands:
 /repo deploy set owner/repository <workflow-name-or-file>
 /repo show
 /repo check
+/issues
 /commit <request>
 /issue <prompt> (text or photo/album caption)
 /code #123 [--skip-plan]
@@ -308,6 +317,31 @@ Commands:
     def repos(self) -> str:
         repos = self.db.list_allowed_repos()
         return "Allowed repos:\n" + (bullet_list(repos) if repos else "- none")
+
+    async def issues(self, message: IncomingMessage, rest: str) -> str | OutgoingMessage:
+        if rest:
+            return "Usage: /issues"
+        settings = self.db.get_scope_settings(message.chat_id, message.thread_id)
+        repo = str(settings.get("active_repo") or "")
+        if not repo:
+            return f"No active repo for this {_scope_name(message)}. Admin: /repo set owner/repository"
+        if not self.db.is_repo_allowed(repo):
+            return "Active repo is not in allowed repo list. Admin: /repo allow owner/repository"
+        try:
+            issues = await asyncio.to_thread(self.issue_reader.list_open_issues, repo)
+        except (GhError, ValueError) as exc:
+            self.db.audit("issues.list", "failed", {"repo": repo, "error": str(exc)})
+            return f"Issues not loaded.\nReason: {exc}"
+        if not issues:
+            return f"No open issues for {repo}."
+
+        lines = [f"Open issues for {html.escape(repo)}:"]
+        lines.extend(
+            f'- <a href="{html.escape(issue.url, quote=True)}">#{issue.number}</a> — '
+            f"{html.escape(issue.title)}"
+            for issue in issues
+        )
+        return OutgoingMessage(text="\n".join(lines))
 
     def config(self, message: IncomingMessage, rest: str) -> str:
         parts = rest.split(maxsplit=2)
