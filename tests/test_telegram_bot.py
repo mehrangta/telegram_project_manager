@@ -92,7 +92,7 @@ class TelegramBotTests(unittest.TestCase):
                     "message_thread_id": 7,
                     "from": {"id": 30, "username": "admin"},
                     "chat": {"id": 40, "type": "supergroup"},
-                    "caption": "/issue button broken",
+                    "caption": "/ask why is this button broken?",
                     "photo": [
                         {"file_id": "small", "file_unique_id": "u1", "file_size": 10},
                         {"file_id": "large", "file_unique_id": "u2", "file_size": 20},
@@ -102,7 +102,7 @@ class TelegramBotTests(unittest.TestCase):
         )
         self.assertIsNotNone(incoming)
         assert incoming is not None
-        self.assertEqual(incoming.text, "/issue button broken")
+        self.assertEqual(incoming.text, "/ask why is this button broken?")
         self.assertEqual(incoming.attachments[0].file_id, "large")
         self.assertEqual(incoming.media_group_id, "album-1")
         self.assertEqual(incoming.thread_id, 7)
@@ -121,11 +121,11 @@ class TelegramBotTests(unittest.TestCase):
             }
 
         incoming = incoming_message_from_updates(
-            [update(2, "", "second"), update(1, "/issue bug", "first")]
+            [update(2, "", "second"), update(1, "/ask explain this bug", "first")]
         )
         self.assertIsNotNone(incoming)
         assert incoming is not None
-        self.assertEqual(incoming.text, "/issue bug")
+        self.assertEqual(incoming.text, "/ask explain this bug")
         self.assertEqual([item.file_id for item in incoming.attachments], ["first", "second"])
 
     def test_extracts_draft_id_only_from_bot_preview_reply(self):

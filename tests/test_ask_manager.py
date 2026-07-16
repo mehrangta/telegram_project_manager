@@ -3,29 +3,47 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
+from unittest.mock import patch
 
 from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.ask_manager.commands import AskManager
+from telegram_project_manager.bots.ask_manager.images import (
+    MAX_IMAGE_BYTES,
+    MAX_TOTAL_IMAGE_BYTES,
+    stage_attachments,
+    validate_attachments,
+)
 from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.code_manager.workspace import GitWorkspaceService
-from telegram_project_manager.platform.router import IncomingMessage
+from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
 
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.files = {}
+        self.download_errors = {}
+        self.downloaded = []
 
     def send_message(self, chat_id, text, thread_id=None, **options):
         self.sent.append((chat_id, text, thread_id, options))
         return {"message_id": 100 + len(self.sent)}
 
+    def download_file(self, file_id, max_bytes):
+        self.downloaded.append((file_id, max_bytes))
+        if file_id in self.download_errors:
+            raise self.download_errors[file_id]
+        return self.files[file_id]
+
 
 class FakeCodex:
     def __init__(self, result=None):
         self.calls = []
+        self.image_inputs = []
         self.result = result or {
             "answer": "The entry point is src/app.py.",
             "sources": ["src/app.py", "missing.py"],
@@ -33,6 +51,9 @@ class FakeCodex:
 
     async def run_turn(self, **kwargs):
         self.calls.append(kwargs)
+        self.image_inputs.append(
+            [(Path(path).name, Path(path).read_bytes()) for path in kwargs["image_paths"]]
+        )
         await kwargs["on_thread"]("thread-ask")
         await kwargs["on_progress"]({"kind": "phase"})
         return "thread-ask", self.result
@@ -68,6 +89,18 @@ async def wait_for_messages(bot, count):
     raise AssertionError(f"expected {count} messages, got {len(bot.sent)}")
 
 
+async def wait_for_completion(service, ask_id):
+    for _ in range(200):
+        if ask_id not in service._tasks:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"ask job did not finish: {ask_id}")
+
+
+async def run_inline(function, /, *args, **kwargs):
+    return function(*args, **kwargs)
+
+
 class AskManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -95,7 +128,9 @@ class AskManagerTests(unittest.IsolatedAsyncioTestCase):
         response = await manager.handle(
             IncomingMessage(
                 10, 20, "admin", "/ask@ProjectBot where is startup?",
-                message_id=40, thread_id=30,
+                attachments=(IncomingAttachment("image", "unique", "image/png", 100),),
+                message_id=40,
+                thread_id=30,
             )
         )
 
@@ -104,6 +139,7 @@ class AskManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.calls[0]["branch"], "develop")
         self.assertEqual(service.calls[0]["source_path"], "/cache/topic.git")
         self.assertEqual(service.calls[0]["message_id"], 40)
+        self.assertEqual(service.calls[0]["attachments"][0].file_id, "image")
 
     async def test_usage_and_missing_topic_repo_reply_to_command(self):
         manager = AskManager(db=self.db, service=object())
@@ -119,9 +155,148 @@ class AskManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing.reply_to_message_id, 42)
         self.assertIn("No active repo", missing.text)
 
+    async def test_invalid_attachment_is_rejected_before_submit(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            async def submit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        service = Service()
+        manager = AskManager(db=self.db, service=service)
+        response = await manager.handle(
+            IncomingMessage(
+                10,
+                20,
+                "admin",
+                "/ask inspect this",
+                attachments=(IncomingAttachment("image", "unique", "image/webp", 100),),
+                message_id=43,
+                thread_id=30,
+            )
+        )
+
+        self.assertEqual(response.reply_to_message_id, 43)
+        self.assertIn("Unsupported image type", response.text)
+        self.assertEqual(service.calls, [])
+
+
+class AskImageTests(unittest.TestCase):
+    def test_metadata_validation_enforces_supported_types_and_limits(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported image type"):
+            validate_attachments((IncomingAttachment("1", "1", "image/webp", 1),))
+        with self.assertRaisesRegex(ValueError, "Maximum: 10"):
+            validate_attachments(
+                tuple(IncomingAttachment(str(index), str(index), "image/png", 1) for index in range(11))
+            )
+        with self.assertRaisesRegex(ValueError, "10 MB or smaller"):
+            validate_attachments(
+                (IncomingAttachment("1", "1", "image/png", MAX_IMAGE_BYTES + 1),)
+            )
+        with self.assertRaisesRegex(ValueError, "20 MB or smaller"):
+            validate_attachments(
+                (
+                    IncomingAttachment("1", "1", "image/png", MAX_IMAGE_BYTES),
+                    IncomingAttachment("2", "2", "image/png", MAX_IMAGE_BYTES),
+                    IncomingAttachment("3", "3", "image/png", 1),
+                )
+            )
+
+    def test_stages_verified_images_in_attachment_order(self):
+        bot = FakeBot()
+        png = bytes.fromhex("89504e470d0a1a0a") + b"png"
+        jpeg = bytes.fromhex("ffd8ff") + b"jpeg"
+        bot.files = {"png": png, "jpeg": jpeg}
+        attachments = (
+            IncomingAttachment("png", "1", "image/png", len(png)),
+            IncomingAttachment("jpeg", "2", "image/jpeg", len(jpeg)),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = stage_attachments(
+                bot=bot,
+                attachments=attachments,
+                destination=Path(temp_dir) / "images",
+            )
+            self.assertEqual([Path(path).name for path in paths], ["1.png", "2.jpg"])
+            self.assertEqual([Path(path).read_bytes() for path in paths], [png, jpeg])
+        self.assertEqual(bot.downloaded, [("png", MAX_IMAGE_BYTES), ("jpeg", MAX_IMAGE_BYTES)])
+
+    def test_staging_rechecks_actual_total_size(self):
+        bot = FakeBot()
+        bot.files = {
+            "png": bytes.fromhex("89504e470d0a1a0a") + b"p" * (MAX_IMAGE_BYTES - 8),
+            "jpeg": bytes.fromhex("ffd8ff") + b"j" * (MAX_IMAGE_BYTES - 3),
+            "gif": bytes.fromhex("474946383961") + b"gif",
+        }
+        attachments = (
+            IncomingAttachment("png", "1", "image/png", 0),
+            IncomingAttachment("jpeg", "2", "image/jpeg", 0),
+            IncomingAttachment("gif", "3", "image/gif", 0),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "20 MB or smaller"):
+                stage_attachments(
+                    bot=bot,
+                    attachments=attachments,
+                    destination=Path(temp_dir) / "images",
+                )
+
+    def test_staging_rejects_invalid_content_and_sanitizes_download_errors(self):
+        bot = FakeBot()
+        bot.files["invalid"] = b"not a png"
+        bot.download_errors["failed"] = TelegramBotApiError("provider detail")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "not valid image/png"):
+                stage_attachments(
+                    bot=bot,
+                    attachments=(IncomingAttachment("invalid", "1", "image/png", 9),),
+                    destination=Path(temp_dir) / "invalid-images",
+                )
+            with self.assertRaisesRegex(ValueError, "Telegram image download failed") as error:
+                stage_attachments(
+                    bot=bot,
+                    attachments=(IncomingAttachment("failed", "2", "image/png", 9),),
+                    destination=Path(temp_dir) / "failed-images",
+                )
+        self.assertNotIn("provider detail", str(error.exception))
+
+    def test_staging_does_not_follow_repository_symlinks_or_overwrite_files(self):
+        bot = FakeBot()
+        png = bytes.fromhex("89504e470d0a1a0a") + b"png"
+        bot.files["png"] = png
+        attachment = (IncomingAttachment("png", "1", "image/png", len(png)),)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            existing = root / "existing"
+            existing.mkdir()
+            with self.assertRaisesRegex(ValueError, "staging path is unavailable"):
+                stage_attachments(bot=bot, attachments=attachment, destination=existing)
+
+            outside = root / "outside"
+            outside.mkdir()
+            repository = root / "repo"
+            repository.mkdir()
+            (repository / ".codex").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "staging path is unavailable"):
+                stage_attachments(
+                    bot=bot,
+                    attachments=attachment,
+                    destination=repository / ".codex" / "ask-images",
+                )
+            self.assertEqual(list(outside.iterdir()), [])
+
 
 class AskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.to_thread = patch(
+            "telegram_project_manager.bots.ask_manager.service.asyncio.to_thread",
+            new=run_inline,
+        )
+        self.to_thread.start()
+        self.addCleanup(self.to_thread.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp.name) / "bot.db")
         self.db.initialize()
@@ -160,6 +335,7 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sent[2], 30)
             self.assertEqual(sent[3]["reply_to_message_id"], 40)
         call = self.codex.calls[0]
+        self.assertEqual(call["image_paths"], ())
         self.assertEqual(call["sandbox"], Sandbox.read_only)
         self.assertEqual(call["effort"], ReasoningEffort.high)
         self.assertEqual(call["model_role"], "plan")
@@ -169,6 +345,61 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.01)
         self.assertEqual(len(self.workspaces.cleaned), 1)
+
+    async def test_images_are_attached_to_codex_filtered_from_sources_and_cleaned(self):
+        png = bytes.fromhex("89504e470d0a1a0a") + b"png"
+        gif = bytes.fromhex("474946383961") + b"gif"
+        self.bot.files = {"png": png, "gif": gif}
+        self.codex.result = {
+            "answer": "The screenshot shows the startup failure.",
+            "sources": ["src/app.py", ".codex/ask-images/1.png"],
+        }
+        ask_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="What explains this failure?",
+            attachments=(
+                IncomingAttachment("png", "1", "image/png", len(png)),
+                IncomingAttachment("gif", "2", "image/gif", len(gif)),
+            ),
+        )
+        await wait_for_messages(self.bot, 2)
+        await wait_for_completion(self.service, ask_id)
+
+        self.assertIn("<b>Images:</b> 2", self.bot.sent[0][1])
+        self.assertEqual(self.bot.downloaded, [("png", MAX_IMAGE_BYTES), ("gif", MAX_IMAGE_BYTES)])
+        self.assertEqual(self.codex.image_inputs[0], [("1.png", png), ("2.gif", gif)])
+        self.assertIn("src/app.py", self.bot.sent[1][1])
+        self.assertNotIn(".codex/ask-images", self.bot.sent[1][1])
+        self.assertFalse((self.service._root / ask_id).exists())
+
+    async def test_image_download_failure_replies_and_cleans_workspace(self):
+        self.bot.download_errors["failed"] = TelegramBotApiError("temporary provider error")
+        ask_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="What is in this image?",
+            attachments=(IncomingAttachment("failed", "1", "image/png", 100),),
+        )
+        await wait_for_messages(self.bot, 2)
+        await wait_for_completion(self.service, ask_id)
+
+        self.assertIn("Repository question failed", self.bot.sent[1][1])
+        self.assertIn("Telegram image download failed", self.bot.sent[1][1])
+        self.assertNotIn("temporary provider error", self.bot.sent[1][1])
+        self.assertEqual(self.codex.calls, [])
+        self.assertEqual(len(self.workspaces.cleaned), 1)
+        self.assertFalse((self.service._root / ask_id).exists())
 
     async def test_full_queue_rejects_before_acknowledging(self):
         service = AskService(
