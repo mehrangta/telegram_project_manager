@@ -15,13 +15,15 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class CommandTests(unittest.TestCase):
-    def test_help_lists_private_full_access_command(self):
+    def test_help_lists_repository_and_host_do_commands(self):
         manager = object.__new__(CommitManager)
 
         help_text = manager.help()
 
         self.assertIn("/do <job>", help_text)
-        self.assertIn("private admin chat only", help_text)
+        self.assertIn("active repository", help_text)
+        self.assertIn("/do --host <job>", help_text)
+        self.assertIn("/do status", help_text)
 
     def test_database_upgrade_preserves_chat_settings_and_adds_topic_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:

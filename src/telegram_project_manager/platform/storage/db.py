@@ -15,9 +15,10 @@ class Database:
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     @contextmanager
@@ -34,6 +35,7 @@ class Database:
 
     def initialize(self) -> None:
         with self.session() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -247,6 +249,45 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_code_plan_feedback_job_state
                 ON code_plan_feedback (job_id, state, id);
+
+                CREATE TABLE IF NOT EXISTS do_jobs (
+                    id TEXT PRIMARY KEY,
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER,
+                    telegram_message_id INTEGER,
+                    mode TEXT NOT NULL,
+                    lane TEXT NOT NULL,
+                    repo TEXT,
+                    default_branch TEXT,
+                    source_repo_path TEXT,
+                    workspace_path TEXT,
+                    payload_path TEXT NOT NULL,
+                    image_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    latest_activity TEXT NOT NULL DEFAULT '',
+                    error TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_do_jobs_status_created
+                ON do_jobs (status, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_do_jobs_scope_updated
+                ON do_jobs (telegram_chat_id, telegram_thread_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS do_job_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES do_jobs(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_do_job_events_job_id_id
+                ON do_job_events (job_id, id);
                 """
             )
             self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
@@ -931,6 +972,149 @@ class Database:
                 "UPDATE issue_attachments SET asset_path = ? WHERE draft_id = ? AND position = ?",
                 [(path, draft_id, position) for position, path in enumerate(paths)],
             )
+
+    def create_do_job(self, job: dict[str, Any]) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO do_jobs (
+                    id, telegram_chat_id, telegram_user_id, telegram_thread_id,
+                    mode, lane, repo, default_branch, source_repo_path,
+                    workspace_path, payload_path, image_count, status,
+                    latest_activity, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job["id"], job["telegram_chat_id"], job["telegram_user_id"],
+                    job.get("telegram_thread_id"), job["mode"], job["lane"],
+                    job.get("repo"), job.get("default_branch"),
+                    job.get("source_repo_path"), job.get("workspace_path"),
+                    job["payload_path"], int(job.get("image_count") or 0),
+                    job.get("status", "preparing"), job.get("latest_activity", ""),
+                    now, now,
+                ),
+            )
+
+    def get_do_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute("SELECT * FROM do_jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_do_jobs(
+        self,
+        *,
+        chat_id: int | None = None,
+        thread_id: int | None = None,
+        exact_thread: bool = False,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if chat_id is not None:
+            conditions.append("telegram_chat_id = ?")
+            params.append(chat_id)
+        if exact_thread:
+            conditions.append("telegram_thread_id IS ?")
+            params.append(thread_id)
+        if statuses:
+            conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM do_jobs {where} ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_active_do_jobs(self) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM do_jobs WHERE status IN ('preparing','queued','running')"
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def update_do_job(
+        self,
+        job_id: str,
+        values: dict[str, Any],
+        *,
+        allowed_statuses: tuple[str, ...] | None = None,
+    ) -> bool:
+        allowed = {
+            "telegram_message_id", "workspace_path", "status", "latest_activity", "error"
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unsupported do job columns: {sorted(unknown)}")
+        if not values:
+            return False
+        encoded = {**values, "updated_at": int(time.time())}
+        query = f"UPDATE do_jobs SET {', '.join(f'{key} = ?' for key in encoded)} WHERE id = ?"
+        params: list[Any] = [*encoded.values(), job_id]
+        if allowed_statuses:
+            query += f" AND status IN ({','.join('?' for _ in allowed_statuses)})"
+            params.extend(allowed_statuses)
+        with self.session() as conn:
+            cursor = conn.execute(query, params)
+        return cursor.rowcount == 1
+
+    def claim_do_job(self, job_id: str) -> bool:
+        return self.update_do_job(
+            job_id,
+            {"status": "running", "latest_activity": "Worker started", "error": None},
+            allowed_statuses=("queued",),
+        )
+
+    def add_do_job_event(self, job_id: str, event_type: str, summary: dict[str, Any]) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO do_job_events (job_id, event_type, summary_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, event_type, json.dumps(summary, separators=(",", ":")), int(time.time())),
+            )
+
+    def list_do_job_events(self, job_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, summary_json, created_at FROM do_job_events
+                WHERE job_id = ? ORDER BY id DESC LIMIT ?
+                """,
+                (job_id, limit),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            try:
+                summary = json.loads(str(row["summary_json"]))
+            except (TypeError, json.JSONDecodeError):
+                summary = {}
+            events.append({
+                "event_type": row["event_type"],
+                "summary": summary if isinstance(summary, dict) else {},
+                "created_at": row["created_at"],
+            })
+        return events
+
+    def mark_running_do_jobs_interrupted(self) -> list[str]:
+        now = int(time.time())
+        with self.session() as conn:
+            rows = conn.execute("SELECT id FROM do_jobs WHERE status = 'running'").fetchall()
+            conn.execute(
+                """
+                UPDATE do_jobs SET status = 'interrupted',
+                    error = 'Do worker restarted during an active Codex turn.',
+                    latest_activity = 'Interrupted by worker restart', updated_at = ?
+                WHERE status = 'running'
+                """,
+                (now,),
+            )
+        return [str(row["id"]) for row in rows]
 
     def audit(self, action: str, status: str, details: dict[str, Any], plan_id: str | None = None) -> None:
         now = int(time.time())

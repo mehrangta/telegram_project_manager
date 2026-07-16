@@ -15,7 +15,9 @@ from telegram_project_manager.bots.code_manager.progress import CodeProgressRepo
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, GitWorkspaceService
 from telegram_project_manager.bots.do_manager.commands import DoManager
+from telegram_project_manager.bots.do_manager.progress import DoProgressReporter
 from telegram_project_manager.bots.do_manager.service import DoService
+from telegram_project_manager.bots.do_manager.workspace import DoWorkspaceService
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
@@ -46,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db")
     sub.add_parser("run")
+    sub.add_parser("run-do-worker")
 
     admin = sub.add_parser("admin")
     admin_sub = admin.add_subparsers(dest="admin_command", required=True)
@@ -107,6 +110,8 @@ def main() -> None:
 
     if args.command == "run":
         asyncio.run(run_bot(db))
+    elif args.command == "run-do-worker":
+        asyncio.run(run_do_worker(db))
 
 
 async def run_bot(db: Database) -> None:
@@ -158,11 +163,19 @@ async def run_bot(db: Database) -> None:
         bot=bot,
     )
     ask_manager = AskManager(db=db, service=ask_service)
+    do_reporter = DoProgressReporter(db, bot)
+    do_workspaces = DoWorkspaceService(
+        repositories=repositories,
+        root=db.path.parent / "do-workspaces",
+    )
     do_service = DoService(
         db=db,
         codex=codex,
         bot=bot,
-        working_directory=Path.cwd().resolve(),
+        reporter=do_reporter,
+        workspaces=do_workspaces,
+        host_working_directory=Path.cwd().resolve(),
+        payload_root=db.path.parent / "do-payloads",
     )
     do_manager = DoManager(db=db, service=do_service)
     code_manager = CodeManager(
@@ -195,7 +208,34 @@ async def run_bot(db: Database) -> None:
         await run_polling(bot, router)
     finally:
         await repository_setup.shutdown()
-        await do_service.shutdown()
         await ask_service.shutdown()
         await deployment_service.shutdown()
         await code_service.shutdown()
+
+
+async def run_do_worker(db: Database) -> None:
+    secrets = SecretStore(Path("data/secrets.json"))
+    bot = TelegramBotApi(secrets.require("TELEGRAM_BOT_TOKEN"))
+    repositories = LocalRepositoryService()
+    codex = CodexSdkAdapter(
+        lambda: db.get_secret("codex_api_key"),
+        lambda: db.get_setting("codex_base_url", ""),
+        lambda role: resolve_codex_model(db.get_setting, role),
+    )
+    reporter = DoProgressReporter(db, bot)
+    service = DoService(
+        db=db,
+        codex=codex,
+        bot=bot,
+        reporter=reporter,
+        workspaces=DoWorkspaceService(
+            repositories=repositories,
+            root=db.path.parent / "do-workspaces",
+        ),
+        host_working_directory=Path.cwd().resolve(),
+        payload_root=db.path.parent / "do-payloads",
+    )
+    try:
+        await service.run_worker()
+    finally:
+        await codex.close()

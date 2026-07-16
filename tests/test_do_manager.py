@@ -2,76 +2,95 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from openai_codex import Sandbox
-from openai_codex.types import ReasoningEffort
 
-from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkError
 from telegram_project_manager.bots.do_manager.commands import DoManager
+from telegram_project_manager.bots.do_manager.progress import DoProgressReporter
 from telegram_project_manager.bots.do_manager.service import DoService
-from telegram_project_manager.platform.router import IncomingMessage
+from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
-from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
+
+
+PNG = bytes.fromhex("89504e470d0a1a0a") + b"payload"
 
 
 class FakeBot:
-    def __init__(self, fail_at=None):
+    def __init__(self):
         self.sent = []
-        self.fail_at = fail_at
-        self.calls = 0
+        self.edited = []
+        self.downloads = {"image": PNG}
 
     def send_message(self, chat_id, text, thread_id=None, **options):
-        self.calls += 1
-        if self.fail_at == self.calls:
-            raise TelegramBotApiError("send failed with sk-secret-token")
         self.sent.append((chat_id, text, thread_id, options))
-        return {"message_id": 100 + self.calls}
+        return {"message_id": 100 + len(self.sent)}
+
+    def edit_message_text(self, chat_id, message_id, text, **options):
+        self.edited.append((chat_id, message_id, text, options))
+        return True
+
+    def download_file(self, file_id, maximum):
+        del maximum
+        return self.downloads[file_id]
 
 
 class FakeCodex:
-    def __init__(self, result="Changed <host> with sk-secret-token and Authorization: Bearer abc"):
+    def __init__(self, result="done with sk-secret-token"):
         self.result = result
         self.calls = []
         self.interrupted = []
 
     async def run_text_turn(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self.result, Exception):
-            raise self.result
+        await kwargs["on_progress"](
+            {"kind": "command", "text": "pytest -q", "status": "completed"}
+        )
+        for path in kwargs.get("image_paths", ()):
+            assert Path(path).is_file()
         return "thread-do", self.result
 
     async def interrupt(self, job_id):
         self.interrupted.append(job_id)
 
 
+class FakeWorkspaces:
+    def __init__(self, root):
+        self.root = Path(root)
+        self.prepared = []
+
+    def validate_source(self, *, source_path, repo):
+        if not source_path:
+            raise ValueError("missing cache")
+        return source_path
+
+    def prepare(self, **kwargs):
+        self.prepared.append(kwargs)
+        path = self.root / kwargs["repo"].replace("/", "--")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
 class RecordingService:
     def __init__(self):
         self.calls = []
+        self.status_calls = []
 
     async def submit(self, **kwargs):
         self.calls.append(kwargs)
         return "d-12345678"
 
+    def status(self, **kwargs):
+        self.status_calls.append(kwargs)
+        return "Do Job ID: d-12345678\nStatus: running"
 
-async def wait_for_messages(bot, count):
-    for _ in range(200):
-        if len(bot.sent) >= count:
-            return
+
+async def wait_for_status(db, job_id, status):
+    for _ in range(300):
+        job = db.get_do_job(job_id)
+        if job and job["status"] == status:
+            return job
         await asyncio.sleep(0.01)
-    raise AssertionError(f"expected {count} messages, got {len(bot.sent)}")
-
-
-async def wait_for_idle(service):
-    for _ in range(200):
-        if not service._tasks:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("expected full-access service to become idle")
-
-
-async def run_direct(function, *args, **kwargs):
-    return function(*args, **kwargs)
+    raise AssertionError(f"job {job_id} did not reach {status}")
 
 
 class DoManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -80,222 +99,201 @@ class DoManagerTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database(Path(self.temp.name) / "bot.db")
         self.db.initialize()
         self.db.upsert_user(20, "admin", "admin")
+        self.db.allow_repo("owner/repo", 20)
+        self.db.set_scope_repo(10, 7, "owner/repo", 20, "main")
+        self.db.set_scope_local_repo(10, 7, "/cache/repo.git", 20)
+        self.service = RecordingService()
+        self.manager = DoManager(db=self.db, service=self.service)
 
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    async def test_private_bot_qualified_command_preserves_multiline_job(self):
-        service = RecordingService()
-        manager = DoManager(db=self.db, service=service)
-
-        response = await manager.handle(
+    async def test_topic_repo_job_preserves_multiline_text_and_images(self):
+        response = await self.manager.handle(
             IncomingMessage(
-                10,
-                20,
-                "admin",
-                "/do@ProjectBot first line\n  second line",
-                is_private=True,
-                message_id=40,
+                10, 20, "admin", "/do first line\n second line",
+                thread_id=7, message_id=40,
+                attachments=(IncomingAttachment("image", "unique", "image/png", 100),),
             )
         )
-
         self.assertIsNone(response)
-        self.assertEqual(service.calls[0]["job"], "first line\n  second line")
-        self.assertEqual(service.calls[0]["message_id"], 40)
+        call = self.service.calls[0]
+        self.assertEqual(call["mode"], "repo")
+        self.assertEqual(call["repo"], "owner/repo")
+        self.assertEqual(call["job"], "first line\n second line")
+        self.assertEqual(call["thread_id"], 7)
+        self.assertEqual(len(call["attachments"]), 1)
 
-    async def test_group_admin_is_rejected_before_submission(self):
-        service = RecordingService()
-        manager = DoManager(db=self.db, service=service)
+    async def test_host_mode_is_private_only(self):
+        rejected = await self.manager.handle(
+            IncomingMessage(10, 20, "admin", "/do --host restart", message_id=41)
+        )
+        self.assertIn("private admin", rejected.text)
+        accepted = await self.manager.handle(
+            IncomingMessage(10, 20, "admin", "/do --host restart", is_private=True)
+        )
+        self.assertIsNone(accepted)
+        self.assertEqual(self.service.calls[-1]["mode"], "host")
 
-        response = await manager.handle(
-            IncomingMessage(10, 20, "admin", "/do change host", message_id=41)
+    async def test_status_is_scoped(self):
+        response = await self.manager.handle(
+            IncomingMessage(10, 20, "admin", "/do status d-12345678", thread_id=7)
+        )
+        self.assertIn("d-12345678", response.text)
+        self.assertEqual(
+            self.service.status_calls[0],
+            {"chat_id": 10, "thread_id": 7, "job_id": "d-12345678"},
         )
 
-        self.assertIn("only in private admin chats", response.text)
-        self.assertEqual(response.reply_to_message_id, 41)
-        self.assertEqual(service.calls, [])
-
-    async def test_non_admin_and_empty_job_are_rejected(self):
-        service = RecordingService()
-        manager = DoManager(db=self.db, service=service)
-
-        unauthorized = await manager.handle(
-            IncomingMessage(10, 99, "user", "/do work", is_private=True)
+    async def test_missing_repo_and_non_admin_are_rejected(self):
+        missing = await self.manager.handle(
+            IncomingMessage(99, 20, "admin", "/do work", message_id=42)
         )
-        usage = await manager.handle(
-            IncomingMessage(10, 20, "admin", "/do", is_private=True, message_id=42)
+        unauthorized = await self.manager.handle(
+            IncomingMessage(10, 99, "user", "/do work", thread_id=7)
         )
-
+        self.assertIn("No active repo", missing.text)
         self.assertIn("Unauthorized", unauthorized)
-        self.assertIn("Usage: /do", usage.text)
-        self.assertEqual(usage.reply_to_message_id, 42)
-        self.assertEqual(service.calls, [])
 
 
 class DoServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.to_thread_patch = mock.patch(
-            "telegram_project_manager.bots.do_manager.service.asyncio.to_thread",
-            new=run_direct,
-        )
-        self.to_thread_patch.start()
         self.temp = tempfile.TemporaryDirectory()
-        self.db = Database(Path(self.temp.name) / "bot.db")
+        root = Path(self.temp.name)
+        self.db = Database(root / "bot.db")
         self.db.initialize()
         self.bot = FakeBot()
         self.codex = FakeCodex()
-        self.working_directory = Path(self.temp.name) / "service-root"
-        self.working_directory.mkdir()
+        self.workspaces = FakeWorkspaces(root / "workspaces")
+        self.reporter = DoProgressReporter(self.db, self.bot, min_interval=0)
+        self.host = root / "host"
+        self.host.mkdir()
         self.service = DoService(
             db=self.db,
             codex=self.codex,
             bot=self.bot,
-            working_directory=self.working_directory,
+            reporter=self.reporter,
+            workspaces=self.workspaces,
+            host_working_directory=self.host,
+            payload_root=root / "payloads",
         )
 
     async def asyncTearDown(self):
-        await self.service.shutdown()
         self.temp.cleanup()
-        self.to_thread_patch.stop()
 
-    def audit_rows(self):
-        with self.db.session() as conn:
-            return conn.execute(
-                "SELECT plan_id, action, status, details_json FROM audit_events ORDER BY id"
-            ).fetchall()
+    async def run_until_terminal(self, job_id, status="completed"):
+        worker = asyncio.create_task(self.service.run_worker())
+        try:
+            return await wait_for_status(self.db, job_id, status)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
-    async def test_job_uses_full_access_and_replies_with_redacted_plain_result(self):
-        await self.service.submit(
-            chat_id=10,
-            user_id=20,
-            message_id=40,
-            job="perform private task",
+    async def test_host_job_runs_in_worker_reports_and_redacts_result(self):
+        job_id = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=None, message_id=40,
+            mode="host", job="perform task",
         )
-        await wait_for_messages(self.bot, 2)
-        await wait_for_idle(self.service)
-
-        self.assertIn("job queued", self.bot.sent[0][1])
-        self.assertIn("job completed", self.bot.sent[1][1])
-        self.assertIn("&lt;host&gt;", self.bot.sent[1][1])
-        self.assertNotIn("sk-secret-token", self.bot.sent[1][1])
-        self.assertNotIn("Bearer abc", self.bot.sent[1][1])
-        for sent in self.bot.sent:
-            self.assertEqual(sent[0], 10)
-            self.assertIsNone(sent[2])
-            self.assertEqual(sent[3]["reply_to_message_id"], 40)
+        job = await self.run_until_terminal(job_id)
+        self.assertEqual(job["status"], "completed")
         call = self.codex.calls[0]
-        self.assertEqual(call["cwd"], str(self.working_directory.resolve()))
-        self.assertEqual(call["prompt"], "perform private task")
+        self.assertEqual(call["cwd"], str(self.host.resolve()))
         self.assertEqual(call["sandbox"], Sandbox.full_access)
-        self.assertEqual(call["effort"], ReasoningEffort.high)
-        self.assertEqual(call["model_role"], "code")
-        self.assertIsNone(call["thread_id"])
-        self.assertEqual(call["timeout_seconds"], 2 * 60 * 60)
-        rows = self.audit_rows()
-        self.assertEqual([row["status"] for row in rows], ["queued", "ok"])
-        audit_json = " ".join(row["details_json"] for row in rows)
-        self.assertNotIn("perform private task", audit_json)
-        self.assertNotIn("Changed", audit_json)
+        self.assertTrue(self.bot.edited)
+        self.assertNotIn("sk-secret-token", self.bot.sent[-1][1])
+        self.assertFalse(Path(job["payload_path"]).exists())
 
-    async def test_full_queue_rejects_before_acknowledging(self):
-        service = DoService(
-            db=self.db,
-            codex=self.codex,
-            bot=self.bot,
-            working_directory=self.working_directory,
-            max_outstanding=0,
+    async def test_repo_job_forwards_image_and_uses_persistent_workspace(self):
+        attachment = IncomingAttachment("image", "unique", "image/png", len(PNG))
+        job_id = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=40,
+            mode="repo", repo="owner/repo", branch="main", source_path="/cache/repo.git",
+            job="inspect image", attachments=(attachment,),
         )
+        job = await self.run_until_terminal(job_id)
+        self.assertEqual(job["image_count"], 1)
+        self.assertEqual(self.workspaces.prepared[0]["repo"], "owner/repo")
+        self.assertEqual(len(self.codex.calls[0]["image_paths"]), 1)
+        self.assertFalse(Path(job["payload_path"]).exists())
 
+    async def test_status_rejects_cross_topic(self):
+        job_id = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=40,
+            mode="host", job="work",
+        )
+        with self.assertRaisesRegex(ValueError, "different chat or topic"):
+            self.service.status(chat_id=10, thread_id=8, job_id=job_id)
+
+    async def test_queue_limit_is_durable(self):
+        limited = DoService(
+            db=self.db, codex=self.codex, bot=self.bot, reporter=self.reporter,
+            workspaces=self.workspaces, host_working_directory=self.host,
+            payload_root=Path(self.temp.name) / "other-payloads", max_outstanding=0,
+        )
         with self.assertRaisesRegex(ValueError, "queue is full"):
-            await service.submit(chat_id=10, user_id=20, message_id=40, job="work")
+            await limited.submit(
+                chat_id=10, user_id=20, thread_id=None, message_id=40,
+                mode="host", job="work",
+            )
 
-        self.assertEqual(self.bot.sent, [])
+    async def test_running_jobs_are_interrupted_on_worker_recovery(self):
+        job_id = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=None, message_id=40,
+            mode="host", job="work",
+        )
+        self.assertTrue(self.db.claim_do_job(job_id))
+        interrupted = self.db.mark_running_do_jobs_interrupted()
+        self.assertEqual(interrupted, [job_id])
+        self.assertEqual(self.db.get_do_job(job_id)["status"], "interrupted")
 
-    async def test_failure_is_redacted_and_does_not_retry(self):
-        self.codex.result = CodexSdkError("provider rejected sk-secret-token")
-
-        await self.service.submit(chat_id=10, user_id=20, message_id=40, job="work")
-        await wait_for_messages(self.bot, 2)
-        await wait_for_idle(self.service)
-
-        self.assertEqual(len(self.codex.calls), 1)
-        self.assertIn("job failed", self.bot.sent[1][1])
-        self.assertNotIn("sk-secret-token", self.bot.sent[1][1])
-        self.assertEqual([row["status"] for row in self.audit_rows()], ["queued", "failed"])
-
-    async def test_result_delivery_failure_is_audited_without_rerun(self):
-        self.bot = FakeBot(fail_at=2)
-        self.service.bot = self.bot
-
-        await self.service.submit(chat_id=10, user_id=20, message_id=40, job="work")
-        for _ in range(200):
-            if any(row["action"] == "do.reply" for row in self.audit_rows()):
-                break
-            await asyncio.sleep(0.01)
-        await wait_for_idle(self.service)
-
-        self.assertEqual(len(self.codex.calls), 1)
-        rows = self.audit_rows()
-        self.assertEqual([row["action"] for row in rows], ["do.execute", "do.execute", "do.reply"])
-        self.assertEqual(rows[-1]["status"], "failed")
-        self.assertNotIn("sk-secret-token", rows[-1]["details_json"])
-
-    async def test_jobs_execute_serially(self):
+    async def test_worker_runs_two_lanes_but_serializes_same_repo(self):
         class BlockingCodex(FakeCodex):
             def __init__(self):
                 super().__init__("done")
-                self.active = 0
-                self.maximum_active = 0
                 self.release = asyncio.Event()
+                self.active = 0
+                self.maximum = 0
 
             async def run_text_turn(self, **kwargs):
                 self.calls.append(kwargs)
                 self.active += 1
-                self.maximum_active = max(self.maximum_active, self.active)
+                self.maximum = max(self.maximum, self.active)
                 await self.release.wait()
                 self.active -= 1
-                return "thread-do", self.result
+                return "thread", "done"
 
         codex = BlockingCodex()
         self.service.codex = codex
-
-        await self.service.submit(chat_id=10, user_id=20, message_id=40, job="one")
-        await self.service.submit(chat_id=10, user_id=20, message_id=41, job="two")
-        for _ in range(200):
-            if len(codex.calls) == 1:
-                break
-            await asyncio.sleep(0.01)
-        self.assertEqual(len(codex.calls), 1)
-
-        codex.release.set()
-        await wait_for_messages(self.bot, 4)
-        await wait_for_idle(self.service)
-
-        self.assertEqual(len(codex.calls), 2)
-        self.assertEqual(codex.maximum_active, 1)
-
-    async def test_shutdown_interrupts_outstanding_job(self):
-        class HangingCodex(FakeCodex):
-            def __init__(self):
-                super().__init__("done")
-                self.started = asyncio.Event()
-
-            async def run_text_turn(self, **kwargs):
-                self.calls.append(kwargs)
-                self.started.set()
-                await asyncio.Event().wait()
-                raise AssertionError("unreachable")
-
-        codex = HangingCodex()
-        self.service.codex = codex
-        do_id = await self.service.submit(chat_id=10, user_id=20, message_id=40, job="hang")
-        await codex.started.wait()
-
-        await self.service.shutdown()
-
-        self.assertEqual(codex.interrupted, [do_id])
-        self.assertEqual(self.service._tasks, {})
-        self.assertEqual(self.audit_rows()[-1]["status"], "interrupted")
+        first = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=1, mode="repo",
+            repo="owner/repo", branch="main", source_path="/cache/repo.git", job="one",
+        )
+        second = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=2, mode="repo",
+            repo="owner/repo", branch="main", source_path="/cache/repo.git", job="two",
+        )
+        host = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=None, message_id=3, mode="host", job="host",
+        )
+        worker = asyncio.create_task(self.service.run_worker())
+        try:
+            for _ in range(200):
+                if len(codex.calls) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(codex.calls), 2)
+            repo_statuses = {
+                self.db.get_do_job(first)["status"],
+                self.db.get_do_job(second)["status"],
+            }
+            self.assertEqual(repo_statuses, {"running", "queued"})
+            self.assertEqual(self.db.get_do_job(host)["status"], "running")
+            codex.release.set()
+            await wait_for_status(self.db, second, "completed")
+            self.assertEqual(codex.maximum, 2)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
 
 if __name__ == "__main__":

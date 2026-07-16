@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Project Manager Do Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/telegram-project-manager
+EnvironmentFile=/etc/telegram-project-manager/env
+Environment=HOME=/var/lib/telegram-project-manager
+Environment=PATH=/opt/telegram-project-manager-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/telegram-project-manager/.venv/bin/telegram-project-manager --db /var/lib/telegram-project-manager/bot.db run-do-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=false
+PrivateTmp=false
+PrivateNetwork=false
+ProtectHome=false
+ProtectSystem=false
+
+[Install]
+WantedBy=multi-user.target

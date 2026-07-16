@@ -10,7 +10,7 @@ TELEGRAM_TEXT_LIMIT = 4096
 COPY_TEXT_LIMIT = 256
 CALLBACK_DATA_LIMIT = 64
 URL_RE = re.compile(r"https://[^\s<>]+")
-PRIMARY_ID_RE = re.compile(r"(?m)^(Code Job ID|Draft ID|Plan ID):\s*([^\s]+)\s*$")
+PRIMARY_ID_RE = re.compile(r"(?m)^(Code Job ID|Do Job ID|Draft ID|Plan ID):\s*([^\s]+)\s*$")
 COMMAND_RE = re.compile(r"(/[a-z][a-z0-9_]*(?:\s+[^\n]+)?)", re.IGNORECASE)
 ISSUE_EDIT_COMMAND_RE = re.compile(r"^/edit (i-[0-9a-f]{8})$")
 FIELD_RE = re.compile(r"^([^:\n]{1,40}):\s*(.*)$")
@@ -115,7 +115,7 @@ def keyboard_for_text(text: str) -> tuple[tuple[InlineButton, ...], ...]:
     if not primary:
         return rows(_url_buttons(text))
     identifier = primary.group(2)
-    noun = {"Code Job ID": "Job ID", "Draft ID": "Draft ID", "Plan ID": "Plan ID"}[
+    noun = {"Code Job ID": "Job ID", "Do Job ID": "Job ID", "Draft ID": "Draft ID", "Plan ID": "Plan ID"}[
         primary.group(1)
     ]
     buttons = [copy_button(f"📋 {noun}", identifier)]
@@ -269,7 +269,7 @@ def _render_line(line: str) -> str:
         return f"<b>Latest activity</b>\n<blockquote>{html.escape(value)}</blockquote>"
     if label == "Status":
         rendered_value = f"<b>{html.escape(value.upper())}</b>"
-    elif label in {"Code Job ID", "Draft ID", "Plan ID", "Commit", "Context commit", "Merge commit"}:
+    elif label in {"Code Job ID", "Do Job ID", "Draft ID", "Plan ID", "Commit", "Context commit", "Merge commit"}:
         rendered_value = f"<code>{html.escape(value)}</code>"
     elif value.startswith("/"):
         rendered_value = f"<code>{html.escape(value)}</code>"

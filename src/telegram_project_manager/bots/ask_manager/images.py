@@ -29,7 +29,7 @@ def validate_attachments(attachments: Sequence[IncomingAttachment]) -> None:
             raise ValueError("Each image must be 10 MB or smaller.")
         total_size += max(0, attachment.file_size)
     if total_size > MAX_TOTAL_IMAGE_BYTES:
-        raise ValueError("Ask images must be 20 MB or smaller in total.")
+        raise ValueError("Images must be 20 MB or smaller in total.")
 
 
 def stage_attachments(
@@ -54,11 +54,12 @@ def stage_attachments(
             raise ValueError("Each image must be 10 MB or smaller.")
         total_size += len(content)
         if total_size > MAX_TOTAL_IMAGE_BYTES:
-            raise ValueError("Ask images must be 20 MB or smaller in total.")
+            raise ValueError("Images must be 20 MB or smaller in total.")
         _validate_image(content, attachment.mime_type)
         extension = MIME_EXTENSIONS[attachment.mime_type]
         path = destination / f"{position}.{extension}"
         path.write_bytes(content)
+        path.chmod(0o600)
         paths.append(str(path.resolve()))
     return tuple(paths)
 
@@ -66,12 +67,13 @@ def stage_attachments(
 def _create_staging_directory(destination: Path) -> None:
     parent = destination.parent
     if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
-        raise ValueError("Ask image staging path is unavailable.")
+        raise ValueError("Image staging path is unavailable.")
     parent.mkdir(parents=True, exist_ok=True)
     try:
         destination.mkdir()
     except FileExistsError as exc:
-        raise ValueError("Ask image staging path is unavailable.") from exc
+        raise ValueError("Image staging path is unavailable.") from exc
+    destination.chmod(0o700)
 
 
 def _validate_image(content: bytes, mime_type: str) -> None:

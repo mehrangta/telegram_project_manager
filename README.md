@@ -91,7 +91,9 @@ Commands marked admin require a registered Telegram admin.
 /code discard <c-job_id>                      Close PR and delete branch
 /code status [c-job_id]                       Show one or recent jobs
 /ask <question> [images]                      Ask Codex about the active repository
-/do <job>                                     Run unrestricted Codex job (private admin chat only)
+/do <job> [images]                            Run Codex in the active repository
+/do --host <job> [images]                     Run unrestricted host job (private admin only)
+/do status [d-job_id]                         Show the current or recent do job
 /merge <c-job_id>                             Confirm merge without deployment
 /deploy <c-job_id>                            Confirm merge and deployment
 
@@ -175,10 +177,21 @@ same full filesystem and network permissions as every other Codex job.
 
 ### Codex access
 
-`/do <job>` sends the job text directly to the configured Codex coding model
-with unrestricted filesystem access. It is accepted only from registered admins
-in private chats, starts immediately without confirmation, and uses the bot
-service process working directory without requiring an active repository.
+`/do <job>` sends the job to the configured Codex coding model in a persistent
+writable workspace for the current chat or topic's active repository. Registered
+admins may use it in private chats, groups, and topics. Existing workspace changes
+are preserved between jobs. `/do --host <job>` retains private-admin-only host
+execution from the bot deployment directory.
+
+Do jobs run in an independent systemd worker, so restarting the Telegram polling
+service does not interrupt them. At most two lanes run globally and each repository
+or host lane is serialized. `/do status [d-job_id]` shows durable status and recent
+activity; live progress cards report Codex phases, commands, and file changes.
+
+Photos, image documents, and albums can be supplied in the command caption. JPEG,
+PNG, and GIF are supported, up to 10 images, 10 MB each, and 20 MB total. Request
+text and images are stored in root-only temporary payloads and deleted when the job
+finishes. Jobs interrupted by a worker restart are not automatically rerun.
 
 `/ask`, `/code`, and `/do` all run with Codex full-access mode. Network
 access is unrestricted. Codex can read or modify any path available to the
@@ -187,9 +200,9 @@ using full access only with trusted repositories and monitoring it as an
 elevated environment; see
 [Agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security#run-codex-in-dev-containers).
 
-Full-access jobs run one at a time and reply to the original command with the
-plain Codex result. They are kept only in memory and are not resumed after a
-service restart because the requested work may already have produced partial or
+Full-access jobs reply with a redacted plain Codex result. Job metadata and safe
+progress summaries are persisted, but completed request payloads are deleted and
+interrupted jobs are not rerun because requested work may already have produced partial or
 non-idempotent side effects.
 
 ### Merge and deployment

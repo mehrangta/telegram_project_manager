@@ -111,6 +111,19 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertIsNone(outgoing.reply_markup())
         self.assertEqual(outgoing.reply_markup(include_empty=True), {"inline_keyboard": []})
 
+    def test_do_job_id_gets_copy_and_status_controls(self):
+        outgoing = outgoing_message(
+            "⚙️ Codex do job\n"
+            "Do Job ID: d-12345678\n"
+            "Status command: /do status d-12345678"
+        )
+        copied = [button.copy_text for row in outgoing.keyboard for button in row if button.copy_text]
+        callbacks = [
+            button.callback_data for row in outgoing.keyboard for button in row if button.callback_data
+        ]
+        self.assertEqual(copied, ["d-12345678"])
+        self.assertEqual(callbacks, ["command:/do status d-12345678"])
+
     def test_copy_button_rejects_telegram_limit_violation(self):
         with self.assertRaises(ValueError):
             InlineButton("Copy", copy_text="x" * 257)
