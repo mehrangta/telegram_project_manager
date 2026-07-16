@@ -217,6 +217,14 @@ class GitWorkspaceService:
     def push_rebased_branch(self, path: Path) -> None:
         branch = self.commands.run(["git", "branch", "--show-current"], cwd=path).strip()
         validate_branch(branch)
+        self.commands.run(
+            [
+                "git", "fetch", "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            ],
+            cwd=path,
+            timeout=600,
+        )
         expected_sha = self.commands.run(
             ["git", "rev-parse", f"refs/remotes/origin/{branch}"], cwd=path
         ).strip()

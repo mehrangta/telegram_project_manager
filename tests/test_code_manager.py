@@ -1609,6 +1609,17 @@ class CodeSafetyTests(unittest.TestCase):
                 ),
                 (
                     [
+                        "git", "fetch", "origin",
+                        (
+                            "+refs/heads/codex/issue-3-c-abcdef12:"
+                            "refs/remotes/origin/codex/issue-3-c-abcdef12"
+                        ),
+                    ],
+                    path,
+                    600,
+                ),
+                (
+                    [
                         "git", "rev-parse",
                         "refs/remotes/origin/codex/issue-3-c-abcdef12",
                     ],
