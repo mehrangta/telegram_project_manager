@@ -43,7 +43,6 @@ class ResponsePresentationTests(unittest.TestCase):
             copied,
             [
                 "i-12345678",
-                "/edit i-12345678",
             ],
         )
         callbacks = [
@@ -55,10 +54,33 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertEqual(
             callbacks,
             [
+                "edit_issue:i-12345678",
                 "command:/confirm i-12345678",
                 "command:/cancel i-12345678",
             ],
         )
+
+    def test_non_issue_placeholder_command_remains_copy_action(self):
+        outgoing = outgoing_message(
+            "Codex code job\n"
+            "Code Job ID: c-abcdef12\n"
+            "Edit: /code edit c-abcdef12 <feedback>"
+        )
+        copied = [
+            button.copy_text
+            for row in outgoing.keyboard
+            for button in row
+            if button.copy_text
+        ]
+        callbacks = [
+            button.callback_data
+            for row in outgoing.keyboard
+            for button in row
+            if button.callback_data
+        ]
+
+        self.assertEqual(copied, ["c-abcdef12", "/code edit c-abcdef12"])
+        self.assertEqual(callbacks, [])
 
     def test_merge_and_deploy_require_confirmation_while_rebase_runs_directly(self):
         outgoing = outgoing_message(

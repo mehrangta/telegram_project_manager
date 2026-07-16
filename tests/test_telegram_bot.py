@@ -13,6 +13,10 @@ from telegram_project_manager.platform.telegram_bot import (
 )
 
 
+class PollingStopped(Exception):
+    pass
+
+
 class TelegramBotTests(unittest.TestCase):
     def test_send_and_edit_include_formatting_keyboard_and_preview_options(self):
         class RecordingApi(TelegramBotApi):
@@ -149,6 +153,29 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(bot_reply.reply_to_draft_id, "i-abcdef12")
         self.assertIsNone(user_reply.reply_to_draft_id)
 
+    def test_extracts_draft_id_from_edit_prompt_reply(self):
+        incoming = incoming_message_from_update(
+            {
+                "message": {
+                    "message_id": 23,
+                    "from": {"id": 30},
+                    "chat": {"id": 40, "type": "supergroup"},
+                    "text": "make the title shorter",
+                    "reply_to_message": {
+                        "from": {"id": 99, "is_bot": True},
+                        "text": (
+                            "✏️ Edit issue draft\n"
+                            "Draft ID: i-abcdef12\n"
+                            "Reply to this message with feedback or images."
+                        ),
+                    },
+                }
+            }
+        )
+
+        assert incoming is not None
+        self.assertEqual(incoming.reply_to_draft_id, "i-abcdef12")
+
     def test_extracts_issue_and_code_job_from_bot_reply(self):
         issue = incoming_message_from_update({"message": {"message_id": 30, "from": {"id": 1}, "chat": {"id": 2, "type": "supergroup"}, "text": "/code", "reply_to_message": {"from": {"id": 99, "is_bot": True}, "text": "Issue created.\nRepo: owner/repo\nIssue: #123\nhttps://github.com/owner/repo/issues/123"}}})
         job = incoming_message_from_update({"message": {"message_id": 31, "from": {"id": 1}, "chat": {"id": 2, "type": "supergroup"}, "text": "approve", "reply_to_message": {"from": {"id": 99, "is_bot": True}, "text": "Codex code job\nCode Job ID: c-abcdef12\nStatus: awaiting approval"}}})
@@ -243,11 +270,23 @@ class TelegramBotTests(unittest.TestCase):
 
 
 class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        async def run_inline(function, /, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        patcher = mock.patch(
+            "telegram_project_manager.platform.telegram_bot.asyncio.to_thread",
+            new=run_inline,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     class Bot:
         def __init__(self, updates):
             self.updates = updates
             self.answers = []
             self.sent = []
+            self.deleted = []
             self.markup_edits = []
             self.polls = 0
 
@@ -261,7 +300,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             self.polls += 1
             if self.polls == 1:
                 return self.updates
-            raise asyncio.CancelledError()
+            raise PollingStopped()
 
         def answer_callback_query(self, query_id, text=""):
             self.answers.append((query_id, text))
@@ -272,6 +311,9 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
 
         def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
             self.markup_edits.append((chat_id, message_id, reply_markup))
+
+        def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
 
     class Router:
         def __init__(self, admin_ids=None):
@@ -290,17 +332,20 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             return "Action queued"
 
     @staticmethod
-    def callback(update_id, query_id, data, message_id=20, user_id=30):
+    def callback(update_id, query_id, data, message_id=20, user_id=30, thread_id=None):
+        message = {
+            "message_id": message_id,
+            "chat": {"id": 40, "type": "supergroup"},
+        }
+        if thread_id is not None:
+            message["message_thread_id"] = thread_id
         return {
             "update_id": update_id,
             "callback_query": {
                 "id": query_id,
                 "from": {"id": user_id, "username": "admin"},
                 "data": data,
-                "message": {
-                    "message_id": message_id,
-                    "chat": {"id": 40, "type": "supergroup"},
-                },
+                "message": message,
             },
         }
 
@@ -322,12 +367,92 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         ])
         router = self.Router()
 
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(PollingStopped):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/code rebase c-abcdef12"])
         self.assertEqual(bot.answers, [("query-1", "Action requested")])
         self.assertEqual(bot.sent[0][1], "ℹ️ <b>Action queued</b>")
+        self.assertEqual(bot.deleted, [])
+
+    async def test_edit_button_sends_reply_prompt_then_deletes_preview(self):
+        bot = self.Bot([
+            self.callback(
+                1,
+                "query-1",
+                "edit_issue:i-abcdef12",
+                message_id=22,
+                thread_id=7,
+            )
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, [])
+        self.assertEqual(bot.answers, [("query-1", "Send feedback")])
+        self.assertEqual(bot.deleted, [(40, 22)])
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][2], 7)
+        self.assertIn("Edit issue draft", bot.sent[0][1])
+        self.assertIn("i-abcdef12", bot.sent[0][1])
+        self.assertIsNone(bot.sent[0][3]["reply_markup"])
+
+    async def test_invalid_edit_button_is_expired_without_side_effects(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "edit_issue:not-a-draft", message_id=22)
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, [])
+        self.assertEqual(bot.answers, [("query-1", "Button expired")])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.deleted, [])
+
+    async def test_issue_confirm_and_cancel_delete_preview_then_dispatch(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "command:/confirm i-abcdef12", message_id=22),
+            self.callback(2, "query-2", "command:/cancel i-12345678", message_id=23),
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(
+            router.commands,
+            ["/confirm i-abcdef12", "/cancel i-12345678"],
+        )
+        self.assertEqual(bot.deleted, [(40, 22), (40, 23)])
+        self.assertEqual(
+            bot.answers,
+            [("query-1", "Action requested"), ("query-2", "Action requested")],
+        )
+
+    async def test_delete_failure_does_not_block_edit_or_confirm(self):
+        class DeleteFailingBot(self.Bot):
+            def delete_message(self, chat_id, message_id):
+                raise TelegramBotApiError("message cannot be deleted")
+
+        bot = DeleteFailingBot([
+            self.callback(1, "query-1", "edit_issue:i-abcdef12", message_id=22),
+            self.callback(2, "query-2", "command:/confirm i-abcdef12", message_id=23),
+        ])
+        router = self.Router()
+
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaises(PollingStopped):
+                await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/confirm i-abcdef12"])
+        self.assertEqual(len(bot.sent), 2)
+        self.assertTrue(
+            any("callback source deletion failed" in line for line in logs.output)
+        )
 
     async def test_deploy_button_prompts_then_confirm_dispatches(self):
         bot = self.Bot([
@@ -336,7 +461,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         ])
         router = self.Router()
 
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(PollingStopped):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/deploy c-abcdef12"])
@@ -349,6 +474,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             bot.markup_edits,
             [(40, 21, {"inline_keyboard": []})],
         )
+        self.assertEqual(bot.deleted, [])
 
     async def test_merge_button_prompts_then_confirm_dispatches(self):
         bot = self.Bot([
@@ -357,7 +483,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         ])
         router = self.Router()
 
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(PollingStopped):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/merge c-abcdef12"])
@@ -368,6 +494,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             "command:/merge c-abcdef12",
         )
         self.assertEqual(bot.markup_edits, [(40, 21, {"inline_keyboard": []})])
+        self.assertEqual(bot.deleted, [])
 
     async def test_non_admin_callback_is_silently_ignored(self):
         bot = self.Bot([
@@ -376,12 +503,13 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         ])
         router = self.Router()
 
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(PollingStopped):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, [])
         self.assertEqual(bot.answers, [])
         self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.deleted, [])
         self.assertEqual(bot.markup_edits, [])
 
     async def test_expired_callback_ack_does_not_block_command_or_next_update(self):
@@ -396,7 +524,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         router = self.Router()
 
         with self.assertLogs(level="WARNING") as logs:
-            with self.assertRaises(asyncio.CancelledError):
+            with self.assertRaises(PollingStopped):
                 await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/status", "/repo show"])
@@ -409,7 +537,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
                 self.polls += 1
                 if self.polls == 1:
                     raise TelegramBotApiError("read timed out")
-                raise asyncio.CancelledError()
+                raise PollingStopped()
 
         bot = FailingPollingBot([])
         router = self.Router()
@@ -418,7 +546,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             "telegram_project_manager.platform.telegram_bot.asyncio.sleep",
             new=mock.AsyncMock(),
         ) as sleep:
-            with self.assertRaises(asyncio.CancelledError):
+            with self.assertRaises(PollingStopped):
                 await run_polling(bot, router)
 
         sleep.assert_awaited_once_with(1)
@@ -432,7 +560,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             side_effect=[10.0, 12.1],
         ):
             with self.assertLogs(level="WARNING") as logs:
-                with self.assertRaises(asyncio.CancelledError):
+                with self.assertRaises(PollingStopped):
                     await run_polling(bot, router)
 
         warning = "\n".join(logs.output)

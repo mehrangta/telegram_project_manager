@@ -12,6 +12,7 @@ CALLBACK_DATA_LIMIT = 64
 URL_RE = re.compile(r"https://[^\s<>]+")
 PRIMARY_ID_RE = re.compile(r"(?m)^(Code Job ID|Draft ID|Plan ID):\s*([^\s]+)\s*$")
 COMMAND_RE = re.compile(r"(/[a-z][a-z0-9_]*(?:\s+[^\n]+)?)", re.IGNORECASE)
+ISSUE_EDIT_COMMAND_RE = re.compile(r"^/edit (i-[0-9a-f]{8})$")
 FIELD_RE = re.compile(r"^([^:\n]{1,40}):\s*(.*)$")
 
 
@@ -131,7 +132,11 @@ def keyboard_for_text(text: str) -> tuple[tuple[InlineButton, ...], ...]:
         seen.add(command)
         action = _command_action(command)
         if "<" in raw_command:
-            buttons.append(copy_button(f"📋 {action}", command))
+            issue_edit = ISSUE_EDIT_COMMAND_RE.fullmatch(command)
+            if issue_edit and issue_edit.group(1) == identifier:
+                buttons.append(callback_button(_command_label(action), f"edit_issue:{identifier}"))
+            else:
+                buttons.append(copy_button(f"📋 {action}", command))
         elif command.lower().startswith("/deploy "):
             buttons.append(callback_button(f"🚀 {action}", f"confirm_deploy:{identifier}"))
         elif command.lower().startswith("/merge "):
@@ -183,6 +188,7 @@ def _command_label(action: str) -> str:
         "Cancel": "✖️",
         "Confirm": "✅",
         "Discard": "🗑",
+        "Edit": "✏️",
         "Merge": "🔀",
         "Rebase": "🔄",
         "Retry": "🔁",
