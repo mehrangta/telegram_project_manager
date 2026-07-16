@@ -1513,6 +1513,34 @@ class CodeSafetyTests(unittest.TestCase):
                 Path("repo"), ["src/conflict.py"]
             )
 
+    def test_rebased_branch_push_sets_origin_upstream(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, args, *, cwd=None, timeout=300):
+                self.calls.append((args, cwd, timeout))
+                return ""
+
+        runner = Runner()
+        path = Path("repo")
+
+        GitWorkspaceService(runner).push_rebased_branch(path)
+
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    [
+                        "git", "push", "--force-with-lease", "--set-upstream",
+                        "origin", "HEAD",
+                    ],
+                    path,
+                    900,
+                )
+            ],
+        )
+
 
 class CodeGitHubCheckTests(unittest.TestCase):
     def test_validates_remote_action_references_against_github(self):

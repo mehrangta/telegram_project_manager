@@ -211,7 +211,13 @@ class GitWorkspaceService:
         return self.commands.run(["git", "rev-parse", f"origin/{base_branch}"], cwd=path).strip()
 
     def push_rebased_branch(self, path: Path) -> None:
-        self.commands.run(["git", "push", "--force-with-lease"], cwd=path, timeout=900)
+        self.commands.run(
+            [
+                "git", "push", "--force-with-lease", "--set-upstream", "origin", "HEAD",
+            ],
+            cwd=path,
+            timeout=900,
+        )
 
     def start_conflict_aware_rebase(
         self, path: Path, base_branch: str
