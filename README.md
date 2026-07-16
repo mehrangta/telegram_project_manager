@@ -90,6 +90,7 @@ Commands marked admin require a registered Telegram admin.
 /code discard <c-job_id>                      Close PR and delete branch
 /code status [c-job_id]                       Show one or recent jobs
 /ask <question> [images]                      Ask Codex about the active repository
+/queue                                        Show current Codex work for this chat/topic
 /merge <c-job_id>                             Confirm merge without deployment
 /deploy <c-job_id>                            Confirm merge and deployment
 
@@ -162,6 +163,14 @@ replies to the original command with a concise answer and supporting repository
 paths. Ask sessions are not conversational and are not resumed after a service
 restart. Image support uses the configured Codex plan model and requires no
 additional settings or database migration.
+
+`/queue` combines the `/code` implementation phases and `/ask` repository
+questions currently running or waiting for Codex in the current chat or exact
+forum topic. It does not include jobs paused for clarification or approval,
+passive CI waits, merge or deployment work, failed or interrupted jobs, or
+completed work. Counts are scoped to the current chat or topic and therefore do
+not represent global service capacity. Repository questions are kept in memory
+and disappear from the queue when the service restarts.
 
 ### Merge and deployment
 

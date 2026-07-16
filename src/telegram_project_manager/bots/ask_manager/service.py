@@ -4,7 +4,9 @@ import asyncio
 import logging
 import re
 import shutil
+import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,20 @@ from telegram_project_manager.platform.telegram_bot import TelegramBotApi, Teleg
 ASK_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_OUTSTANDING_ASKS = 10
 MAX_CONCURRENT_ASKS = 2
+ASK_QUEUE_QUESTION_MAX_LENGTH = 120
+
+
+@dataclass
+class AskQueueEntry:
+    ask_id: str
+    chat_id: int
+    thread_id: int | None
+    repo: str
+    branch: str
+    question: str
+    image_count: int
+    submitted_at: int
+    status: str = "queued"
 
 
 class AskService:
@@ -51,6 +67,7 @@ class AskService:
         self.max_outstanding = max_outstanding
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._queue_entries: dict[str, AskQueueEntry] = {}
         self._root = (db.path.parent / "ask-jobs").resolve()
 
     async def submit(
@@ -87,21 +104,35 @@ class AskService:
             reply_to_message_id=message_id,
             text="\n".join(acknowledgement),
         )
-        task = asyncio.create_task(
-            self._run(
-                ask_id=ask_id,
-                chat_id=chat_id,
-                user_id=user_id,
-                thread_id=thread_id,
-                message_id=message_id,
-                repo=repo,
-                branch=branch,
-                source_path=resolved_source,
-                question=question,
-                attachments=attachments,
-            ),
-            name=f"repository-ask-{ask_id}",
+        self._queue_entries[ask_id] = AskQueueEntry(
+            ask_id=ask_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            repo=repo,
+            branch=branch,
+            question=_question_preview(question),
+            image_count=len(attachments),
+            submitted_at=time.monotonic_ns(),
         )
+        try:
+            task = asyncio.create_task(
+                self._run(
+                    ask_id=ask_id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    repo=repo,
+                    branch=branch,
+                    source_path=resolved_source,
+                    question=question,
+                    attachments=attachments,
+                ),
+                name=f"repository-ask-{ask_id}",
+            )
+        except Exception:
+            self._queue_entries.pop(ask_id, None)
+            raise
         self._tasks[ask_id] = task
         task.add_done_callback(lambda finished, key=ask_id: self._task_finished(key, finished))
         self.db.audit(
@@ -118,6 +149,27 @@ class AskService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._queue_entries.clear()
+
+    def queue_snapshot(
+        self, *, chat_id: int, thread_id: int | None
+    ) -> dict[str, tuple[dict[str, Any], ...]]:
+        entries = sorted(
+            (
+                entry
+                for entry in self._queue_entries.values()
+                if entry.chat_id == chat_id and entry.thread_id == thread_id
+            ),
+            key=lambda entry: (entry.submitted_at, entry.ask_id),
+        )
+        return {
+            "running": tuple(
+                _ask_queue_item(entry) for entry in entries if entry.status == "running"
+            ),
+            "queued": tuple(
+                _ask_queue_item(entry) for entry in entries if entry.status == "queued"
+            ),
+        }
 
     async def _run(
         self,
@@ -136,53 +188,59 @@ class AskService:
         del user_id
         workspace = self._root / ask_id / "repo"
         try:
-            async with self._semaphore:
-                commit = await asyncio.to_thread(
-                    self.workspaces.prepare_read_only,
-                    source_path=source_path,
-                    repo=repo,
-                    base_branch=branch,
-                    path=workspace,
-                )
-                image_paths = await asyncio.to_thread(
-                    stage_attachments,
-                    bot=self.bot,
-                    attachments=attachments,
-                    destination=workspace / ".codex" / "ask-images",
-                )
-                _, raw = await self.codex.run_turn(
-                    job_id=ask_id,
-                    cwd=str(workspace),
-                    prompt=ask_prompt(question),
-                    image_paths=image_paths,
-                    output_schema=ASK_RESPONSE_SCHEMA,
-                    sandbox=Sandbox.read_only,
-                    effort=ReasoningEffort.high,
-                    model_role="plan",
-                    developer_instructions=ASK_DEVELOPER_INSTRUCTIONS,
-                    thread_id=None,
-                    timeout_seconds=ASK_TIMEOUT_SECONDS,
-                    on_progress=_ignore_progress,
-                    on_thread=_ignore_thread,
-                )
-                response = AskResponse.from_json(raw)
-                sources = _existing_sources(workspace, response.sources)
-                await self._send(
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    reply_to_message_id=message_id,
-                    text=_render_answer(repo, branch, commit, response.answer, sources),
-                )
-                self.db.audit(
-                    "ask.answer",
-                    "ok",
-                    {
-                        "repo": repo,
-                        "branch": branch,
-                        "sources": len(sources),
-                        "images": len(attachments),
-                    },
-                )
+            try:
+                async with self._semaphore:
+                    entry = self._queue_entries.get(ask_id)
+                    if entry is not None:
+                        entry.status = "running"
+                    commit = await asyncio.to_thread(
+                        self.workspaces.prepare_read_only,
+                        source_path=source_path,
+                        repo=repo,
+                        base_branch=branch,
+                        path=workspace,
+                    )
+                    image_paths = await asyncio.to_thread(
+                        stage_attachments,
+                        bot=self.bot,
+                        attachments=attachments,
+                        destination=workspace / ".codex" / "ask-images",
+                    )
+                    _, raw = await self.codex.run_turn(
+                        job_id=ask_id,
+                        cwd=str(workspace),
+                        prompt=ask_prompt(question),
+                        image_paths=image_paths,
+                        output_schema=ASK_RESPONSE_SCHEMA,
+                        sandbox=Sandbox.read_only,
+                        effort=ReasoningEffort.high,
+                        model_role="plan",
+                        developer_instructions=ASK_DEVELOPER_INSTRUCTIONS,
+                        thread_id=None,
+                        timeout_seconds=ASK_TIMEOUT_SECONDS,
+                        on_progress=_ignore_progress,
+                        on_thread=_ignore_thread,
+                    )
+                    response = AskResponse.from_json(raw)
+                    sources = _existing_sources(workspace, response.sources)
+                    await self._send(
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        reply_to_message_id=message_id,
+                        text=_render_answer(repo, branch, commit, response.answer, sources),
+                    )
+                    self.db.audit(
+                        "ask.answer",
+                        "ok",
+                        {
+                            "repo": repo,
+                            "branch": branch,
+                            "sources": len(sources),
+                            "images": len(attachments),
+                        },
+                    )
+            finally:
+                self._queue_entries.pop(ask_id, None)
         except asyncio.CancelledError:
             raise
         except (CodexSdkError, WorkspaceError, ValueError) as exc:
@@ -253,6 +311,7 @@ class AskService:
     def _task_finished(self, ask_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(ask_id) is task:
             self._tasks.pop(ask_id, None)
+        self._queue_entries.pop(ask_id, None)
 
 
 async def _ignore_progress(event: dict[str, Any]) -> None:
@@ -261,6 +320,25 @@ async def _ignore_progress(event: dict[str, Any]) -> None:
 
 async def _ignore_thread(thread_id: str) -> None:
     del thread_id
+
+
+def _question_preview(question: str) -> str:
+    normalized = " ".join(question.split())
+    if len(normalized) <= ASK_QUEUE_QUESTION_MAX_LENGTH:
+        return normalized
+    return normalized[: ASK_QUEUE_QUESTION_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def _ask_queue_item(entry: AskQueueEntry) -> dict[str, Any]:
+    return {
+        "id": entry.ask_id,
+        "repo": entry.repo,
+        "branch": entry.branch,
+        "question": entry.question,
+        "image_count": entry.image_count,
+        "submitted_at": entry.submitted_at,
+        "status": entry.status,
+    }
 
 
 def _existing_sources(workspace: Path, sources: tuple[str, ...]) -> tuple[str, ...]:

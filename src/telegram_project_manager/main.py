@@ -14,6 +14,7 @@ from telegram_project_manager.bots.code_manager.commands import CodeManager
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, GitWorkspaceService
+from telegram_project_manager.bots.codex_queue import CodexQueueManager
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
@@ -161,6 +162,11 @@ async def run_bot(db: Database) -> None:
         github=code_github,
         reporter=code_reporter,
     )
+    queue_manager = CodexQueueManager(
+        db=db,
+        code_service=code_service,
+        ask_service=ask_service,
+    )
     deployment_service = MergeDeploymentService(
         db=db,
         github=DeploymentGitHubService(gh),
@@ -169,7 +175,14 @@ async def run_bot(db: Database) -> None:
     pull_request_manager = PullRequestManager(db=db, service=deployment_service)
     router = TelegramRouter(
         db=db,
-        handlers=[ask_manager, issue_manager, code_manager, pull_request_manager, commit_manager],
+        handlers=[
+            queue_manager,
+            ask_manager,
+            issue_manager,
+            code_manager,
+            pull_request_manager,
+            commit_manager,
+        ],
     )
     await code_service.recover()
     await deployment_service.recover()

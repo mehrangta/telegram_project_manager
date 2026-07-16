@@ -400,6 +400,10 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.calls, [])
         self.assertEqual(len(self.workspaces.cleaned), 1)
         self.assertFalse((self.service._root / ask_id).exists())
+        self.assertEqual(
+            self.service.queue_snapshot(chat_id=10, thread_id=30),
+            {"running": (), "queued": ()},
+        )
 
     async def test_full_queue_rejects_before_acknowledging(self):
         service = AskService(
@@ -416,6 +420,102 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
                 question="Question",
             )
         self.assertEqual(self.bot.sent, [])
+
+    async def test_queue_snapshot_tracks_waiting_and_running_questions_by_topic(self):
+        release = asyncio.Event()
+
+        class BlockingCodex(FakeCodex):
+            async def run_turn(self, **kwargs):
+                self.calls.append(kwargs)
+                await release.wait()
+                return "thread-ask", self.result
+
+        self.codex = BlockingCodex()
+        self.service.codex = self.codex
+        first_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="First question",
+        )
+        for _ in range(200):
+            snapshot = self.service.queue_snapshot(chat_id=10, thread_id=30)
+            if snapshot["running"]:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("first repository question did not start")
+
+        long_question = "  Explain   this <unsafe> behavior " + ("x" * 180)
+        self.bot.files["image"] = bytes.fromhex("89504e470d0a1a0a") + b"png"
+        second_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=41,
+            repo="owner/repo",
+            branch="develop",
+            source_path="/cache/repo.git",
+            question=long_question,
+            attachments=(IncomingAttachment("image", "1", "image/png", 10),),
+        )
+
+        snapshot = self.service.queue_snapshot(chat_id=10, thread_id=30)
+        self.assertEqual([item["id"] for item in snapshot["running"]], [first_id])
+        self.assertEqual([item["id"] for item in snapshot["queued"]], [second_id])
+        self.assertEqual(snapshot["queued"][0]["image_count"], 1)
+        self.assertNotIn("  ", snapshot["queued"][0]["question"])
+        self.assertTrue(snapshot["queued"][0]["question"].endswith("…"))
+        self.assertLessEqual(len(snapshot["queued"][0]["question"]), 120)
+        self.assertEqual(
+            self.service.queue_snapshot(chat_id=10, thread_id=31),
+            {"running": (), "queued": ()},
+        )
+
+        release.set()
+        await wait_for_completion(self.service, first_id)
+        await wait_for_completion(self.service, second_id)
+        self.assertEqual(
+            self.service.queue_snapshot(chat_id=10, thread_id=30),
+            {"running": (), "queued": ()},
+        )
+
+    async def test_shutdown_clears_running_queue_metadata(self):
+        release = asyncio.Event()
+
+        class BlockingCodex(FakeCodex):
+            async def run_turn(self, **kwargs):
+                await release.wait()
+                return "thread-ask", self.result
+
+        self.service.codex = BlockingCodex()
+        await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="Question interrupted by shutdown",
+        )
+        for _ in range(200):
+            if self.service.queue_snapshot(chat_id=10, thread_id=30)["running"]:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("repository question did not start")
+
+        await self.service.shutdown()
+
+        self.assertEqual(
+            self.service.queue_snapshot(chat_id=10, thread_id=30),
+            {"running": (), "queued": ()},
+        )
 
 
 class GitReadOnlyWorkspaceTests(unittest.TestCase):

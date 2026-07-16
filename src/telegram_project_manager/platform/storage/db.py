@@ -3,10 +3,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Iterator
 from typing import Any
+
+
+CODE_JOB_QUEUED_STATUSES = (
+    "queued_plan",
+    "queued_plan_edit",
+    "queued_code",
+    "queued_checks",
+    "queued_rebase",
+)
 
 
 class Database:
@@ -1026,16 +1035,39 @@ class Database:
         return [job for row in rows if (job := self._decode_code_job(row)) is not None]
 
     def count_queued_code_jobs(self) -> int:
+        placeholders = ",".join("?" for _ in CODE_JOB_QUEUED_STATUSES)
         with self.session() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS count FROM code_jobs
-                WHERE status IN (
-                    'queued_plan', 'queued_plan_edit', 'queued_code', 'queued_checks', 'queued_rebase'
-                )
-                """
+                WHERE status IN ({placeholders})
+                """,
+                CODE_JOB_QUEUED_STATUSES,
             ).fetchone()
         return int(row["count"]) if row else 0
+
+    def list_code_jobs_by_status(
+        self,
+        *,
+        statuses: tuple[str, ...],
+        chat_id: int,
+        thread_id: int | None,
+    ) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM code_jobs
+                WHERE status IN ({placeholders})
+                  AND telegram_chat_id = ?
+                  AND telegram_thread_id IS ?
+                ORDER BY updated_at ASC, created_at ASC, id ASC
+                """,
+                (*statuses, chat_id, thread_id),
+            ).fetchall()
+        return [job for row in rows if (job := self._decode_code_job(row)) is not None]
 
     def update_code_job(
         self,
