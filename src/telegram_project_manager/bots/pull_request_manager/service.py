@@ -16,6 +16,7 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 MERGE_TIMEOUT_SECONDS = 30 * 60
+MERGEABILITY_DISCOVERY_SECONDS = 2 * 60
 WORKFLOW_DISCOVERY_SECONDS = 2 * 60
 DEPLOY_TIMEOUT_SECONDS = 30 * 60
 POLL_SECONDS = 10
@@ -44,6 +45,7 @@ class MergeDeploymentService:
         reporter: CodeProgressReporter,
         poll_seconds: float = POLL_SECONDS,
         merge_timeout_seconds: float = MERGE_TIMEOUT_SECONDS,
+        mergeability_timeout_seconds: float = MERGEABILITY_DISCOVERY_SECONDS,
         discovery_seconds: float = WORKFLOW_DISCOVERY_SECONDS,
         deploy_timeout_seconds: float = DEPLOY_TIMEOUT_SECONDS,
         conflict_rebaser: Callable[[str], Awaitable[None]] | None = None,
@@ -54,6 +56,7 @@ class MergeDeploymentService:
         self.reporter = reporter
         self.poll_seconds = poll_seconds
         self.merge_timeout_seconds = merge_timeout_seconds
+        self.mergeability_timeout_seconds = mergeability_timeout_seconds
         self.discovery_seconds = discovery_seconds
         self.deploy_timeout_seconds = deploy_timeout_seconds
         self.conflict_rebaser = conflict_rebaser
@@ -191,6 +194,13 @@ class MergeDeploymentService:
         require_main = _operation_mode(job) == DEPLOY_MODE
         self._validate_checked_identity(job, snapshot, require_main=require_main)
         if not snapshot.merged:
+            snapshot = await self._wait_for_mergeability(
+                job_id,
+                job,
+                pr_url,
+                snapshot,
+                require_main=require_main,
+            )
             if _has_explicit_conflict(snapshot):
                 await self._queue_conflict_recovery(job_id, job)
                 return
@@ -250,6 +260,35 @@ class MergeDeploymentService:
         await self.reporter.refresh(job_id, force=True)
         if mode == MERGE_MODE:
             await self._notify_merge(job_id)
+
+    async def _wait_for_mergeability(
+        self,
+        job_id: str,
+        job: dict[str, Any],
+        pr_url: str,
+        snapshot: PullRequestSnapshot,
+        *,
+        require_main: bool,
+    ) -> PullRequestSnapshot:
+        deadline = time.time() + self.mergeability_timeout_seconds
+        while (
+            not snapshot.merged
+            and snapshot.state == "OPEN"
+            and snapshot.mergeable in {"", "UNKNOWN"}
+        ):
+            if time.time() >= deadline:
+                raise DeploymentError(
+                    "GitHub did not determine pull request mergeability within 2 minutes."
+                )
+            self.db.update_code_job(
+                job_id,
+                {"latest_activity": "Waiting for GitHub to calculate mergeability"},
+            )
+            await self.reporter.refresh(job_id)
+            await asyncio.sleep(self.poll_seconds)
+            snapshot = await asyncio.to_thread(self.github.get_pr, pr_url)
+            self._validate_checked_identity(job, snapshot, require_main=require_main)
+        return snapshot
 
     async def _queue_conflict_recovery(
         self, job_id: str, job: dict[str, Any]

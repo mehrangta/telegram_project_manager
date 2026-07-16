@@ -153,6 +153,7 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
             reporter=self.reporter,
             poll_seconds=0,
             merge_timeout_seconds=1,
+            mergeability_timeout_seconds=1,
             discovery_seconds=1,
             deploy_timeout_seconds=1,
             conflict_rebaser=conflict_rebaser,
@@ -385,13 +386,27 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("command:/code retry c-abcdef12", callbacks)
         self.assertIn("confirm_merge:c-abcdef12", callbacks)
 
-    async def test_unknown_mergeability_does_not_trigger_conflict_recovery(self):
+    async def test_unknown_mergeability_waits_until_stable_without_rebase(self):
+        self.github.prs = [
+            pr(mergeable="UNKNOWN"),
+            pr(),
+            pr(state="MERGED", merge_sha="merge-sha"),
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(merged["deployment_merge_sha"], "merge-sha")
+        self.assertEqual(self.conflict_rebase_calls, [])
+
+    async def test_unknown_mergeability_times_out_without_rebase(self):
+        self.service.mergeability_timeout_seconds = 0
         self.github.prs = [pr(mergeable="UNKNOWN")]
 
         await self.service.start_merge("c-abcdef12")
         failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
 
-        self.assertIn("not mergeable: UNKNOWN", failed["deployment_error"])
+        self.assertIn("did not determine", failed["deployment_error"])
         self.assertEqual(self.conflict_rebase_calls, [])
 
     async def test_conflict_recovery_stops_after_two_attempts(self):
