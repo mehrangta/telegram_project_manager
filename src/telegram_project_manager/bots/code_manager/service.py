@@ -49,7 +49,7 @@ from telegram_project_manager.platform.storage.db import Database
 PLAN_PATH_TEMPLATE = ".codex/plans/{job_id}.md"
 MAX_QUEUED_JOBS = 10
 PLAN_TIMEOUT_SECONDS = 2 * 60 * 60
-CODE_TIMEOUT_SECONDS = 2 * 60 * 60
+CODE_TIMEOUT_SECONDS = 10 * 60 * 60
 CHECK_POLL_SECONDS = 10
 CHECK_GRACE_SECONDS = 60
 CHECK_TIMEOUT_SECONDS = 30 * 60

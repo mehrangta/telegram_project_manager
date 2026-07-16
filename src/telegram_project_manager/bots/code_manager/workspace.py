@@ -30,7 +30,6 @@ SENSITIVE_PATTERNS = (
     ".github/workflows/*",
 )
 WORKFLOW_PATTERN = ".github/workflows/*"
-MAX_CHANGED_FILES = 100
 MAX_CHANGED_BYTES = 5_000_000
 MAX_CI_DIAGNOSTIC_CHARS = 50_000
 MAX_ISSUE_IMAGES = 10
@@ -263,8 +262,6 @@ class GitWorkspaceService:
         conflicts = sorted(
             {item.strip().replace("\\", "/") for item in raw.splitlines() if item.strip()}
         )
-        if len(conflicts) > MAX_CHANGED_FILES:
-            raise WorkspaceError(f"rebase has too many conflicted files; maximum is {MAX_CHANGED_FILES}")
         for item in conflicts:
             if any(fnmatch.fnmatch(item, pattern) for pattern in SENSITIVE_PATTERNS):
                 raise WorkspaceError(f"sensitive conflict path blocked: {item}")
@@ -370,8 +367,6 @@ class GitWorkspaceService:
         code_paths = [item for item in unique if item != plan_path]
         if not code_paths:
             raise WorkspaceError("Codex produced no implementation changes")
-        if len(unique) > MAX_CHANGED_FILES:
-            raise WorkspaceError(f"Codex changed too many files; maximum is {MAX_CHANGED_FILES}")
         allowed_workflows = set(allowed_workflow_paths)
         for item in unique:
             is_workflow = fnmatch.fnmatch(item, WORKFLOW_PATTERN)

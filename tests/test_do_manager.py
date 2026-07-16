@@ -7,7 +7,7 @@ from openai_codex import Sandbox
 
 from telegram_project_manager.bots.do_manager.commands import DoManager
 from telegram_project_manager.bots.do_manager.progress import DoProgressReporter
-from telegram_project_manager.bots.do_manager.service import DoService
+from telegram_project_manager.bots.do_manager.service import DO_TIMEOUT_SECONDS, DoService
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -199,6 +199,8 @@ class DoServiceTests(unittest.IsolatedAsyncioTestCase):
         call = self.codex.calls[0]
         self.assertEqual(call["cwd"], str(self.host.resolve()))
         self.assertEqual(call["sandbox"], Sandbox.full_access)
+        self.assertEqual(call["timeout_seconds"], DO_TIMEOUT_SECONDS)
+        self.assertEqual(DO_TIMEOUT_SECONDS, 10 * 60 * 60)
         self.assertTrue(self.bot.edited)
         self.assertNotIn("sk-secret-token", self.bot.sent[-1][1])
         self.assertFalse(Path(job["payload_path"]).exists())

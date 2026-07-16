@@ -26,7 +26,7 @@ from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
 
 
-DO_TIMEOUT_SECONDS = 2 * 60 * 60
+DO_TIMEOUT_SECONDS = 10 * 60 * 60
 MAX_OUTSTANDING_DO_JOBS = 10
 MAX_CONCURRENT_DO_JOBS = 2
 

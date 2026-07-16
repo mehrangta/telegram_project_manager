@@ -147,7 +147,7 @@ Codex must discover validation commands from repository metadata rather than
 assume scripts or tools exist. Invalid validation triggers up to two recovery
 turns on the same thread. A job becomes ready only after a real command passes
 and all GitHub checks for the current head pass. CI failures receive up to two
-repair commits.
+repair commits. Implementation and repair turns may run for up to 10 hours.
 
 Two jobs may run concurrently and ten may queue. Restarts mark active turns
 interrupted for explicit retry or discard. Progress cards show phases, commands,
@@ -188,8 +188,9 @@ execution from the bot deployment directory.
 
 Do jobs run in an independent systemd worker, so restarting the Telegram polling
 service does not interrupt them. At most two lanes run globally and each repository
-or host lane is serialized. `/do status [d-job_id]` shows durable status and recent
-activity; live progress cards report Codex phases, commands, and file changes.
+or host lane is serialized. Each job may run for up to 10 hours.
+`/do status [d-job_id]` shows durable status and recent activity; live progress
+cards report Codex phases, commands, and file changes.
 
 Photos, image documents, and albums can be supplied in the command caption. JPEG,
 PNG, and GIF are supported, up to 10 images, 10 MB each, and 20 MB total. Request
@@ -242,7 +243,7 @@ service restart.
 - Full host filesystem and unrestricted network access for all Codex jobs
 - Prompt-level secret and remote-write restrictions are not sandbox-enforced
 - No changes to .env files, private keys, or .github/workflows
-- Maximum 100 changed files and 5 MB per Codex job
+- No changed-file count limit; code-job changes retain a 5 MB safety limit
 - Host-owned commits, pushes, pull requests, and deployment
 - API keys redacted from configuration and progress output
 

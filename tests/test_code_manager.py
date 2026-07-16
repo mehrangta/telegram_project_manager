@@ -31,7 +31,10 @@ from telegram_project_manager.bots.code_manager.schemas import (
     CodePlan,
     CodeResult,
 )
-from telegram_project_manager.bots.code_manager.service import CodeJobService
+from telegram_project_manager.bots.code_manager.service import (
+    CODE_TIMEOUT_SECONDS,
+    CodeJobService,
+)
 from telegram_project_manager.bots.code_manager.workspace import (
     CodeGitHubService,
     GitWorkspaceService,
@@ -428,6 +431,8 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.calls[1]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[1]["effort"], ReasoningEffort.medium)
         self.assertEqual(self.codex.calls[1]["model_role"], "code")
+        self.assertEqual(self.codex.calls[1]["timeout_seconds"], CODE_TIMEOUT_SECONDS)
+        self.assertEqual(CODE_TIMEOUT_SECONDS, 10 * 60 * 60)
         self.assertEqual(len(self.github.created), 1)
         self.assertEqual(len(self.github.updated), 1)
         self.assertEqual(self.github.ready, ["https://github.com/owner/repo/pull/42"])
@@ -1533,6 +1538,22 @@ class CodeSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkspaceError, "sensitive path blocked"):
                 GitWorkspaceService(Runner()).validate_code_changes(path=path, plan_path=".codex/plans/c-test.md")
 
+    def test_more_than_one_hundred_changed_files_are_allowed(self):
+        changed_files = [f"src/generated/file-{index}.py" for index in range(101)]
+
+        class Runner:
+            def run(self, args, *, cwd=None, timeout=300):
+                del cwd, timeout
+                if args[:3] == ["git", "status", "--porcelain"]:
+                    return "".join(f"?? {item}\n" for item in changed_files)
+                return ""
+
+        files = GitWorkspaceService(Runner()).validate_code_changes(
+            path=Path("repo"), plan_path=".codex/plans/c-test.md"
+        )
+
+        self.assertEqual(files, sorted(changed_files))
+
     def test_workflow_changes_require_exact_approved_plan_path(self):
         class Runner:
             def __init__(self):
@@ -1580,6 +1601,20 @@ class CodeSafetyTests(unittest.TestCase):
             GitWorkspaceService(Runner()).continue_conflict_aware_rebase(
                 Path("repo"), ["src/conflict.py"]
             )
+
+    def test_more_than_one_hundred_rebase_conflicts_are_allowed(self):
+        conflict_files = [f"src/conflict-{index}.py" for index in range(101)]
+
+        class Runner:
+            def run(self, args, *, cwd=None, timeout=300):
+                del cwd, timeout
+                if args[1:4] == ["diff", "--name-only", "--diff-filter=U"]:
+                    return "".join(f"{item}\n" for item in conflict_files)
+                return ""
+
+        files = GitWorkspaceService(Runner()).rebase_conflicts(Path("repo"))
+
+        self.assertEqual(files, sorted(conflict_files))
 
     def test_rebased_branch_push_sets_origin_upstream(self):
         class Runner:
