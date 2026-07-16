@@ -89,6 +89,7 @@ Commands:
 /repo check
 /commit <request>
 /issue <prompt> (text or photo/album caption)
+/do <job> (private admin chat only; full host access)
 /code #123 [--skip-plan]
 /code approve|edit|discard|retry|rebase|status <code_job_id>
 /deploy <code_job_id> (or reply /deploy to a code-job message)

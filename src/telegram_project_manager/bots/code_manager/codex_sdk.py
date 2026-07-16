@@ -99,6 +99,77 @@ class CodexSdkAdapter:
         on_progress: ProgressCallback,
         on_thread: ThreadCallback,
     ) -> tuple[str, dict[str, Any]]:
+        resolved_thread_id, final_text = await self._run_final_text(
+            job_id=job_id,
+            cwd=cwd,
+            prompt=prompt,
+            image_paths=image_paths,
+            output_schema=output_schema,
+            sandbox=sandbox,
+            effort=effort,
+            model_role=model_role,
+            developer_instructions=developer_instructions,
+            thread_id=thread_id,
+            timeout_seconds=timeout_seconds,
+            on_progress=on_progress,
+            on_thread=on_thread,
+        )
+        try:
+            parsed = json.loads(final_text)
+        except json.JSONDecodeError as exc:
+            raise CodexSdkError("Codex final response was not valid structured JSON") from exc
+        if not isinstance(parsed, dict):
+            raise CodexSdkError("Codex final response must be a JSON object")
+        return resolved_thread_id, parsed
+
+    async def run_text_turn(
+        self,
+        *,
+        job_id: str,
+        cwd: str,
+        prompt: str,
+        sandbox: Sandbox,
+        effort: ReasoningEffort,
+        model_role: CodexModelRole,
+        developer_instructions: str,
+        thread_id: str | None,
+        timeout_seconds: int,
+        on_progress: ProgressCallback,
+        on_thread: ThreadCallback,
+    ) -> tuple[str, str]:
+        return await self._run_final_text(
+            job_id=job_id,
+            cwd=cwd,
+            prompt=prompt,
+            image_paths=(),
+            output_schema=None,
+            sandbox=sandbox,
+            effort=effort,
+            model_role=model_role,
+            developer_instructions=developer_instructions,
+            thread_id=thread_id,
+            timeout_seconds=timeout_seconds,
+            on_progress=on_progress,
+            on_thread=on_thread,
+        )
+
+    async def _run_final_text(
+        self,
+        *,
+        job_id: str,
+        cwd: str,
+        prompt: str,
+        image_paths: tuple[str, ...],
+        output_schema: dict[str, Any] | None,
+        sandbox: Sandbox,
+        effort: ReasoningEffort,
+        model_role: CodexModelRole,
+        developer_instructions: str,
+        thread_id: str | None,
+        timeout_seconds: int,
+        on_progress: ProgressCallback,
+        on_thread: ThreadCallback,
+    ) -> tuple[str, str]:
         model = self.model_provider(model_role).strip()
         if not model:
             raise CodexSdkError(
@@ -126,14 +197,15 @@ class CodexSdkAdapter:
                     sandbox=sandbox,
                 )
             await on_thread(str(thread.id))
-            turn = await thread.turn(
-                _turn_input(prompt, image_paths),
-                approval_mode=ApprovalMode.auto_review,
-                cwd=cwd,
-                effort=effort,
-                output_schema=output_schema,
-                sandbox=sandbox,
-            )
+            turn_options: dict[str, Any] = {
+                "approval_mode": ApprovalMode.auto_review,
+                "cwd": cwd,
+                "effort": effort,
+                "sandbox": sandbox,
+            }
+            if output_schema is not None:
+                turn_options["output_schema"] = output_schema
+            turn = await thread.turn(_turn_input(prompt, image_paths), **turn_options)
             self._active_turns[job_id] = turn
             final_text = ""
             final_status = ""
@@ -156,13 +228,7 @@ class CodexSdkAdapter:
                 raise CodexSdkError(f"Codex turn ended with status: {final_status or 'unknown'}")
             if not final_text.strip():
                 raise CodexSdkError("Codex turn completed without a final response")
-            try:
-                parsed = json.loads(final_text)
-            except json.JSONDecodeError as exc:
-                raise CodexSdkError("Codex final response was not valid structured JSON") from exc
-            if not isinstance(parsed, dict):
-                raise CodexSdkError("Codex final response must be a JSON object")
-            return str(thread.id), parsed
+            return str(thread.id), final_text
         except TimeoutError as exc:
             await self.interrupt(job_id)
             raise CodexSdkError(f"Codex turn exceeded {timeout_seconds // 60} minutes") from exc

@@ -90,6 +90,7 @@ Commands marked admin require a registered Telegram admin.
 /code discard <c-job_id>                      Close PR and delete branch
 /code status [c-job_id]                       Show one or recent jobs
 /ask <question> [images]                      Ask Codex about the active repository
+/do <job>                                     Run unrestricted Codex job (private admin chat only)
 /merge <c-job_id>                             Confirm merge without deployment
 /deploy <c-job_id>                            Confirm merge and deployment
 
@@ -163,6 +164,18 @@ paths. Ask sessions are not conversational and are not resumed after a service
 restart. Image support uses the configured Codex plan model and requires no
 additional settings or database migration.
 
+### Full-access jobs
+
+`/do <job>` sends the job text directly to the configured Codex coding model
+with unrestricted filesystem access. It is accepted only from registered admins
+in private chats, starts immediately without confirmation, and uses the bot
+service process working directory without requiring an active repository.
+
+Full-access jobs run one at a time and reply to the original command with the
+plain Codex result. They are kept only in memory and are not resumed after a
+service restart because the requested work may already have produced partial or
+non-idempotent side effects.
+
 ### Merge and deployment
 
 /merge requires confirmation and a ready code job. It revalidates the exact
@@ -194,6 +207,7 @@ service restart.
 - Repository allowlist and independent per-chat/per-topic repository context
 - Service-owned Git caches with strict origin verification
 - Isolated worktrees and Codex sandboxes
+- `/do` is an explicit private-admin-only exception that runs Codex with full host access
 - No changes to .env files, private keys, or .github/workflows
 - Maximum 100 changed files and 5 MB per Codex job
 - Host-owned commits, pushes, pull requests, and deployment

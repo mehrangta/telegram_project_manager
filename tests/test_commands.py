@@ -10,6 +10,14 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class CommandTests(unittest.TestCase):
+    def test_help_lists_private_full_access_command(self):
+        manager = object.__new__(CommitManager)
+
+        help_text = manager.help()
+
+        self.assertIn("/do <job>", help_text)
+        self.assertIn("private admin chat only", help_text)
+
     def test_database_upgrade_preserves_chat_settings_and_adds_topic_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "bot.db"
