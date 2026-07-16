@@ -4,6 +4,7 @@ import base64
 import hashlib
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from telegram_project_manager.bots.issue_manager.schemas import IssueDraft
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
@@ -14,6 +15,70 @@ ASSET_BRANCH = "issue-assets"
 MAX_IMAGE_BYTES = 10_000_000
 MAX_TOTAL_IMAGE_BYTES = 20_000_000
 MIME_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif"}
+ISSUE_TITLE_LIMIT = 120
+
+
+@dataclass(frozen=True)
+class IssueSummary:
+    number: int
+    title: str
+    url: str
+
+
+class GhIssueReader:
+    def __init__(self, gh: GhRunner) -> None:
+        self.gh = gh
+
+    def list_open_issues(self, repo: str, limit: int = 20) -> list[IssueSummary]:
+        if limit < 1:
+            raise ValueError("Issue list limit must be positive")
+        result = self.gh.run(
+            [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--search",
+                "sort:updated-desc",
+                "--json",
+                "number,title",
+            ]
+        )
+        try:
+            value = result.json()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GitHub issue list returned invalid JSON") from exc
+        if not isinstance(value, list):
+            raise ValueError("GitHub issue list returned an unexpected response")
+
+        issues: list[IssueSummary] = []
+        encoded_repo = quote(repo, safe="/")
+        for item in value[:limit]:
+            if not isinstance(item, dict):
+                raise ValueError("GitHub issue list returned an invalid issue")
+            number = item.get("number")
+            title = item.get("title")
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise ValueError("GitHub issue list returned an invalid issue number")
+            if not isinstance(title, str):
+                raise ValueError("GitHub issue list returned an invalid issue title")
+            normalized_title = " ".join(title.split())
+            if not normalized_title:
+                raise ValueError("GitHub issue list returned an empty issue title")
+            if len(normalized_title) > ISSUE_TITLE_LIMIT:
+                normalized_title = normalized_title[: ISSUE_TITLE_LIMIT - 3].rstrip() + "..."
+            issues.append(
+                IssueSummary(
+                    number=number,
+                    title=normalized_title,
+                    url=f"https://github.com/{encoded_repo}/issues/{number}",
+                )
+            )
+        return issues
 
 
 @dataclass(frozen=True)

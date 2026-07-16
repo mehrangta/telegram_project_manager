@@ -21,7 +21,7 @@ from telegram_project_manager.bots.pull_request_manager.commands import PullRequ
 from telegram_project_manager.bots.pull_request_manager.github import DeploymentGitHubService
 from telegram_project_manager.bots.pull_request_manager.service import MergeDeploymentService
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
-from telegram_project_manager.integrations.gh.issues import GhIssueExecutor
+from telegram_project_manager.integrations.gh.issues import GhIssueExecutor, GhIssueReader
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryService
 from telegram_project_manager.integrations.gh.runner import GhRunner
@@ -129,6 +129,7 @@ async def run_bot(db: Database) -> None:
         executor=commit_executor,
         repositories=repositories,
         repository_setup=repository_setup,
+        issue_reader=GhIssueReader(gh),
     )
     issue_planner = IssuePlanner(db, llm, RepositoryContextService(repositories))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))

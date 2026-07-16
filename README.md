@@ -69,6 +69,7 @@ Commands marked admin require a registered Telegram admin.
 /repo deploy set owner/repository deploy.yml  Set deployment workflow (admin)
 /repo deploy clear owner/repository           Clear deployment workflow (admin)
 /branch <branch>                              Set default branch (admin)
+/issues                                      List open issues for the active repository
 
 /commit <request>                             Generate commit plan (admin)
 /confirm <plan_id>                            Execute commit plan (admin)
@@ -115,6 +116,10 @@ The repository allowlist, deploy-enabled flag, and per-repository deployment
 workflow remain global.
 
 ### Issues
+
+/issues lists up to 20 open issues for the current chat or topic's active
+repository, ordered by most recently updated. Each issue number links to GitHub
+and can be passed directly to `/code`.
 
 /issue uses the current chat or topic's active repository and managed cache to build a
 repository-aware draft. Reply to the preview with text or images to revise it,
