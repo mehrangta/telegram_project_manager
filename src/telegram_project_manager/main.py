@@ -14,6 +14,8 @@ from telegram_project_manager.bots.code_manager.commands import CodeManager
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, GitWorkspaceService
+from telegram_project_manager.bots.do_manager.commands import DoManager
+from telegram_project_manager.bots.do_manager.service import DoService
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
@@ -156,6 +158,13 @@ async def run_bot(db: Database) -> None:
         bot=bot,
     )
     ask_manager = AskManager(db=db, service=ask_service)
+    do_service = DoService(
+        db=db,
+        codex=codex,
+        bot=bot,
+        working_directory=Path.cwd().resolve(),
+    )
+    do_manager = DoManager(db=db, service=do_service)
     code_manager = CodeManager(
         db=db,
         service=code_service,
@@ -171,7 +180,14 @@ async def run_bot(db: Database) -> None:
     pull_request_manager = PullRequestManager(db=db, service=deployment_service)
     router = TelegramRouter(
         db=db,
-        handlers=[ask_manager, issue_manager, code_manager, pull_request_manager, commit_manager],
+        handlers=[
+            do_manager,
+            ask_manager,
+            issue_manager,
+            code_manager,
+            pull_request_manager,
+            commit_manager,
+        ],
     )
     await code_service.recover()
     await deployment_service.recover()
@@ -179,6 +195,7 @@ async def run_bot(db: Database) -> None:
         await run_polling(bot, router)
     finally:
         await repository_setup.shutdown()
+        await do_service.shutdown()
         await ask_service.shutdown()
         await deployment_service.shutdown()
         await code_service.shutdown()

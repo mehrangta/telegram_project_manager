@@ -997,6 +997,71 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_text_turn_omits_output_schema(self):
+        class Notification:
+            def __init__(self, method, payload):
+                self.method = method
+                self.payload = payload
+
+        class Turn:
+            async def stream(self):
+                yield Notification(
+                    "item/completed",
+                    {"item": {"root": {"type": "agentMessage", "text": "plain result"}}},
+                )
+                yield Notification("turn/completed", {"turn": {"status": "completed"}})
+
+        class Thread:
+            id = "thread-text"
+
+            def __init__(self):
+                self.turn_calls = []
+
+            async def turn(self, *args, **kwargs):
+                self.turn_calls.append((args, kwargs))
+                return Turn()
+
+        class Client:
+            def __init__(self):
+                self.thread = Thread()
+                self.starts = []
+
+            async def thread_start(self, **kwargs):
+                self.starts.append(kwargs)
+                return self.thread
+
+        adapter = CodexSdkAdapter(
+            lambda: "secret",
+            lambda: "https://codex.example.test",
+            lambda role: "coding-model",
+        )
+        client = Client()
+        adapter._client = client
+
+        async def callback(*args):
+            return None
+
+        thread_id, result = await adapter.run_text_turn(
+            job_id="d-test",
+            cwd="/service",
+            prompt="Do the work",
+            sandbox=Sandbox.full_access,
+            effort=ReasoningEffort.high,
+            model_role="code",
+            developer_instructions="Follow instructions",
+            thread_id=None,
+            timeout_seconds=10,
+            on_progress=callback,
+            on_thread=callback,
+        )
+
+        self.assertEqual((thread_id, result), ("thread-text", "plain result"))
+        self.assertEqual(client.starts[0]["model"], "coding-model")
+        self.assertEqual(client.starts[0]["sandbox"], Sandbox.full_access)
+        _, turn_options = client.thread.turn_calls[0]
+        self.assertNotIn("output_schema", turn_options)
+        self.assertEqual(turn_options["sandbox"], Sandbox.full_access)
+
     async def test_selects_phase_model_for_thread_start_and_resume(self):
         class Notification:
             def __init__(self, method, payload):
