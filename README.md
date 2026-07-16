@@ -1,310 +1,149 @@
 # Telegram Project Manager
 
-Telegram bot for GitHub issue drafting, commit planning, Codex implementation,
-pull-request validation, and deployment.
+Telegram bot for managing GitHub issues, repository-aware Codex jobs, pull
+requests, merges, and deployments from Telegram.
 
 ## Requirements
 
-- Python 3.11+ and uv
-- GitHub CLI (gh) authenticated for the service account
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- GitHub CLI (`gh`) authenticated for the service account
 - OpenAI-compatible API access
-- Local or bare Git caches for managed repositories
-- SQLite (./data/bot.db by default)
+- SQLite (`data/bot.db` by default)
+- A local or bare Git cache for each managed repository
 
 ## Quick start
 
-~~~powershell
+Install the project and initialize its database:
+
+```bash
 uv sync
 uv run telegram-project-manager init-db
 uv run telegram-project-manager admin add <telegram_user_id>
-uv run telegram-project-manager run
-~~~
+```
 
-Create data/secrets.json with only the Telegram token:
+Create `data/secrets.json` with the Telegram token:
 
-~~~json
+```json
 {"TELEGRAM_BOT_TOKEN":"..."}
-~~~
+```
 
-Authenticate GitHub and configure models in a private admin chat:
+Authenticate the service account with GitHub, then start the bot:
 
-~~~powershell
+```bash
 gh auth login
 gh auth status
-~~~
+uv run telegram-project-manager run
+```
 
-~~~text
+In a private admin chat, configure the providers and models:
+
+```text
 /config set openai_api_key <key>
-/config set openai_base_url https://api.openai.com/v1
 /config set openai_model <model>
 /config set codex_api_key <key>
-/config set codex_base_url https://api.openai.com/v1
 /config set codex_plan_model <model>
 /config set codex_code_model <model>
-~~~
+```
 
-API keys are stored separately in SQLite, redacted by /config show, and cannot
-be set from group chats. codex_model remains a shared fallback when a
-phase-specific Codex model is unset.
+Set `openai_base_url` or `codex_base_url` only for compatible custom endpoints.
+`codex_model` remains a shared fallback when a phase-specific model is unset.
 
-## Commands
+## Common commands
 
-Commands marked admin require a registered Telegram admin.
+Commands that change configuration or start work require a registered admin.
+Use `/help` in Telegram for the complete command reference.
 
-~~~text
-/start | /help | help                         Show help
-/status                                       Show service and GitHub status
-/repos                                        List allowed repositories
-/repo show                                    Show saved repository settings
-/repo check                                   Validate the configured Git cache
-/repo allow owner/repository                  Allow repository (admin)
-/repo disallow owner/repository               Disallow repository (admin)
-/repo set owner/repository                    Set active repository (admin)
-/repo setup owner/repository                  Download and configure repository (admin)
-/repo clear                                   Clear active repository (admin)
-/repo local set <absolute-path>               Set managed Git cache (admin)
-/repo local clear                             Clear managed Git cache (admin)
-/repo deploy enable owner/repository          Enable manual deploy (admin)
-/repo deploy disable owner/repository         Disable manual deploy (admin)
-/repo deploy set owner/repository deploy.yml  Set deployment workflow (admin)
-/repo deploy clear owner/repository           Clear deployment workflow (admin)
-/branch <branch>                              Set default branch (admin)
-/issues                                      List open issues for the active repository
+```text
+/status                                      Show service and GitHub status
+/repo setup owner/repository                Configure and cache a repository
+/repo show                                  Show current repository settings
+/issues                                     List open issues
+/issue <prompt>                             Draft a GitHub issue
+/commit <request>                           Draft a direct commit plan
+/code #123                                  Plan an issue in the active repository
+/code approve <c-job_id>                    Approve implementation
+/code status <c-job_id>                     Show code-job status
+/ask <question> [images]                    Inspect the active repository
+/do <job> [images]                          Run a writable repository job
+/do status [d-job_id]                       Show do-job status
+/merge <c-job_id>                           Merge without deployment
+/deploy <c-job_id>                          Merge and deploy
+/config show                                Show redacted configuration
+/memory status                              Show chat or topic memory usage
+```
 
-/commit <request>                             Generate commit plan (admin)
-/confirm <plan_id>                            Execute commit plan (admin)
-/cancel <plan_id>                             Cancel commit plan
-
-/issue <prompt>                               Draft issue (admin)
-/edit <i-draft_id> <feedback>                 Revise issue draft
-/confirm <i-draft_id>                         Create GitHub issue
-/cancel <i-draft_id>                          Cancel issue draft
-
-/code #123                                    Plan issue in active repository
-/code owner/repository#123                    Plan issue in allowed repository
-/code <GitHub issue URL>                      Plan issue from URL
-/code #123 --skip-plan                        Implement immediately
-/code approve <c-job_id>                      Approve implementation
-/code edit <c-job_id> <feedback>              Revise plan
-/code retry <c-job_id>                        Retry failed/interrupted phase
-/code rebase <c-job_id>                       Rebase and rerun CI
-/code discard <c-job_id>                      Close PR and delete branch
-/code status [c-job_id]                       Show one or recent jobs
-/ask <question> [images]                      Ask Codex about the active repository
-/do <job> [images]                            Run Codex in the active repository
-/do --host <job> [images]                     Run unrestricted host job (private admin only)
-/do status [d-job_id]                         Show the current or recent do job
-/merge <c-job_id>                             Confirm merge without deployment
-/deploy <c-job_id>                            Confirm merge and deployment
-
-/config show                                  Show redacted configuration
-/memory status | /memory show                 Show current chat/topic memory usage
-/memory clear                                 Clear current chat/topic memory (admin)
-/admin add <telegram_user_id>                 Add admin
-/admin remove <telegram_user_id>              Remove admin
-~~~
+`/code` also accepts `owner/repository#123`, an issue URL, and `--skip-plan`.
+Use `/code edit`, `/code retry`, `/code rebase`, or `/code discard` to manage an
+existing job. `/do --host <job>` is restricted to private admin chats.
 
 ## Workflows
 
-### Forum topics and repositories
-
-In a Telegram supergroup with Topics enabled, repository settings are scoped
-to the current topic. Each topic must run `/repo set owner/repository`
-explicitly; topic settings do not inherit the group's active repository,
-branch, or managed cache. Commands sent without a `message_thread_id` continue
-to use group-level settings. Plans, drafts, code-job controls, deployments, and
-LLM memory remain bound to the topic where they were created.
-
-The repository allowlist, deploy-enabled flag, and per-repository deployment
-workflow remain global.
-
-### Issues
-
-/issues lists up to 20 open issues for the current chat or topic's active
-repository, ordered by most recently updated. Each issue number links to GitHub
-and includes a copyable, repository-qualified `/code owner/repository#123`
-command. Every successful `/issues` call sends a new list; only the newest list
-in each chat or topic refreshes automatically every 60 seconds. Older lists stay
-visible but stop updating.
-
-/issue uses the current chat or topic's active repository and managed cache to build a
-repository-aware draft. Reply to the preview with text or images to revise it,
-then confirm it. Drafts expire after one hour.
-
-JPEG, PNG, and GIF are supported: up to 10 images, 10 MB each, and 20 MB total.
-Images are stored on an isolated issue-assets branch and later supplied to
-Codex as vision inputs. Set issue_body_llm_enabled=false to keep the original
-prompt as the issue body and generate only a title.
-
-### Code
-
-/code creates an isolated worktree and draft PR. Planning uses
-codex_plan_model; approved implementation, CI repair, and rebase repair use
-codex_code_model. Every Codex turn runs with full filesystem access and
-unrestricted outbound network access.
-
-Codex must discover validation commands from repository metadata rather than
-assume scripts or tools exist. Invalid validation triggers up to two recovery
-turns on the same thread. A job becomes ready only after a real command passes
-and all GitHub checks for the current head pass. CI failures receive up to two
-repair commits. Implementation and repair turns may run for up to 10 hours.
-
-Two jobs may run concurrently and ten may queue. Restarts mark active turns
-interrupted for explicit retry or discard. Progress cards show phases, commands,
-files, recent activity, failure timing, and detailed errors without exposing raw
-model reasoning.
-
-Planning follows a repository-first, decision-complete workflow. If Codex finds
-material product choices it cannot resolve from the repository, the draft PR and
-Telegram plan-ready ping show up to three questions with recommended options.
-Approval remains blocked until the questions are resolved. Reply to the Telegram
-ping or comment on the draft PR using the GitHub account authenticated by the
-service; the answer is deduplicated, applied to the committed main plan, and
-published as a new plan revision automatically.
-
-### Repository questions
-
-`/ask <question>` queues an independent Codex inspection of the
-current chat or topic's active repository and default branch. A photo, image
-document, or album can be attached when the command and question are provided
-in the media caption. JPEG, PNG, and GIF images are supported, with a maximum
-of 10 images, 10 MB per image, and 20 MB total. The bot replies immediately
-with an acknowledgment, refreshes the configured managed cache, and then
-replies to the original command with a concise answer and supporting repository
-paths. Ask sessions are not conversational and are not resumed after a service
-restart. Image support uses the configured Codex plan model and requires no
-additional settings or database migration.
-
-The ask prompt remains read-only by instruction, but the Codex process has the
-same full filesystem and network permissions as every other Codex job.
-
-### Codex access
-
-`/do <job>` sends the job to the configured Codex coding model in a persistent
-writable workspace for the current chat or topic's active repository. Registered
-admins may use it in private chats, groups, and topics. Existing workspace changes
-are preserved between jobs. `/do --host <job>` retains private-admin-only host
-execution from the bot deployment directory.
-
-Do jobs run in an independent systemd worker, so restarting the Telegram polling
-service does not interrupt them. At most two lanes run globally and each repository
-or host lane is serialized. Each job may run for up to 10 hours.
-`/do status [d-job_id]` shows durable status and recent activity; live progress
-cards report Codex phases, commands, and file changes.
-
-Photos, image documents, and albums can be supplied in the command caption. JPEG,
-PNG, and GIF are supported, up to 10 images, 10 MB each, and 20 MB total. Request
-text and images are stored in root-only temporary payloads and deleted when the job
-finishes. Jobs interrupted by a worker restart are not automatically rerun.
-
-`/ask`, `/code`, and `/do` all run with Codex full-access mode. Network
-access is unrestricted. Codex can read or modify any path available to the
-service account and can transmit accessible data off-server. OpenAI recommends
-using full access only with trusted repositories and monitoring it as an
-elevated environment; see
-[Agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security#run-codex-in-dev-containers).
-
-Full-access jobs reply with a redacted plain Codex result. Job metadata and safe
-progress summaries are persisted, but completed request payloads are deleted and
-interrupted jobs are not rerun because requested work may already have produced partial or
-non-idempotent side effects.
-
-### Merge and deployment
-
-/merge requires confirmation and a ready code job. It revalidates the exact
-checked pull-request head, reviews, checks, mergeability, and configured base
-branch before squash-merging and deleting the source branch. It never starts a
-deployment workflow. Merge-only operations can target any configured base
-branch and resume safely after a bot restart.
-
-/deploy is disabled for every repository by default. An admin enables or
-disables it with \`/repo deploy enable owner/repository\` and \`/repo deploy
-disable owner/repository\`. Enabling it only exposes and permits the manual
-Deploy action; it does not deploy automatically after a push.
-
-When enabled, /deploy requires confirmation, a ready PR targeting main, and
-the exact head SHA accepted by CI. It honors reviews, branch protection, and merge queues;
-squash-merges, deletes the branch, dispatches the configured workflow_dispatch
-workflow at the merge SHA, and monitors it for up to 30 minutes.
-
-If `/merge` already merged a job into main, `/deploy` reuses the stored merge
-SHA and starts the configured workflow without trying to merge again. Jobs
-merged into another base branch remain ineligible for deployment.
-
-The workflow must accept a required ref input. The bot allows two minutes for
-the dispatched run to appear and resumes active deployment monitoring after a
-service restart.
+- **Repository context:** Run `/repo setup owner/repository` to allow the
+  repository, detect its default branch, create or refresh its managed cache,
+  and select it for the current chat or forum topic. Topic settings are
+  independent from group-level settings.
+- **Issues and code:** `/issue` creates a reviewable issue draft. `/code` plans
+  an existing issue in an isolated worktree and opens a draft pull request.
+  Approve the plan before implementation unless `--skip-plan` was used. A job
+  becomes ready only after repository validation and GitHub checks pass.
+- **Questions and jobs:** `/ask` performs a read-only repository inspection.
+  `/do` runs writable Codex work in a persistent repository workspace; its
+  separate worker keeps queued jobs independent from Telegram polling.
+- **Images:** `/issue`, `/ask`, and `/do` accept JPEG, PNG, and GIF attachments,
+  with up to 10 images, 10 MB each, and 20 MB total.
+- **Merge and deployment:** `/merge` squash-merges a ready pull request without
+  deploying. Deployment is disabled per repository until an admin configures a
+  workflow and enables it. `/deploy` requires a ready pull request targeting
+  `main` and dispatches the configured `workflow_dispatch` workflow at the
+  accepted merge SHA.
+- **Recovery:** Interrupted code jobs require `/code retry` or `/code discard`.
+  Interrupted `/do` jobs are not rerun automatically because they may have
+  produced partial or non-idempotent changes.
 
 ## Safety
 
-- Repository allowlist and independent per-chat/per-topic repository context
-- Service-owned Git caches with strict origin verification
-- Isolated worktrees for code-job Git state
-- Full host filesystem and unrestricted network access for all Codex jobs
-- Prompt-level secret and remote-write restrictions are not sandbox-enforced
-- No changes to .env files, private keys, or .github/workflows
-- No changed-file count limit; code-job changes retain a 20 MB safety limit
-- Host-owned commits, pushes, pull requests, and deployment
-- API keys redacted from configuration and progress output
+> **Warning:** `/ask`, `/code`, and `/do` run Codex with full host filesystem
+> access and unrestricted outbound network access. Prompt restrictions are not
+> sandbox-enforced. Use only trusted repositories and monitor the environment.
 
-## Managed repository cache
+- Repositories must be explicitly allowed and are isolated by chat or topic.
+- Code jobs use isolated Git worktrees and enforce a 20 MB change-size limit.
+- API keys are stored separately in SQLite and redacted from bot output.
+- Codex is instructed not to modify `.env` files, private keys, or
+  `.github/workflows`, but these restrictions are prompt-level only.
+- Commits, pushes, pull requests, merges, and deployments are performed by the
+  host application after its checks and confirmations.
 
-Run /repo setup owner/repository to let the bot verify GitHub access, detect
-the default branch, and create or reuse a bare cache under the database
-directory's repos folder. Setup runs in the background and updates the current
-chat or topic only after the cache has been validated and refreshed.
+See [Agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security#run-codex-in-dev-containers)
+for guidance on running Codex with full access.
 
-The service account must be authenticated with gh. Existing matching caches are
-reused; an invalid or mismatched destination is never deleted automatically.
+## Advanced operation
 
-For manual setup, the cache must be an absolute, writable normal or bare Git
-repository whose literal origin matches owner/repository.
+For manual repository setup, first allow and select the repository, then provide
+an absolute path to a writable normal or bare Git repository:
 
-Example bootstrap from an existing checkout:
+```text
+/repo allow owner/repository
+/repo set owner/repository
+/repo local set <absolute-path>
+/repo check
+```
 
-~~~bash
-sudo install -d -o telegram-pm -g telegram-pm /var/lib/telegram-project-manager/repos
-sudo git clone --mirror --no-hardlinks /root/trade-router \
-  /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git
-sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
-  config remote.origin.mirror false
-sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
-  config remote.origin.url https://github.com/mehrangta/telegram-trade-router.git
-sudo git -C /var/lib/telegram-project-manager/repos/mehrangta--telegram-trade-router.git \
-  config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-sudo chown -R telegram-pm:telegram-pm /var/lib/telegram-project-manager/repos
-~~~
+The cache's literal `origin` must match `owner/repository`. Managed caches created
+by `/repo setup` live under the database directory's `repos` folder.
 
-Then configure the path with /repo local set <absolute-path>.
+Durable `/do` jobs require a separate worker:
 
-## CLI and service
+```bash
+uv run telegram-project-manager run-do-worker
+```
 
-~~~text
-telegram-project-manager [--db <path>] init-db
-telegram-project-manager [--db <path>] run
-telegram-project-manager [--db <path>] admin add|remove ...
-telegram-project-manager [--db <path>] config show
-telegram-project-manager [--db <path>] config set <key> <value>
-~~~
+A systemd unit template is available at
+`deploy/telegram-project-manager-do-worker.service`.
 
-Supported configuration keys:
+Use the CLI help for all service commands and configuration keys:
 
-~~~text
-openai_api_key, openai_base_url, openai_model
-codex_api_key, codex_base_url, codex_model
-codex_plan_model, codex_code_model
-issue_body_llm_enabled, llm_memory_max_messages
-max_files_per_commit, max_bytes_per_commit, require_confirmation
-~~~
-
-VPS operations:
-
-~~~bash
-sudo systemctl enable --now telegram-project-manager
-sudo systemctl restart telegram-project-manager
-sudo systemctl stop telegram-project-manager
-sudo systemctl status telegram-project-manager
-sudo journalctl -u telegram-project-manager -f
-sudo -u telegram-pm -H gh auth login --hostname github.com --web
-sudo -u telegram-pm -H gh auth status --hostname github.com
-~~~
+```bash
+uv run telegram-project-manager --help
+uv run telegram-project-manager config set --help
+```
