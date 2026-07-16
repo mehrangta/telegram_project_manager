@@ -19,6 +19,8 @@ CODE_JOB_ID_PATTERN = re.compile(r"(?m)^Code Job ID:\s*(c-[0-9a-f]{8})\s*$")
 ISSUE_REPO_PATTERN = re.compile(r"(?m)^Repo:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$")
 ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
 CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
+CALLBACK_DRAFT_PATTERN = re.compile(r"^i-[0-9a-f]{8}$")
+ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel) i-[0-9a-f]{8}$")
 
 
 @dataclass(frozen=True)
@@ -406,6 +408,20 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         except TelegramBotApiError as exc:
             logging.warning("Telegram callback acknowledgement failed: %s", exc)
 
+    async def delete_callback_source(callback: CallbackAction) -> None:
+        try:
+            await asyncio.to_thread(
+                bot.delete_message,
+                callback.message.chat_id,
+                callback.source_message_id,
+            )
+        except TelegramBotApiError:
+            logging.warning(
+                "Telegram callback source deletion failed: chat_id=%s message_id=%s",
+                callback.message.chat_id,
+                callback.source_message_id,
+            )
+
     async def dispatch_callback(update: dict[str, Any]) -> None:
         callback = callback_action_from_update(update)
         if callback is None:
@@ -414,6 +430,22 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         if not router.is_admin(incoming.user_id):
             return
         data = callback.data
+        if data.startswith("edit_issue:"):
+            draft_id = data.removeprefix("edit_issue:")
+            if not CALLBACK_DRAFT_PATTERN.fullmatch(draft_id):
+                await answer_callback(callback.query_id, "Button expired")
+                return
+            await answer_callback(callback.query_id, "Send feedback")
+            prompt = outgoing_message(
+                "✏️ Edit issue draft\n"
+                f"Draft ID: {draft_id}\n"
+                "Reply to this message with feedback or images, or run:\n"
+                f"/edit {draft_id} <feedback>",
+                keyboard=(),
+            )
+            await send_response(incoming, prompt)
+            await delete_callback_source(callback)
+            return
         if data in {"cancel_deploy", "cancel_merge"}:
             label = "Merge cancelled" if data == "cancel_merge" else "Deployment cancelled"
             await answer_callback(callback.query_id, label)
@@ -467,6 +499,8 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             await answer_callback(callback.query_id, "Button expired")
             return
         await answer_callback(callback.query_id, "Action requested")
+        if ISSUE_DRAFT_ACTION_PATTERN.fullmatch(command):
+            await delete_callback_source(callback)
         if command.lower().startswith(("/deploy ", "/merge ")):
             await asyncio.to_thread(
                 bot.edit_message_reply_markup,
