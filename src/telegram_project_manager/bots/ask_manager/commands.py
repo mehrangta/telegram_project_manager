@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from telegram_project_manager.bots.ask_manager.images import validate_attachments
 from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.code_manager.workspace import WorkspaceError
 from telegram_project_manager.platform.permissions import PermissionService
@@ -25,7 +26,14 @@ class AskManager:
         question = rest.strip()
         if not question:
             return outgoing_message(
-                "Usage: /ask <question about the active repository>",
+                "Usage: /ask <question about the active repository> (images optional)",
+                reply_to_message_id=message.message_id,
+            )
+        try:
+            validate_attachments(message.attachments)
+        except ValueError as exc:
+            return outgoing_message(
+                f"Repository question not started.\nReason: {exc}",
                 reply_to_message_id=message.message_id,
             )
         settings = self.db.get_scope_settings(message.chat_id, message.thread_id)
@@ -51,6 +59,7 @@ class AskManager:
                 branch=str(settings.get("default_branch") or "main"),
                 source_path=str(settings.get("local_repo_path") or ""),
                 question=question,
+                attachments=message.attachments,
             )
         except (ValueError, WorkspaceError) as exc:
             return outgoing_message(

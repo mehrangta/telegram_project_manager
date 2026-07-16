@@ -89,7 +89,7 @@ Commands marked admin require a registered Telegram admin.
 /code rebase <c-job_id>                       Rebase and rerun CI
 /code discard <c-job_id>                      Close PR and delete branch
 /code status [c-job_id]                       Show one or recent jobs
-/ask <question>                               Ask Codex about the active repository
+/ask <question> [images]                      Ask Codex about the active repository
 /merge <c-job_id>                             Confirm merge without deployment
 /deploy <c-job_id>                            Confirm merge and deployment
 
@@ -153,11 +153,15 @@ published as a new plan revision automatically.
 ### Repository questions
 
 `/ask <question>` queues an independent, read-only Codex inspection of the
-current chat or topic's active repository and default branch. The bot replies
-immediately with an acknowledgment, refreshes the configured managed cache,
-and then replies to the original command with a concise answer and supporting
-repository paths. Ask sessions are not conversational and are not resumed after
-a service restart.
+current chat or topic's active repository and default branch. A photo, image
+document, or album can be attached when the command and question are provided
+in the media caption. JPEG, PNG, and GIF images are supported, with a maximum
+of 10 images, 10 MB per image, and 20 MB total. The bot replies immediately
+with an acknowledgment, refreshes the configured managed cache, and then
+replies to the original command with a concise answer and supporting repository
+paths. Ask sessions are not conversational and are not resumed after a service
+restart. Image support uses the configured Codex plan model and requires no
+additional settings or database migration.
 
 ### Merge and deployment
 

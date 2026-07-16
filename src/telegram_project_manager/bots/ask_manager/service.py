@@ -11,6 +11,7 @@ from typing import Any
 from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
+from telegram_project_manager.bots.ask_manager.images import stage_attachments
 from telegram_project_manager.bots.ask_manager.prompts import (
     ASK_DEVELOPER_INSTRUCTIONS,
     ask_prompt,
@@ -22,6 +23,7 @@ from telegram_project_manager.bots.ask_manager.schemas import (
 from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter, CodexSdkError
 from telegram_project_manager.bots.code_manager.workspace import GitWorkspaceService, WorkspaceError
 from telegram_project_manager.platform.responses import outgoing_message
+from telegram_project_manager.platform.router import IncomingAttachment
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
 
@@ -62,6 +64,7 @@ class AskService:
         branch: str,
         source_path: str,
         question: str,
+        attachments: tuple[IncomingAttachment, ...] = (),
     ) -> str:
         if len(self._tasks) >= self.max_outstanding:
             raise ValueError("Repository question queue is full. Try again after another answer completes.")
@@ -71,17 +74,18 @@ class AskService:
             repo=repo,
         )
         ask_id = f"a-{uuid.uuid4().hex[:8]}"
+        acknowledgement = [
+            "Repository question queued.",
+            f"Repo: {repo}",
+            f"Branch: {branch}",
+        ]
+        if attachments:
+            acknowledgement.append(f"Images: {len(attachments)}")
         await self._send(
             chat_id=chat_id,
             thread_id=thread_id,
             reply_to_message_id=message_id,
-            text="\n".join(
-                [
-                    "Repository question queued.",
-                    f"Repo: {repo}",
-                    f"Branch: {branch}",
-                ]
-            ),
+            text="\n".join(acknowledgement),
         )
         task = asyncio.create_task(
             self._run(
@@ -94,12 +98,17 @@ class AskService:
                 branch=branch,
                 source_path=resolved_source,
                 question=question,
+                attachments=attachments,
             ),
             name=f"repository-ask-{ask_id}",
         )
         self._tasks[ask_id] = task
         task.add_done_callback(lambda finished, key=ask_id: self._task_finished(key, finished))
-        self.db.audit("ask.question", "queued", {"repo": repo, "branch": branch, "actor": user_id})
+        self.db.audit(
+            "ask.question",
+            "queued",
+            {"repo": repo, "branch": branch, "actor": user_id, "images": len(attachments)},
+        )
         return ask_id
 
     async def shutdown(self) -> None:
@@ -122,6 +131,7 @@ class AskService:
         branch: str,
         source_path: str,
         question: str,
+        attachments: tuple[IncomingAttachment, ...],
     ) -> None:
         del user_id
         workspace = self._root / ask_id / "repo"
@@ -134,10 +144,17 @@ class AskService:
                     base_branch=branch,
                     path=workspace,
                 )
+                image_paths = await asyncio.to_thread(
+                    stage_attachments,
+                    bot=self.bot,
+                    attachments=attachments,
+                    destination=workspace / ".codex" / "ask-images",
+                )
                 _, raw = await self.codex.run_turn(
                     job_id=ask_id,
                     cwd=str(workspace),
                     prompt=ask_prompt(question),
+                    image_paths=image_paths,
                     output_schema=ASK_RESPONSE_SCHEMA,
                     sandbox=Sandbox.read_only,
                     effort=ReasoningEffort.high,
@@ -159,18 +176,31 @@ class AskService:
                 self.db.audit(
                     "ask.answer",
                     "ok",
-                    {"repo": repo, "branch": branch, "sources": len(sources)},
+                    {
+                        "repo": repo,
+                        "branch": branch,
+                        "sources": len(sources),
+                        "images": len(attachments),
+                    },
                 )
         except asyncio.CancelledError:
             raise
         except (CodexSdkError, WorkspaceError, ValueError) as exc:
-            self.db.audit("ask.answer", "failed", {"repo": repo, "error": _safe_error(exc)})
+            self.db.audit(
+                "ask.answer",
+                "failed",
+                {"repo": repo, "error": _safe_error(exc), "images": len(attachments)},
+            )
             await self._send_failure(chat_id, thread_id, message_id, exc)
         except TelegramBotApiError:
             logging.exception("Failed to send repository answer %s", ask_id)
         except Exception as exc:
             logging.exception("Unexpected repository answer failure %s", ask_id)
-            self.db.audit("ask.answer", "failed", {"repo": repo, "error": _safe_error(exc)})
+            self.db.audit(
+                "ask.answer",
+                "failed",
+                {"repo": repo, "error": _safe_error(exc), "images": len(attachments)},
+            )
             await self._send_failure(chat_id, thread_id, message_id, exc)
         finally:
             try:
@@ -239,6 +269,8 @@ def _existing_sources(workspace: Path, sources: tuple[str, ...]) -> tuple[str, .
     for source in sources:
         relative = Path(source)
         if relative.is_absolute() or ".." in relative.parts:
+            continue
+        if relative.parts[:2] == (".codex", "ask-images"):
             continue
         candidate = (root / relative).resolve()
         if candidate.is_relative_to(root) and candidate.is_file():
