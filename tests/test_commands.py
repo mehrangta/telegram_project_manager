@@ -3,13 +3,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+from telegram_project_manager.bots.commit_manager.issue_list import IssueListError
 from telegram_project_manager.bots.commit_manager.commands import CommitManager, split_command
-from telegram_project_manager.integrations.gh.issues import IssueSummary
-from telegram_project_manager.integrations.gh.runner import GhError, GhResult
 from telegram_project_manager.platform.permissions import PermissionService
-from telegram_project_manager.platform.responses import OutgoingMessage
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -91,6 +88,9 @@ class CommandTests(unittest.TestCase):
                 feedback_table = upgraded.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'code_plan_feedback'"
                 ).fetchone()
+                issue_list_table = upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issue_list_messages'"
+                ).fetchone()
             self.assertIn("telegram_thread_id", plan_columns)
             self.assertIn("telegram_thread_id", draft_columns)
             self.assertIn("local_repo_path", draft_columns)
@@ -104,6 +104,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("deployment_mode", code_job_columns)
             self.assertIn("deployment_conflict_attempts", code_job_columns)
             self.assertIsNotNone(feedback_table)
+            self.assertIsNotNone(issue_list_table)
 
     def test_database_upgrade_marks_existing_delivery_operations_as_deploy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -321,17 +322,15 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(db.get_plan("p-1")["status"], "pending")
 
 
-class FakeIssueReader:
-    def __init__(self, issues=(), error=None):
-        self.issues = list(issues)
+class FakeIssueListService:
+    def __init__(self, error=None):
         self.error = error
         self.calls = []
 
-    def list_open_issues(self, repo):
-        self.calls.append(repo)
+    async def publish(self, *, chat_id, thread_id, repo):
+        self.calls.append((chat_id, thread_id, repo))
         if self.error:
             raise self.error
-        return list(self.issues)
 
 
 class IssueListCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -344,76 +343,53 @@ class IssueListCommandTests(unittest.IsolatedAsyncioTestCase):
         self.db.allow_repo("owner/repo", 10)
         self.db.set_chat_repo(20, "owner/repo", 10, "main")
 
-    def manager(self, reader):
+    def manager(self, issue_lists):
         manager = object.__new__(CommitManager)
         manager.db = self.db
         manager.permissions = PermissionService(self.db)
-        manager.issue_reader = reader
+        manager.issue_lists = issue_lists
         return manager
 
-    async def handle(self, manager, message):
-        async def run_sync(function, *args):
-            return function(*args)
+    async def test_issues_command_delegates_success_without_second_response(self):
+        issue_lists = FakeIssueListService()
 
-        with patch(
-            "telegram_project_manager.bots.commit_manager.commands.asyncio.to_thread",
-            new=run_sync,
-        ):
-            return await manager.handle(message)
-
-    async def test_issues_command_renders_safe_clickable_results(self):
-        reader = FakeIssueReader(
-            [
-                IssueSummary(9, "Fix <unsafe & title>", "https://github.com/owner/repo/issues/9"),
-                IssueSummary(4, "Older issue", "https://github.com/owner/repo/issues/4"),
-            ]
+        response = await self.manager(issue_lists).handle(
+            IncomingMessage(20, 10, "admin", "/issues")
         )
 
-        response = await self.handle(
-            self.manager(reader), IncomingMessage(20, 10, "admin", "/issues")
-        )
-
-        self.assertIsInstance(response, OutgoingMessage)
-        self.assertEqual(reader.calls, ["owner/repo"])
-        self.assertIn("Open issues for owner/repo:", response.text)
-        self.assertIn('<a href="https://github.com/owner/repo/issues/9">#9</a>', response.text)
-        self.assertIn("Fix &lt;unsafe &amp; title&gt;", response.text)
-        self.assertLess(response.text.index("#9"), response.text.index("#4"))
-        self.assertEqual(response.keyboard, ())
-        self.assertTrue(response.disable_link_preview)
+        self.assertIsNone(response)
+        self.assertEqual(issue_lists.calls, [(20, None, "owner/repo")])
 
     async def test_issues_command_uses_independent_topic_repository(self):
         self.db.allow_repo("owner/topic", 10)
         self.db.set_scope_repo(20, 101, "owner/topic", 10, "main")
-        reader = FakeIssueReader()
+        issue_lists = FakeIssueListService()
 
-        response = await self.handle(
-            self.manager(reader),
+        response = await self.manager(issue_lists).handle(
             IncomingMessage(20, 10, "admin", "/issues", thread_id=101),
         )
 
-        self.assertEqual(response, "No open issues for owner/topic.")
-        self.assertEqual(reader.calls, ["owner/topic"])
+        self.assertIsNone(response)
+        self.assertEqual(issue_lists.calls, [(20, 101, "owner/topic")])
 
     async def test_issues_command_validates_usage_and_repository(self):
-        reader = FakeIssueReader()
-        manager = self.manager(reader)
+        issue_lists = FakeIssueListService()
+        manager = self.manager(issue_lists)
 
-        usage = await self.handle(manager, IncomingMessage(20, 10, "admin", "/issues closed"))
-        missing = await self.handle(manager, IncomingMessage(21, 10, "admin", "/issues"))
+        usage = await manager.handle(IncomingMessage(20, 10, "admin", "/issues closed"))
+        missing = await manager.handle(IncomingMessage(21, 10, "admin", "/issues"))
         self.db.set_chat_repo(22, "owner/not-allowed", 10, "main")
-        disallowed = await self.handle(manager, IncomingMessage(22, 10, "admin", "/issues"))
+        disallowed = await manager.handle(IncomingMessage(22, 10, "admin", "/issues"))
 
         self.assertEqual(usage, "Usage: /issues")
         self.assertIn("No active repo for this chat", missing)
         self.assertIn("not in allowed repo list", disallowed)
-        self.assertEqual(reader.calls, [])
+        self.assertEqual(issue_lists.calls, [])
 
     async def test_issues_command_reports_and_audits_reader_failure(self):
-        error = GhError(GhResult(["gh", "issue", "list"], 1, "", "auth failed", 1))
+        error = IssueListError("auth failed")
 
-        response = await self.handle(
-            self.manager(FakeIssueReader(error=error)),
+        response = await self.manager(FakeIssueListService(error=error)).handle(
             IncomingMessage(20, 10, "admin", "/issues"),
         )
 
@@ -430,7 +406,7 @@ class IssueListCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_help_advertises_issues_without_claiming_issue_command(self):
-        manager = self.manager(FakeIssueReader())
+        manager = self.manager(FakeIssueListService())
 
         self.assertIn("/issues", manager.help())
         self.assertIsNone(

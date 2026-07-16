@@ -8,6 +8,7 @@ from pathlib import Path
 from telegram_project_manager.bots.ask_manager.commands import AskManager
 from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.commit_manager.commands import CommitManager
+from telegram_project_manager.bots.commit_manager.issue_list import IssueListService
 from telegram_project_manager.bots.commit_manager.repository_setup import RepositorySetupService
 from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter
 from telegram_project_manager.bots.code_manager.commands import CodeManager
@@ -129,6 +130,7 @@ async def run_bot(db: Database) -> None:
         repositories=repositories,
         bot=bot,
     )
+    issue_lists = IssueListService(db=db, bot=bot, reader=GhIssueReader(gh))
     commit_manager = CommitManager(
         db=db,
         llm=llm,
@@ -136,7 +138,7 @@ async def run_bot(db: Database) -> None:
         executor=commit_executor,
         repositories=repositories,
         repository_setup=repository_setup,
-        issue_reader=GhIssueReader(gh),
+        issue_lists=issue_lists,
     )
     issue_planner = IssuePlanner(db, llm, RepositoryContextService(repositories))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))
@@ -202,11 +204,13 @@ async def run_bot(db: Database) -> None:
             commit_manager,
         ],
     )
+    await issue_lists.recover()
     await code_service.recover()
     await deployment_service.recover()
     try:
         await run_polling(bot, router)
     finally:
+        await issue_lists.shutdown()
         await repository_setup.shutdown()
         await ask_service.shutdown()
         await deployment_service.shutdown()
