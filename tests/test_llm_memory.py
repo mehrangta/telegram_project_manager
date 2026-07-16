@@ -9,6 +9,11 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class LlmMemoryTests(unittest.TestCase):
+    def test_topic_memory_keys_are_isolated_and_group_key_is_compatible(self):
+        self.assertEqual(memory_session_id(123), "commit-manager:123")
+        self.assertEqual(memory_session_id(123, 10), "commit-manager:123:10")
+        self.assertNotEqual(memory_session_id(123, 10), memory_session_id(123, 11))
+
     def test_persists_trims_and_clears_messages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")

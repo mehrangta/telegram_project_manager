@@ -58,7 +58,7 @@ class CodeManager:
         skip_plan = "--skip-plan" in tokens
         tokens = [item for item in tokens if item != "--skip-plan"]
         reference = " ".join(tokens).strip() or str(message.reply_to_issue_ref or "")
-        chat = self.db.get_chat_settings(message.chat_id)
+        chat = self.db.get_scope_settings(message.chat_id, message.thread_id)
         active_repo = str(chat.get("active_repo") or "")
         try:
             repo, number = parse_issue_reference(reference, active_repo)
@@ -100,9 +100,15 @@ class CodeManager:
             return await self._perform_control(message, action, job_id, feedback.strip())
         job_id = rest.strip()
         if action == "status" and not job_id:
-            jobs = self.db.list_code_jobs(chat_id=message.chat_id, limit=10)
+            jobs = self.db.list_code_jobs(
+                chat_id=message.chat_id,
+                thread_id=message.thread_id,
+                exact_thread=True,
+                limit=10,
+            )
             if not jobs:
-                return "No code jobs for this chat."
+                scope = "topic" if message.thread_id is not None else "chat"
+                return f"No code jobs for this {scope}."
             return "Recent code jobs:\n" + "\n".join(
                 f"- {job['id']} {job['repo']}#{job['issue_number']} — {job['status']}"
                 for job in jobs
@@ -125,11 +131,23 @@ class CodeManager:
             return "Only the requester or an admin can control this code job."
         if int(job["telegram_chat_id"]) != message.chat_id:
             return "Code job belongs to a different chat."
+        if job.get("telegram_thread_id") != message.thread_id:
+            return "Code job belongs to a different topic."
         try:
             if action == "approve":
                 await self.service.approve(job_id)
             elif action == "edit":
-                await self.service.edit_plan(job_id, feedback)
+                await self.service.edit_plan(
+                    job_id,
+                    feedback,
+                    source="telegram",
+                    source_id=(
+                        f"{message.chat_id}:{message.message_id}"
+                        if message.message_id is not None
+                        else None
+                    ),
+                    author=str(message.user_id),
+                )
             elif action == "discard":
                 await self.service.discard(job_id)
             elif action == "retry":
@@ -161,6 +179,8 @@ def parse_issue_reference(reference: str, active_repo: str) -> tuple[str, int]:
     number = NUMBER_RE.fullmatch(value)
     if number:
         if not active_repo:
-            raise ValueError("No active repo for this chat. Admin: /repo set owner/repository")
+            raise ValueError(
+                "No active repo for this chat or topic. Admin: /repo set owner/repository"
+            )
         return active_repo, int(number.group(1))
     raise ValueError("Issue must be #123, owner/repo#123, or a GitHub issue URL.")

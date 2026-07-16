@@ -48,6 +48,7 @@ class OutgoingMessage:
     parse_mode: str | None = "HTML"
     keyboard: tuple[tuple[InlineButton, ...], ...] = ()
     disable_link_preview: bool = True
+    reply_to_message_id: int | None = None
 
     def reply_markup(self, *, include_empty: bool = False) -> dict[str, object] | None:
         if not self.keyboard and not include_empty:
@@ -75,6 +76,7 @@ def outgoing_message(
     *,
     keyboard: Sequence[Sequence[InlineButton]] | None = None,
     expandable_prefixes: Sequence[str] = (),
+    reply_to_message_id: int | None = None,
 ) -> OutgoingMessage:
     if isinstance(value, OutgoingMessage):
         return value
@@ -87,6 +89,7 @@ def outgoing_message(
     return OutgoingMessage(
         text=_render_html(plain, expandable_prefixes=tuple(expandable_prefixes)),
         keyboard=resolved_keyboard,
+        reply_to_message_id=reply_to_message_id,
     )
 
 
@@ -131,6 +134,8 @@ def keyboard_for_text(text: str) -> tuple[tuple[InlineButton, ...], ...]:
             buttons.append(copy_button(f"📋 {action}", command))
         elif command.lower().startswith("/deploy "):
             buttons.append(callback_button(f"🚀 {action}", f"confirm_deploy:{identifier}"))
+        elif command.lower().startswith("/merge "):
+            buttons.append(callback_button(f"🔀 {action}", f"confirm_merge:{identifier}"))
         else:
             buttons.append(callback_button(_command_label(action), f"command:{command}"))
     buttons.extend(_url_buttons(text))
@@ -178,6 +183,7 @@ def _command_label(action: str) -> str:
         "Cancel": "✖️",
         "Confirm": "✅",
         "Discard": "🗑",
+        "Merge": "🔀",
         "Rebase": "🔄",
         "Retry": "🔁",
         "Status": "ℹ️",

@@ -23,6 +23,7 @@ class CommitPlanner:
         user_id: int,
         repo: str,
         base_branch: str,
+        thread_id: int | None = None,
     ) -> tuple[str, CommitPlan]:
         plan_id = uuid.uuid4().hex[:8]
         target_branch = f"bot/{user_id}/{plan_id}"
@@ -38,7 +39,7 @@ class CommitPlanner:
                 max_files=max_files,
                 max_bytes=max_bytes,
             ),
-            memory_key=memory_session_id(chat_id),
+            memory_key=memory_session_id(chat_id, thread_id),
         )
         plan = CommitPlan.from_llm(raw, fallback_repo=repo, fallback_branch=base_branch, target_branch=target_branch)
         plan.validate(max_files=max_files, max_bytes=max_bytes)
@@ -47,6 +48,7 @@ class CommitPlanner:
             {
                 "id": plan_id,
                 "telegram_chat_id": chat_id,
+                "telegram_thread_id": thread_id,
                 "telegram_user_id": user_id,
                 "repo": plan.repo,
                 "base_branch": plan.base_branch,

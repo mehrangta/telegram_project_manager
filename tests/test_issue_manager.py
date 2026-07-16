@@ -6,16 +6,20 @@ from pathlib import Path
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.schemas import IssueDraft
 from telegram_project_manager.bots.issue_manager.schemas import PossibleCause, RelevantFile
+from telegram_project_manager.integrations.gh.issues import IssueResult
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextError
+from telegram_project_manager.platform.responses import OutgoingMessage
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
 
 class FakePlanner:
     def __init__(self):
+        self.create_calls = []
         self.revise_calls = []
 
     def create_draft(self, **kwargs):
+        self.create_calls.append(kwargs)
         return (
             "i-12345678",
             IssueDraft(
@@ -53,15 +57,25 @@ class FakeExecution:
 
 class IssueManagerTests(unittest.TestCase):
     @staticmethod
-    def create_pending_draft(db, *, draft_id="i-abcdef12", user_id=10, chat_id=20):
+    def create_pending_draft(
+        db,
+        *,
+        draft_id="i-abcdef12",
+        user_id=10,
+        chat_id=20,
+        thread_id=None,
+        local_repo_path="",
+    ):
         now = int(time.time())
         db.create_issue_draft(
             {
                 "id": draft_id,
                 "telegram_chat_id": chat_id,
+                "telegram_thread_id": thread_id,
                 "telegram_user_id": user_id,
                 "repo": "owner/repo",
                 "default_branch": "main",
+                "local_repo_path": local_repo_path,
                 "request_text": "button broken",
                 "issue_json": {
                     "title": "Original title",
@@ -123,6 +137,87 @@ class IssueManagerTests(unittest.TestCase):
             manager = IssueManager(db, FakePlanner(), FakeExecution())
             response = manager.create(IncomingMessage(1, 2, "", "", False), "bug")
             self.assertIn("Unauthorized", response)
+
+    def test_topic_issue_uses_only_its_repository_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            db.allow_repo("owner/group", 10)
+            db.allow_repo("owner/topic", 10)
+            db.set_chat_repo(20, "owner/group", 10)
+            db.set_scope_repo(20, 101, "owner/topic", 10, "develop")
+            db.set_scope_local_repo(20, 101, "/cache/topic.git", 10)
+            planner = FakePlanner()
+            manager = IssueManager(db, planner, FakeExecution())
+
+            missing = manager.create(
+                IncomingMessage(20, 10, "admin", "", thread_id=102), "bug"
+            )
+            created = manager.create(
+                IncomingMessage(20, 10, "admin", "", thread_id=101), "bug"
+            )
+
+            self.assertIn("No active repo for this topic", missing)
+            self.assertIn("Draft ID", created)
+            self.assertEqual(planner.create_calls[0]["thread_id"], 101)
+            self.assertEqual(planner.create_calls[0]["repo"], "owner/topic")
+            self.assertEqual(planner.create_calls[0]["default_branch"], "develop")
+            self.assertEqual(planner.create_calls[0]["local_repo_path"], "/cache/topic.git")
+
+    def test_issue_draft_revision_is_bound_to_topic_and_snapshotted_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(
+                db, thread_id=101, local_repo_path="/cache/original.git"
+            )
+            planner = FakePlanner()
+            manager = IssueManager(db, planner, FakeExecution())
+
+            rejected = manager.revise(
+                IncomingMessage(20, 10, "admin", "change", thread_id=102),
+                "i-abcdef12",
+                "change",
+            )
+            accepted = manager.revise(
+                IncomingMessage(20, 10, "admin", "change", thread_id=101),
+                "i-abcdef12",
+                "change",
+            )
+
+            self.assertIn("different topic", rejected)
+            self.assertIn("Issue draft revised", accepted)
+            self.assertEqual(planner.revise_calls[0]["local_repo_path"], "/cache/original.git")
+
+    def test_created_issue_has_code_and_issue_buttons(self):
+        class SuccessfulExecution:
+            @staticmethod
+            def execute(draft_id, user_id, chat_id, thread_id):
+                return IssueResult(
+                    repo="owner/repo",
+                    number=12,
+                    url="https://github.com/owner/repo/issues/12",
+                    title="Broken button",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
+
+            response = manager.confirm(
+                IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
+                "i-abcdef12",
+            )
+
+            self.assertIsInstance(response, OutgoingMessage)
+            assert isinstance(response, OutgoingMessage)
+            buttons = response.reply_markup()["inline_keyboard"][0]
+            self.assertEqual(buttons[0]["callback_data"], "command:/code owner/repo#12")
+            self.assertEqual(buttons[1]["url"], "https://github.com/owner/repo/issues/12")
 
     def test_issue_draft_round_trip_with_attachment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

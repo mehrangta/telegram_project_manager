@@ -5,7 +5,10 @@ import asyncio
 import logging
 from pathlib import Path
 
+from telegram_project_manager.bots.ask_manager.commands import AskManager
+from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.commit_manager.commands import CommitManager
+from telegram_project_manager.bots.commit_manager.repository_setup import RepositorySetupService
 from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter
 from telegram_project_manager.bots.code_manager.commands import CodeManager
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
@@ -113,29 +116,45 @@ async def run_bot(db: Database) -> None:
     bot = TelegramBotApi(bot_token)
     commit_executor = GhCommitExecutor(gh)
     repositories = LocalRepositoryService()
+    repository_setup = RepositorySetupService(
+        db=db,
+        gh=gh,
+        repositories=repositories,
+        bot=bot,
+    )
     commit_manager = CommitManager(
         db=db,
         llm=llm,
         gh=gh,
         executor=commit_executor,
         repositories=repositories,
+        repository_setup=repository_setup,
     )
     issue_planner = IssuePlanner(db, llm, RepositoryContextService(repositories))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))
     issue_manager = IssueManager(db, issue_planner, issue_execution)
     code_github = CodeGitHubService(gh)
     code_reporter = CodeProgressReporter(db, bot)
+    codex = CodexSdkAdapter(
+        lambda: db.get_secret("codex_api_key"),
+        lambda: db.get_setting("codex_base_url", ""),
+        lambda role: resolve_codex_model(db.get_setting, role),
+    )
+    workspaces = GitWorkspaceService(repositories=repositories)
     code_service = CodeJobService(
         db=db,
-        codex=CodexSdkAdapter(
-            lambda: db.get_secret("codex_api_key"),
-            lambda: db.get_setting("codex_base_url", ""),
-            lambda role: resolve_codex_model(db.get_setting, role),
-        ),
-        workspaces=GitWorkspaceService(repositories=repositories),
+        codex=codex,
+        workspaces=workspaces,
         github=code_github,
         reporter=code_reporter,
     )
+    ask_service = AskService(
+        db=db,
+        codex=codex,
+        workspaces=workspaces,
+        bot=bot,
+    )
+    ask_manager = AskManager(db=db, service=ask_service)
     code_manager = CodeManager(
         db=db,
         service=code_service,
@@ -150,12 +169,14 @@ async def run_bot(db: Database) -> None:
     pull_request_manager = PullRequestManager(db=db, service=deployment_service)
     router = TelegramRouter(
         db=db,
-        handlers=[issue_manager, code_manager, pull_request_manager, commit_manager],
+        handlers=[ask_manager, issue_manager, code_manager, pull_request_manager, commit_manager],
     )
     await code_service.recover()
     await deployment_service.recover()
     try:
         await run_polling(bot, router)
     finally:
+        await repository_setup.shutdown()
+        await ask_service.shutdown()
         await deployment_service.shutdown()
         await code_service.shutdown()

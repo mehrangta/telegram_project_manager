@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest import mock
 
 from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
 from telegram_project_manager.platform.telegram_bot import (
@@ -8,6 +9,7 @@ from telegram_project_manager.platform.telegram_bot import (
     incoming_message_from_update,
     incoming_message_from_updates,
     run_polling,
+    TelegramBotApiError,
 )
 
 
@@ -31,6 +33,7 @@ class TelegramBotTests(unittest.TestCase):
             parse_mode="HTML",
             reply_markup=markup,
             disable_link_preview=True,
+            reply_to_message_id=7,
         )
         api.edit_message_text(
             1,
@@ -40,13 +43,20 @@ class TelegramBotTests(unittest.TestCase):
             reply_markup={"inline_keyboard": []},
             disable_link_preview=True,
         )
+        api.delete_message(1, 9)
 
         sent = api.calls[0][1]
         edited = api.calls[1][1]
+        deleted = api.calls[2]
         self.assertEqual(sent["parse_mode"], "HTML")
         self.assertEqual(sent["reply_markup"], markup)
         self.assertEqual(sent["link_preview_options"], {"is_disabled": True})
+        self.assertEqual(
+            sent["reply_parameters"],
+            {"message_id": 7, "allow_sending_without_reply": True},
+        )
         self.assertEqual(edited["reply_markup"], {"inline_keyboard": []})
+        self.assertEqual(deleted, ("deleteMessage", {"chat_id": 1, "message_id": 9}))
 
     def test_builds_incoming_message_from_bot_api_update(self):
         incoming = incoming_message_from_update(
@@ -294,6 +304,18 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    @staticmethod
+    def message(update_id, text, user_id=30):
+        return {
+            "update_id": update_id,
+            "message": {
+                "message_id": 100 + update_id,
+                "from": {"id": user_id, "username": "admin"},
+                "chat": {"id": 40, "type": "supergroup"},
+                "text": text,
+            },
+        }
+
     async def test_action_button_dispatches_existing_command(self):
         bot = self.Bot([
             self.callback(1, "query-1", "command:/code rebase c-abcdef12")
@@ -328,6 +350,25 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             [(40, 21, {"inline_keyboard": []})],
         )
 
+    async def test_merge_button_prompts_then_confirm_dispatches(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "confirm_merge:c-abcdef12"),
+            self.callback(2, "query-2", "command:/merge c-abcdef12", message_id=21),
+        ])
+        router = self.Router()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/merge c-abcdef12"])
+        self.assertIn("It will not deploy", bot.sent[0][1])
+        confirmation_markup = bot.sent[0][3]["reply_markup"]
+        self.assertEqual(
+            confirmation_markup["inline_keyboard"][0][0]["callback_data"],
+            "command:/merge c-abcdef12",
+        )
+        self.assertEqual(bot.markup_edits, [(40, 21, {"inline_keyboard": []})])
+
     async def test_non_admin_callback_is_silently_ignored(self):
         bot = self.Bot([
             self.callback(1, "query-1", "command:/status", user_id=99),
@@ -342,6 +383,61 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.answers, [])
         self.assertEqual(bot.sent, [])
         self.assertEqual(bot.markup_edits, [])
+
+    async def test_expired_callback_ack_does_not_block_command_or_next_update(self):
+        class ExpiredCallbackBot(self.Bot):
+            def answer_callback_query(self, query_id, text=""):
+                raise TelegramBotApiError("query is too old")
+
+        bot = ExpiredCallbackBot([
+            self.callback(1, "query-1", "command:/status"),
+            self.message(2, "/repo show"),
+        ])
+        router = self.Router()
+
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/status", "/repo show"])
+        self.assertEqual(len(bot.sent), 2)
+        self.assertTrue(any("callback acknowledgement failed" in line for line in logs.output))
+
+    async def test_polling_failure_retries_after_one_second(self):
+        class FailingPollingBot(self.Bot):
+            def get_updates(self, offset=None):
+                self.polls += 1
+                if self.polls == 1:
+                    raise TelegramBotApiError("read timed out")
+                raise asyncio.CancelledError()
+
+        bot = FailingPollingBot([])
+        router = self.Router()
+
+        with mock.patch(
+            "telegram_project_manager.platform.telegram_bot.asyncio.sleep",
+            new=mock.AsyncMock(),
+        ) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_polling(bot, router)
+
+        sleep.assert_awaited_once_with(1)
+
+    async def test_slow_command_logs_update_id_and_command_only(self):
+        bot = self.Bot([self.message(7, "/repo show private details")])
+        router = self.Router()
+
+        with mock.patch(
+            "telegram_project_manager.platform.telegram_bot.monotonic",
+            side_effect=[10.0, 12.1],
+        ):
+            with self.assertLogs(level="WARNING") as logs:
+                with self.assertRaises(asyncio.CancelledError):
+                    await run_polling(bot, router)
+
+        warning = "\n".join(logs.output)
+        self.assertIn("update_id=7 command=/repo elapsed=2.10s", warning)
+        self.assertNotIn("private details", warning)
 
 
 if __name__ == "__main__":

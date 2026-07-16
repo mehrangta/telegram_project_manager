@@ -24,11 +24,11 @@ def check(bucket="pass", state="success"):
     return PullRequestCheck("CI", state, bucket, "", "CI", "")
 
 
-def pr(*, state="OPEN", head="checked-sha", merge_sha="", checks=(check(),)):
+def pr(*, state="OPEN", head="checked-sha", base="main", merge_sha="", checks=(check(),)):
     return PullRequestSnapshot(
         state=state,
         is_draft=False,
-        base_branch="main",
+        base_branch=base,
         head_sha=head,
         mergeable="MERGEABLE",
         merge_state_status="CLEAN",
@@ -69,12 +69,16 @@ class FakeReporter:
     def __init__(self):
         self.refreshed = []
         self.notified = []
+        self.merge_notified = []
 
     async def refresh(self, job_id, force=False):
         self.refreshed.append((job_id, force))
 
     async def notify_deployment(self, job_id):
         self.notified.append(job_id)
+
+    async def notify_merge(self, job_id):
+        self.merge_notified.append(job_id)
 
 
 async def wait_for_deployment(db, job_id, expected):
@@ -93,6 +97,7 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.db.initialize()
         self.db.allow_repo("owner/repo", 1)
         self.db.set_repo_deploy_workflow("owner/repo", "deploy.yml")
+        self.db.set_repo_deploy_enabled("owner/repo", True)
         self.db.create_code_job(
             {
                 "id": "c-abcdef12",
@@ -162,6 +167,83 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.reporter.notified, ["c-abcdef12"])
 
+    async def test_merge_only_accepts_checked_non_main_base_without_deploy_config(self):
+        self.db.set_repo_deploy_enabled("owner/repo", False)
+        self.db.set_repo_deploy_workflow("owner/repo", None)
+        self.db.update_code_job("c-abcdef12", {"deployment_status": None})
+        with self.db.session() as conn:
+            conn.execute(
+                "UPDATE code_jobs SET base_branch = 'develop' WHERE id = 'c-abcdef12'"
+            )
+        self.github.prs = [
+            pr(base="develop"),
+            pr(state="MERGED", base="develop", merge_sha="merge-sha"),
+        ]
+
+        response = await self.service.start_merge("c-abcdef12")
+        self.assertIn("Merge queued", response)
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(merged["deployment_mode"], "merge")
+        self.assertEqual(merged["deployment_merge_sha"], "merge-sha")
+        self.assertEqual(self.github.dispatches, [])
+        self.assertEqual(self.reporter.merge_notified, ["c-abcdef12"])
+
+    async def test_deploy_after_merge_only_dispatches_without_remerging(self):
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "deployment_mode": "merge",
+                "deployment_status": "merged",
+                "deployment_merge_sha": "existing-merge-sha",
+            },
+        )
+        self.github.merges.clear()
+
+        response = await self.service.start_deploy("c-abcdef12")
+        self.assertIn("queued", response)
+        deployed = await wait_for_deployment(self.db, "c-abcdef12", "succeeded")
+
+        self.assertEqual(deployed["deployment_mode"], "deploy")
+        self.assertEqual(self.github.merges, [])
+        self.assertEqual(
+            self.github.dispatches,
+            [{"repo": "owner/repo", "workflow": "deploy.yml", "commit_sha": "existing-merge-sha"}],
+        )
+
+    async def test_deploy_rejects_non_main_job_even_after_merge(self):
+        with self.db.session() as conn:
+            conn.execute(
+                """
+                UPDATE code_jobs SET base_branch = 'develop', deployment_mode = 'merge',
+                    deployment_status = 'merged', deployment_merge_sha = 'merge-sha'
+                WHERE id = 'c-abcdef12'
+                """
+            )
+        with self.assertRaisesRegex(DeploymentError, "targeting main"):
+            await self.service.start_deploy("c-abcdef12")
+
+    async def test_deploy_cannot_replace_active_merge_only_operation(self):
+        self.db.update_code_job(
+            "c-abcdef12",
+            {"deployment_mode": "merge", "deployment_status": "merging"},
+        )
+        with self.assertRaisesRegex(DeploymentError, "merge-only operation"):
+            await self.service.start_deploy("c-abcdef12")
+
+    async def test_recovery_finishes_merge_only_without_deploying(self):
+        self.db.update_code_job(
+            "c-abcdef12",
+            {"deployment_mode": "merge", "deployment_status": "merging"},
+        )
+        self.github.prs = [pr(state="MERGED", merge_sha="merge-sha")]
+
+        await self.service.recover()
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(merged["deployment_merge_sha"], "merge-sha")
+        self.assertEqual(self.github.dispatches, [])
+
     async def test_changed_head_fails_without_merging(self):
         self.github.prs = [pr(head="new-sha")]
         await self.service.start("c-abcdef12")
@@ -169,9 +251,25 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("head changed", failed["deployment_error"])
         self.assertEqual(self.github.merges, [])
 
+    async def test_already_merged_pr_still_requires_checked_head_identity(self):
+        self.github.prs = [
+            pr(state="MERGED", head="new-sha", merge_sha="untrusted-merge-sha")
+        ]
+        await self.service.start_merge("c-abcdef12")
+        failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
+
+        self.assertIn("head changed", failed["deployment_error"])
+        self.assertIsNone(failed["deployment_merge_sha"])
+
     async def test_missing_workflow_refuses_to_start(self):
         self.db.set_repo_deploy_workflow("owner/repo", None)
         with self.assertRaises(DeploymentError):
+            await self.service.start("c-abcdef12")
+        self.assertIsNone(self.db.get_code_job("c-abcdef12")["deployment_status"])
+
+    async def test_disabled_repo_refuses_to_start(self):
+        self.db.set_repo_deploy_enabled("owner/repo", False)
+        with self.assertRaisesRegex(DeploymentError, "disabled"):
             await self.service.start("c-abcdef12")
         self.assertIsNone(self.db.get_code_job("c-abcdef12")["deployment_status"])
 
@@ -231,7 +329,7 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_command_requires_admin_and_same_chat(self):
+    async def test_command_requires_admin_and_same_chat_and_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
             db.initialize()
@@ -247,8 +345,11 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
             )
 
             class Service:
-                async def start(self, job_id):
-                    return f"started {job_id}"
+                async def start_deploy(self, job_id):
+                    return f"deployed {job_id}"
+
+                async def start_merge(self, job_id):
+                    return f"merged {job_id}"
 
             manager = PullRequestManager(db=db, service=Service())
             unauthorized = await manager.handle(IncomingMessage(10, 99, "user", "/deploy c-abcdef12"))
@@ -256,8 +357,14 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
             db.upsert_user(99, "admin", "admin")
             wrong_chat = await manager.handle(IncomingMessage(11, 99, "admin", "/deploy c-abcdef12"))
             self.assertIn("different chat", wrong_chat)
+            wrong_topic = await manager.handle(
+                IncomingMessage(10, 99, "admin", "/deploy c-abcdef12", thread_id=30)
+            )
+            self.assertIn("different topic", wrong_topic)
             started = await manager.handle(IncomingMessage(10, 99, "admin", "/deploy c-abcdef12"))
-            self.assertEqual(started, "started c-abcdef12")
+            merged = await manager.handle(IncomingMessage(10, 99, "admin", "/merge c-abcdef12"))
+            self.assertEqual(started, "deployed c-abcdef12")
+            self.assertEqual(merged, "merged c-abcdef12")
 
     async def test_command_uses_replied_code_job_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -276,8 +383,11 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
             )
 
             class Service:
-                async def start(self, job_id):
+                async def start_deploy(self, job_id):
                     return f"started {job_id}"
+
+                async def start_merge(self, job_id):
+                    return f"merged {job_id}"
 
             manager = PullRequestManager(db=db, service=Service())
             message = IncomingMessage(
@@ -288,6 +398,11 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 reply_to_code_job_id="c-abcdef12",
             )
             self.assertEqual(await manager.handle(message), "started c-abcdef12")
+
+            merge_message = IncomingMessage(
+                10, 99, "admin", "/merge", reply_to_code_job_id="c-abcdef12"
+            )
+            self.assertEqual(await manager.handle(merge_message), "merged c-abcdef12")
 
 
 class DeploymentGitHubAdapterTests(unittest.TestCase):

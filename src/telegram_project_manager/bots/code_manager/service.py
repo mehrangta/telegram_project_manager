@@ -21,6 +21,7 @@ from telegram_project_manager.bots.code_manager.prompts import (
     planning_prompt,
     rebase_conflict_prompt,
     validation_recovery_prompt,
+    workflow_reference_recovery_prompt,
 )
 from telegram_project_manager.bots.code_manager.schemas import (
     CODE_PLAN_SCHEMA,
@@ -43,11 +44,13 @@ from telegram_project_manager.platform.storage.db import Database
 
 PLAN_PATH_TEMPLATE = ".codex/plans/{job_id}.md"
 MAX_QUEUED_JOBS = 10
-PLAN_TIMEOUT_SECONDS = 15 * 60
-CODE_TIMEOUT_SECONDS = 45 * 60
+PLAN_TIMEOUT_SECONDS = 2 * 60 * 60
+CODE_TIMEOUT_SECONDS = 2 * 60 * 60
 CHECK_POLL_SECONDS = 10
 CHECK_GRACE_SECONDS = 60
 CHECK_TIMEOUT_SECONDS = 30 * 60
+PLAN_FEEDBACK_POLL_SECONDS = 30
+PLAN_QUESTION_MARKER = "<!-- telegram-plan-questions:"
 MAX_CI_REPAIR_ATTEMPTS = 2
 MAX_VALIDATION_RECOVERY_ATTEMPTS = 2
 MAX_REBASE_CONFLICT_ROUNDS = 20
@@ -61,6 +64,7 @@ ACTIVE_STATUSES = {
     "preparing",
     "planning",
     "editing_plan",
+    "awaiting_clarification",
     "awaiting_approval",
     "coding",
     "validating",
@@ -87,6 +91,7 @@ class CodeJobService:
         check_grace_seconds: float = CHECK_GRACE_SECONDS,
         check_timeout_seconds: float = CHECK_TIMEOUT_SECONDS,
         max_ci_repair_attempts: int = MAX_CI_REPAIR_ATTEMPTS,
+        feedback_poll_seconds: float = PLAN_FEEDBACK_POLL_SECONDS,
     ) -> None:
         self.db = db
         self.codex = codex
@@ -97,8 +102,11 @@ class CodeJobService:
         self.check_grace_seconds = check_grace_seconds
         self.check_timeout_seconds = check_timeout_seconds
         self.max_ci_repair_attempts = max_ci_repair_attempts
+        self.feedback_poll_seconds = feedback_poll_seconds
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._feedback_task: asyncio.Task[None] | None = None
+        self._github_login = ""
 
     async def recover(self) -> None:
         self.db.mark_running_code_jobs_interrupted()
@@ -109,12 +117,35 @@ class CodeJobService:
             }:
                 self._schedule(str(job["id"]), str(job["resume_phase"]))
             elif job["status"] == "interrupted":
+                if (
+                    str(job.get("resume_phase") or "") == "plan"
+                    and self.db.list_pending_code_plan_feedback(str(job["id"]))
+                    and self.db.update_code_job(
+                        str(job["id"]),
+                        {
+                            "status": "queued_plan_edit",
+                            "error": None,
+                            "latest_activity": "Resuming pending plan feedback",
+                        },
+                        allowed_statuses=("interrupted",),
+                    )
+                ):
+                    self._schedule(str(job["id"]), "plan")
+                    continue
                 try:
                     await self.reporter.refresh(str(job["id"]), force=True)
                 except Exception:
                     logging.exception("Failed to refresh interrupted code job %s", job["id"])
+        if not self._feedback_task or self._feedback_task.done():
+            self._feedback_task = asyncio.create_task(
+                self._monitor_plan_feedback(), name="github-plan-feedback"
+            )
 
     async def shutdown(self) -> None:
+        if self._feedback_task:
+            self._feedback_task.cancel()
+            await asyncio.gather(self._feedback_task, return_exceptions=True)
+            self._feedback_task = None
         for task in self._tasks.values():
             task.cancel()
         if self._tasks:
@@ -178,6 +209,9 @@ class CodeJobService:
         return job_id
 
     async def approve(self, job_id: str) -> None:
+        job = self._require_job(job_id)
+        if job["status"] == "awaiting_clarification":
+            raise ValueError("Answer the plan's open questions before approval.")
         changed = self.db.update_code_job(
             job_id,
             {"status": "queued_code", "resume_phase": "code", "error": None},
@@ -186,32 +220,42 @@ class CodeJobService:
         if not changed:
             raise ValueError("Code job is not awaiting approval.")
         self.db.audit("code.approve", "ok", {}, job_id)
+        await self.reporter.dismiss_plan_ready(job_id)
         await self.reporter.refresh(job_id, force=True)
         self._schedule(job_id, "code")
 
-    async def edit_plan(self, job_id: str, feedback: str) -> None:
+    async def edit_plan(
+        self,
+        job_id: str,
+        feedback: str,
+        *,
+        source: str = "telegram",
+        source_id: str | None = None,
+        author: str = "",
+    ) -> None:
         if not feedback.strip():
             raise ValueError("Plan feedback is required.")
-        job = self._require_job(job_id)
-        if job["status"] != "awaiting_approval":
-            raise ValueError("Code job is not awaiting plan feedback.")
-        feedback_items = [str(item) for item in job.get("feedback_json") or []]
-        feedback_items.append(feedback.strip())
-        changed = self.db.update_code_job(
+        result = self.db.add_code_plan_feedback(
             job_id,
-            {
-                "status": "queued_plan_edit",
-                "resume_phase": "plan",
-                "feedback_json": feedback_items,
-                "error": None,
-            },
-            allowed_statuses=("awaiting_approval",),
+            source=source,
+            source_id=source_id or f"manual:{uuid.uuid4().hex}",
+            author=author,
+            body=feedback,
         )
-        if not changed:
-            raise ValueError("Code job plan changed concurrently; retry your feedback.")
-        self.db.audit("code.plan.edit", "queued", {"revision": int(job["plan_revision"]) + 1}, job_id)
+        if result == "duplicate":
+            await self.reporter.dismiss_plan_ready(job_id)
+            return
+        job = self._require_job(job_id)
+        self.db.audit(
+            "code.plan.edit",
+            result,
+            {"source": source, "next_revision": int(job["plan_revision"]) + 1},
+            job_id,
+        )
+        await self.reporter.dismiss_plan_ready(job_id)
         await self.reporter.refresh(job_id, force=True)
-        self._schedule(job_id, "plan")
+        if result == "queued":
+            self._schedule(job_id, "plan")
 
     async def retry(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -308,6 +352,7 @@ class CodeJobService:
         job = self._require_job(job_id)
         if job["status"] in TERMINAL_STATUSES:
             if job["status"] == "discarded":
+                await self.reporter.dismiss_plan_ready(job_id)
                 return
             raise ValueError("A ready code job cannot be discarded by the bot.")
         self.db.update_code_job(
@@ -329,6 +374,7 @@ class CodeJobService:
             target_branch=str(job["target_branch"]),
         )
         self.db.audit("code.discard", "ok", {}, job_id)
+        await self.reporter.dismiss_plan_ready(job_id)
         await self.reporter.refresh(job_id, force=True)
 
     def status(self, job_id: str) -> dict[str, Any]:
@@ -469,6 +515,60 @@ class CodeJobService:
                 current_prompt = validation_recovery_prompt(raw, str(exc), attempt)
         raise AssertionError("validation recovery loop exhausted unexpectedly")
 
+    async def _validate_code_result_changes(
+        self,
+        *,
+        job: dict[str, Any],
+        path: Path,
+        result: CodeResult,
+        plan_path: str,
+        allowed_workflows: tuple[str, ...],
+    ) -> tuple[CodeResult, list[str]]:
+        current_result = result
+        for recovery_attempt in range(MAX_VALIDATION_RECOVERY_ATTEMPTS + 1):
+            files = await asyncio.to_thread(
+                self.workspaces.validate_code_changes,
+                path=path,
+                plan_path=plan_path,
+                allowed_workflow_paths=allowed_workflows,
+            )
+            try:
+                await asyncio.to_thread(
+                    self.github.validate_workflow_action_refs,
+                    path=path,
+                    files=files,
+                )
+                return current_result, files
+            except WorkspaceError as exc:
+                if (
+                    not str(exc).startswith("GitHub Action references do not exist:")
+                    or recovery_attempt >= MAX_VALIDATION_RECOVERY_ATTEMPTS
+                ):
+                    raise
+                attempt = recovery_attempt + 1
+                await self.reporter.activity(
+                    str(job["id"]),
+                    {
+                        "kind": "phase",
+                        "text": (
+                            "Codex is correcting invalid Action references "
+                            f"({attempt}/{MAX_VALIDATION_RECOVERY_ATTEMPTS})"
+                        ),
+                    },
+                    force=True,
+                )
+                current_job = self._require_job(str(job["id"]))
+                async with self._semaphore:
+                    current_result = await self._run_code_result_turn(
+                        job=current_job,
+                        path=path,
+                        prompt=workflow_reference_recovery_prompt(
+                            str(exc), attempt, allowed_workflows
+                        ),
+                        effort=ReasoningEffort.medium,
+                    )
+        raise AssertionError("workflow reference recovery loop exhausted unexpectedly")
+
     async def _run_rebase(self, job_id: str) -> None:
         job = self._require_job(job_id)
         if not self.db.update_code_job(
@@ -597,6 +697,8 @@ class CodeJobService:
             {"status": "editing_plan" if editing else "planning", "latest_activity": "Codex is inspecting the repository"},
         )
         await self.reporter.refresh(job_id, force=True)
+        pending_feedback = self.db.list_pending_code_plan_feedback(job_id)
+        pending_feedback_ids = [int(item["id"]) for item in pending_feedback]
         job = self._require_job(job_id)
         issue = dict(job["issue_context_json"])
         feedback = [str(item) for item in job.get("feedback_json") or []]
@@ -639,8 +741,10 @@ class CodeJobService:
         values: dict[str, Any] = {
             "plan_json": plan.to_json(),
             "plan_revision": revision,
-            "status": "awaiting_approval",
-            "latest_activity": "Plan ready for approval",
+            "status": "awaiting_clarification" if plan.questions else "awaiting_approval",
+            "latest_activity": (
+                "Plan needs clarification" if plan.questions else "Plan ready for approval"
+            ),
             "error": None,
         }
         if editing:
@@ -667,8 +771,13 @@ class CodeJobService:
                 }
             )
         self.db.update_code_job(job_id, values)
+        self.db.mark_code_plan_feedback_applied(job_id, pending_feedback_ids, revision)
         self.db.audit("code.plan", "ok", {"revision": revision}, job_id)
+        await self._publish_plan_questions(job_id)
+        await self._report_plan_ready(job_id)
         await self.reporter.refresh(job_id, force=True)
+        if self.db.queue_pending_code_plan_feedback(job_id):
+            self._schedule(job_id, "plan")
 
     async def _run_code(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -711,6 +820,7 @@ class CodeJobService:
         await self.reporter.refresh(job_id, force=True)
         job = self._require_job(job_id)
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
+        allowed_workflows = _planned_workflow_paths(plan)
         plan_path = PLAN_PATH_TEMPLATE.format(job_id=job_id)
         result = await self._run_code_result_turn(
             job=job,
@@ -727,7 +837,13 @@ class CodeJobService:
             return
         self.db.update_code_job(job_id, {"status": "validating", "latest_activity": "Validating Codex changes"})
         await self.reporter.refresh(job_id, force=True)
-        files = await asyncio.to_thread(self.workspaces.validate_code_changes, path=path, plan_path=plan_path)
+        result, files = await self._validate_code_result_changes(
+            job=job,
+            path=path,
+            result=result,
+            plan_path=plan_path,
+            allowed_workflows=allowed_workflows,
+        )
         self.db.update_code_job(job_id, {"status": "pushing", "latest_activity": "Committing and pushing implementation"})
         await self.reporter.refresh(job_id, force=True)
         sha = await asyncio.to_thread(
@@ -908,22 +1024,38 @@ class CodeJobService:
         )
         implementation = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
         plan = dict(job["plan_json"]) if isinstance(job.get("plan_json"), dict) else None
+        allowed_workflows = _planned_workflow_paths(plan)
         async with self._semaphore:
             result = await self._run_code_result_turn(
                 job=job,
                 path=path,
                 prompt=ci_repair_prompt(
-                    dict(job["issue_context_json"]), plan, implementation, diagnostics, attempt
+                    dict(job["issue_context_json"]),
+                    plan,
+                    implementation,
+                    diagnostics,
+                    attempt,
+                    allowed_workflows,
                 ),
                 effort=ReasoningEffort.medium,
             )
         if self._discarded(job_id):
             return
-        files = await asyncio.to_thread(
-            self.workspaces.validate_code_changes,
-            path=path,
-            plan_path=PLAN_PATH_TEMPLATE.format(job_id=job_id),
-        )
+        try:
+            result, files = await self._validate_code_result_changes(
+                job=job,
+                path=path,
+                result=result,
+                plan_path=PLAN_PATH_TEMPLATE.format(job_id=job_id),
+                allowed_workflows=allowed_workflows,
+            )
+        except WorkspaceError as exc:
+            if str(exc) != "Codex produced no implementation changes":
+                raise
+            summary = diagnostics.strip()[:2000] or "No CI diagnostics were available."
+            raise WorkspaceError(
+                "Codex made no CI repair changes. Original CI failure:\n" + summary
+            ) from exc
         sha = await asyncio.to_thread(
             self.workspaces.commit_code,
             path=path,
@@ -1059,6 +1191,105 @@ class CodeJobService:
         except Exception:
             logging.exception("Failed to send terminal code job alert: %s", job_id)
 
+    async def _publish_plan_questions(self, job_id: str) -> None:
+        job = self.db.get_code_job(job_id)
+        if not job or not job.get("pull_request_number"):
+            return
+        try:
+            body = _plan_questions_comment(job)
+            comment_id = await asyncio.to_thread(
+                self.github.publish_plan_questions,
+                repo=str(job["repo"]),
+                number=int(job["pull_request_number"]),
+                body=body,
+                comment_id=(
+                    int(job["github_plan_question_comment_id"])
+                    if job.get("github_plan_question_comment_id")
+                    else None
+                ),
+            )
+            self.db.update_code_job(
+                job_id,
+                {
+                    "github_plan_question_comment_id": comment_id,
+                    "github_plan_question_revision": int(job.get("plan_revision") or 0),
+                },
+            )
+        except Exception:
+            logging.exception("Failed to publish plan questions on GitHub: %s", job_id)
+
+    async def _monitor_plan_feedback(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(max(0.1, self.feedback_poll_seconds))
+                await self.poll_plan_feedback_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("GitHub plan feedback polling failed")
+
+    async def poll_plan_feedback_once(self) -> None:
+        if not self._github_login:
+            self._github_login = await asyncio.to_thread(
+                self.github.get_authenticated_login
+            )
+        for job in self.db.list_plan_feedback_jobs():
+            if int(job.get("github_plan_question_revision") or 0) < int(
+                job.get("plan_revision") or 0
+            ):
+                await self._publish_plan_questions(str(job["id"]))
+                job = self._require_job(str(job["id"]))
+            comments = await asyncio.to_thread(
+                self.github.list_pr_comments,
+                repo=str(job["repo"]),
+                number=int(job["pull_request_number"]),
+                after_id=int(job.get("github_plan_comment_cursor") or 0),
+            )
+            cursor = int(job.get("github_plan_comment_cursor") or 0)
+            queued = False
+            for comment in comments:
+                comment_id = int(comment["id"])
+                cursor = max(cursor, comment_id)
+                body = str(comment.get("body") or "").strip()
+                user = comment.get("user")
+                login = str(user.get("login") or "") if isinstance(user, dict) else ""
+                if (
+                    not body
+                    or PLAN_QUESTION_MARKER in body
+                    or login.lower() != self._github_login.lower()
+                ):
+                    continue
+                result = self.db.add_code_plan_feedback(
+                    str(job["id"]),
+                    source="github",
+                    source_id=str(comment_id),
+                    author=login,
+                    body=body,
+                )
+                if result == "queued":
+                    queued = True
+                if result != "duplicate":
+                    self.db.audit(
+                        "code.plan.feedback",
+                        result,
+                        {"source": "github", "comment_id": comment_id, "author": login},
+                        str(job["id"]),
+                    )
+            if cursor != int(job.get("github_plan_comment_cursor") or 0):
+                self.db.update_code_job(
+                    str(job["id"]), {"github_plan_comment_cursor": cursor}
+                )
+            if queued:
+                await self.reporter.dismiss_plan_ready(str(job["id"]))
+                await self.reporter.refresh(str(job["id"]), force=True)
+                self._schedule(str(job["id"]), "plan")
+
+    async def _report_plan_ready(self, job_id: str) -> None:
+        try:
+            await self.reporter.notify_plan_ready(job_id)
+        except Exception:
+            logging.exception("Failed to send plan-ready code job alert: %s", job_id)
+
     async def _store_thread(self, job_id: str, thread_id: str) -> None:
         self.db.update_code_job(job_id, {"codex_thread_id": thread_id})
 
@@ -1075,7 +1306,9 @@ class CodeJobService:
     def _ensure_source(self, job: dict[str, Any]) -> str:
         source = str(job.get("source_repo_path") or "")
         if not source:
-            chat = self.db.get_chat_settings(int(job["telegram_chat_id"]))
+            chat = self.db.get_scope_settings(
+                int(job["telegram_chat_id"]), job.get("telegram_thread_id")
+            )
             source = str(chat.get("local_repo_path") or "")
         resolved = self.workspaces.validate_source(source_path=source, repo=str(job["repo"]))
         if resolved != job.get("source_repo_path"):
@@ -1095,6 +1328,33 @@ def _plan_pr_body(job: dict[str, Any], markdown: str) -> str:
             f"<!-- telegram-code-job:{job['id']} -->",
         ]
     )
+
+
+def _plan_questions_comment(job: dict[str, Any]) -> str:
+    revision = int(job.get("plan_revision") or 1)
+    plan_raw = job.get("plan_json")
+    plan = CodePlan.from_json(dict(plan_raw)) if isinstance(plan_raw, dict) else None
+    lines = [f"## Plan revision {revision}"]
+    if plan and plan.questions:
+        lines.extend(
+            [
+                "",
+                "The plan needs your answers before it can be approved.",
+                "Reply with one comment covering the numbered questions:",
+                "",
+            ]
+        )
+        for index, question in enumerate(plan.questions, 1):
+            lines.extend(question.render(index))
+    else:
+        lines.extend(
+            [
+                "",
+                "All material questions are resolved. The plan is decision-complete and ready for approval.",
+            ]
+        )
+    lines.extend(["", f"{PLAN_QUESTION_MARKER}{job['id']}:{revision} -->"])
+    return "\n".join(lines)
 
 
 def _ready_pr_body(job: dict[str, Any], result: CodeResult, files: list[str], sha: str) -> str:
@@ -1129,6 +1389,27 @@ def _ready_pr_body(job: dict[str, Any], result: CodeResult, files: list[str], sh
         ]
     )
     return "\n".join(lines)
+
+
+def _planned_workflow_paths(plan: dict[str, Any] | None) -> tuple[str, ...]:
+    if not plan:
+        return ()
+    paths: set[str] = set()
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return ()
+    for step in steps:
+        if not isinstance(step, dict) or not isinstance(step.get("files"), list):
+            continue
+        for raw in step["files"]:
+            path = str(raw).strip().replace("\\", "/").removeprefix("./")
+            if (
+                path.startswith(".github/workflows/")
+                and path.count("/") == 2
+                and ".." not in path.split("/")
+            ):
+                paths.add(path)
+    return tuple(sorted(paths))
 
 
 def _check_failure_message(prefix: str, checks: tuple[PullRequestCheck, ...]) -> str:

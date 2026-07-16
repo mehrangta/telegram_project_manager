@@ -55,13 +55,17 @@ Commands marked admin require a registered Telegram admin.
 /start | /help | help                         Show help
 /status                                       Show service and GitHub status
 /repos                                        List allowed repositories
-/repo show                                    Show chat repository settings
+/repo show                                    Show saved repository settings
+/repo check                                   Validate the configured Git cache
 /repo allow owner/repository                  Allow repository (admin)
 /repo disallow owner/repository               Disallow repository (admin)
 /repo set owner/repository                    Set active repository (admin)
+/repo setup owner/repository                  Download and configure repository (admin)
 /repo clear                                   Clear active repository (admin)
 /repo local set <absolute-path>               Set managed Git cache (admin)
 /repo local clear                             Clear managed Git cache (admin)
+/repo deploy enable owner/repository          Enable manual deploy (admin)
+/repo deploy disable owner/repository         Disable manual deploy (admin)
 /repo deploy set owner/repository deploy.yml  Set deployment workflow (admin)
 /repo deploy clear owner/repository           Clear deployment workflow (admin)
 /branch <branch>                              Set default branch (admin)
@@ -85,20 +89,34 @@ Commands marked admin require a registered Telegram admin.
 /code rebase <c-job_id>                       Rebase and rerun CI
 /code discard <c-job_id>                      Close PR and delete branch
 /code status [c-job_id]                       Show one or recent jobs
+/ask <question>                               Ask Codex about the active repository
+/merge <c-job_id>                             Confirm merge without deployment
 /deploy <c-job_id>                            Confirm merge and deployment
 
 /config show                                  Show redacted configuration
-/memory status | /memory show                 Show chat memory usage
-/memory clear                                 Clear chat memory (admin)
+/memory status | /memory show                 Show current chat/topic memory usage
+/memory clear                                 Clear current chat/topic memory (admin)
 /admin add <telegram_user_id>                 Add admin
 /admin remove <telegram_user_id>              Remove admin
 ~~~
 
 ## Workflows
 
+### Forum topics and repositories
+
+In a Telegram supergroup with Topics enabled, repository settings are scoped
+to the current topic. Each topic must run `/repo set owner/repository`
+explicitly; topic settings do not inherit the group's active repository,
+branch, or managed cache. Commands sent without a `message_thread_id` continue
+to use group-level settings. Plans, drafts, code-job controls, deployments, and
+LLM memory remain bound to the topic where they were created.
+
+The repository allowlist, deploy-enabled flag, and per-repository deployment
+workflow remain global.
+
 ### Issues
 
-/issue uses the chat's active repository and managed cache to build a
+/issue uses the current chat or topic's active repository and managed cache to build a
 repository-aware draft. Reply to the preview with text or images to revise it,
 then confirm it. Drafts expire after one hour.
 
@@ -124,12 +142,44 @@ interrupted for explicit retry or discard. Progress cards show phases, commands,
 files, recent activity, failure timing, and detailed errors without exposing raw
 model reasoning.
 
+Planning follows a repository-first, decision-complete workflow. If Codex finds
+material product choices it cannot resolve from the repository, the draft PR and
+Telegram plan-ready ping show up to three questions with recommended options.
+Approval remains blocked until the questions are resolved. Reply to the Telegram
+ping or comment on the draft PR using the GitHub account authenticated by the
+service; the answer is deduplicated, applied to the committed main plan, and
+published as a new plan revision automatically.
+
+### Repository questions
+
+`/ask <question>` queues an independent, read-only Codex inspection of the
+current chat or topic's active repository and default branch. The bot replies
+immediately with an acknowledgment, refreshes the configured managed cache,
+and then replies to the original command with a concise answer and supporting
+repository paths. Ask sessions are not conversational and are not resumed after
+a service restart.
+
 ### Merge and deployment
 
-/deploy requires confirmation, a ready PR targeting main, and the exact head
-SHA accepted by CI. It honors reviews, branch protection, and merge queues;
+/merge requires confirmation and a ready code job. It revalidates the exact
+checked pull-request head, reviews, checks, mergeability, and configured base
+branch before squash-merging and deleting the source branch. It never starts a
+deployment workflow. Merge-only operations can target any configured base
+branch and resume safely after a bot restart.
+
+/deploy is disabled for every repository by default. An admin enables or
+disables it with \`/repo deploy enable owner/repository\` and \`/repo deploy
+disable owner/repository\`. Enabling it only exposes and permits the manual
+Deploy action; it does not deploy automatically after a push.
+
+When enabled, /deploy requires confirmation, a ready PR targeting main, and
+the exact head SHA accepted by CI. It honors reviews, branch protection, and merge queues;
 squash-merges, deletes the branch, dispatches the configured workflow_dispatch
 workflow at the merge SHA, and monitors it for up to 30 minutes.
+
+If `/merge` already merged a job into main, `/deploy` reuses the stored merge
+SHA and starts the configured workflow without trying to merge again. Jobs
+merged into another base branch remain ineligible for deployment.
 
 The workflow must accept a required ref input. The bot allows two minutes for
 the dispatched run to appear and resumes active deployment monitoring after a
@@ -137,7 +187,7 @@ service restart.
 
 ## Safety
 
-- Repository allowlist and per-chat active repository
+- Repository allowlist and independent per-chat/per-topic repository context
 - Service-owned Git caches with strict origin verification
 - Isolated worktrees and Codex sandboxes
 - No changes to .env files, private keys, or .github/workflows
@@ -147,8 +197,16 @@ service restart.
 
 ## Managed repository cache
 
-The cache must be an absolute, writable normal or bare Git repository whose
-literal origin matches owner/repository. The bot never falls back to cloning.
+Run /repo setup owner/repository to let the bot verify GitHub access, detect
+the default branch, and create or reuse a bare cache under the database
+directory's repos folder. Setup runs in the background and updates the current
+chat or topic only after the cache has been validated and refreshed.
+
+The service account must be authenticated with gh. Existing matching caches are
+reused; an invalid or mismatched destination is never deleted automatically.
+
+For manual setup, the cache must be an absolute, writable normal or bare Git
+repository whose literal origin matches owner/repository.
 
 Example bootstrap from an existing checkout:
 

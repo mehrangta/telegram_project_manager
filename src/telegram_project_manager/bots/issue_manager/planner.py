@@ -23,8 +23,10 @@ from telegram_project_manager.platform.router import IncomingAttachment
 from telegram_project_manager.platform.storage.db import Database
 
 
-def issue_memory_session_id(chat_id: int, repo: str) -> str:
-    return f"issue-manager:{chat_id}:{repo}"
+def issue_memory_session_id(chat_id: int, thread_id: int | None, repo: str) -> str:
+    if thread_id is None:
+        return f"issue-manager:{chat_id}:{repo}"
+    return f"issue-manager:{chat_id}:{thread_id}:{repo}"
 
 
 class IssuePlanner:
@@ -48,6 +50,7 @@ class IssuePlanner:
         default_branch: str,
         local_repo_path: str,
         attachments: tuple[IncomingAttachment, ...],
+        thread_id: int | None = None,
     ) -> tuple[str, IssueDraft]:
         if self.db.get_setting("issue_body_llm_enabled", "true") == "false":
             raw = self.llm.chat_json(
@@ -76,7 +79,7 @@ class IssuePlanner:
             raw = self.llm.chat_json(
                 SYSTEM_PROMPT,
                 build_user_prompt(request_text, repo, context.to_prompt()),
-                memory_key=issue_memory_session_id(chat_id, repo),
+                memory_key=issue_memory_session_id(chat_id, thread_id, repo),
                 response_schema=ISSUE_DRAFT_RESPONSE_SCHEMA,
             )
             issue = IssueDraft.from_llm(
@@ -93,9 +96,11 @@ class IssuePlanner:
             {
                 "id": draft_id,
                 "telegram_chat_id": chat_id,
+                "telegram_thread_id": thread_id,
                 "telegram_user_id": user_id,
                 "repo": repo,
                 "default_branch": default_branch,
+                "local_repo_path": local_repo_path,
                 "request_text": request_text,
                 "issue_json": issue.to_json(),
                 "status": "pending",

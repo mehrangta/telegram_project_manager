@@ -12,12 +12,20 @@ class CommitExecutionService:
         self.db = db
         self.executor = executor
 
-    def execute(self, plan_id: str, user_id: int) -> CommitResult:
+    def execute(
+        self,
+        plan_id: str,
+        user_id: int,
+        chat_id: int,
+        thread_id: int | None,
+    ) -> CommitResult:
         record = self.db.get_plan(plan_id)
         if not record:
             raise ValueError("Plan not found.")
         if record["telegram_user_id"] != user_id:
             raise ValueError("Only the requesting user can confirm this plan.")
+        if int(record["telegram_chat_id"]) != chat_id or record.get("telegram_thread_id") != thread_id:
+            raise ValueError("Plan belongs to a different chat or topic.")
         if record["status"] != "pending":
             raise ValueError(f"Plan is not pending. Current status: {record['status']}")
         if int(record["expires_at"]) < int(time.time()):
@@ -38,4 +46,3 @@ class CommitExecutionService:
             plan_id,
         )
         return result
-

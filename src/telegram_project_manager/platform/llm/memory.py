@@ -11,8 +11,10 @@ from telegram_project_manager.platform.storage.db import Database
 DEFAULT_MEMORY_MAX_MESSAGES = 12
 
 
-def memory_session_id(chat_id: int) -> str:
-    return f"commit-manager:{chat_id}"
+def memory_session_id(chat_id: int, thread_id: int | None = None) -> str:
+    if thread_id is None:
+        return f"commit-manager:{chat_id}"
+    return f"commit-manager:{chat_id}:{thread_id}"
 
 
 class SQLiteChatMessageHistory(BaseChatMessageHistory):

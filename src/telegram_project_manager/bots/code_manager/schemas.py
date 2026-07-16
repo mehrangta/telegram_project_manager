@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
+PLAN_STEP_TITLE_MAX_LENGTH = 160
+PLAN_STEP_DETAILS_MAX_LENGTH = 800
+PLAN_QUESTION_MAX_LENGTH = 500
+
+
 CODE_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
@@ -15,8 +20,8 @@ CODE_PLAN_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string"},
-                    "details": {"type": "string"},
+                    "title": {"type": "string", "maxLength": PLAN_STEP_TITLE_MAX_LENGTH},
+                    "details": {"type": "string", "maxLength": PLAN_STEP_DETAILS_MAX_LENGTH},
                     "files": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
                 },
                 "required": ["title", "details", "files"],
@@ -25,7 +30,24 @@ CODE_PLAN_SCHEMA = {
         },
         "tests": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         "risks": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-        "questions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+        "questions": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "maxLength": PLAN_QUESTION_MAX_LENGTH},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 240},
+                        "maxItems": 3,
+                    },
+                    "recommended_option": {"type": "string", "maxLength": 240},
+                },
+                "required": ["prompt", "options", "recommended_option"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["summary", "steps", "tests", "risks", "questions"],
     "additionalProperties": False,
@@ -69,30 +91,61 @@ class PlanStep:
 
 
 @dataclass(frozen=True)
+class PlanQuestion:
+    prompt: str
+    options: tuple[str, ...] = ()
+    recommended_option: str = ""
+
+    def render(self, index: int) -> list[str]:
+        lines = [f"{index}. {self.prompt}"]
+        for option_index, option in enumerate(self.options):
+            label = chr(ord("A") + option_index)
+            suffix = " (recommended)" if option == self.recommended_option else ""
+            lines.append(f"   {label}. {option}{suffix}")
+        return lines
+
+
+@dataclass(frozen=True)
 class CodePlan:
     summary: str
     steps: tuple[PlanStep, ...]
     tests: tuple[str, ...]
     risks: tuple[str, ...]
-    questions: tuple[str, ...]
+    questions: tuple[PlanQuestion, ...]
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "CodePlan":
         steps = tuple(
             PlanStep(
-                title=str(item.get("title") or "").strip(),
-                details=str(item.get("details") or "").strip(),
+                title=str(item.get("title") or "").strip()[:PLAN_STEP_TITLE_MAX_LENGTH],
+                details=str(item.get("details") or "").strip()[:PLAN_STEP_DETAILS_MAX_LENGTH],
                 files=tuple(str(path).strip() for path in item.get("files") or [] if str(path).strip()),
             )
             for item in raw.get("steps") or []
             if isinstance(item, dict)
         )
+        questions = []
+        for item in raw.get("questions") or []:
+            if isinstance(item, str):
+                prompt = item.strip()[:PLAN_QUESTION_MAX_LENGTH]
+                if prompt:
+                    questions.append(PlanQuestion(prompt))
+            elif isinstance(item, dict):
+                prompt = str(item.get("prompt") or "").strip()[:PLAN_QUESTION_MAX_LENGTH]
+                options = tuple(
+                    str(option).strip()[:240]
+                    for option in item.get("options") or []
+                    if str(option).strip()
+                )[:3]
+                recommended = str(item.get("recommended_option") or "").strip()[:240]
+                if prompt:
+                    questions.append(PlanQuestion(prompt, options, recommended))
         plan = cls(
             summary=str(raw.get("summary") or "").strip(),
             steps=steps,
             tests=tuple(str(item).strip() for item in raw.get("tests") or [] if str(item).strip()),
             risks=tuple(str(item).strip() for item in raw.get("risks") or [] if str(item).strip()),
-            questions=tuple(str(item).strip() for item in raw.get("questions") or [] if str(item).strip()),
+            questions=tuple(questions[:3]),
         )
         plan.validate()
         return plan
@@ -105,7 +158,10 @@ class CodePlan:
         for step in self.steps:
             if not step.title or not step.details:
                 raise CodeJobValidationError("every plan step requires a title and details")
-            if len(step.title) > 160 or len(step.details) > 800:
+            if (
+                len(step.title) > PLAN_STEP_TITLE_MAX_LENGTH
+                or len(step.details) > PLAN_STEP_DETAILS_MAX_LENGTH
+            ):
                 raise CodeJobValidationError("plan step is too long")
 
     def to_json(self) -> dict[str, Any]:
@@ -117,7 +173,14 @@ class CodePlan:
             ],
             "tests": list(self.tests),
             "risks": list(self.risks),
-            "questions": list(self.questions),
+            "questions": [
+                {
+                    "prompt": item.prompt,
+                    "options": list(item.options),
+                    "recommended_option": item.recommended_option,
+                }
+                for item in self.questions
+            ],
         }
 
     def to_markdown(self, job_id: str, repo: str, issue_number: int, revision: int) -> str:
@@ -141,7 +204,9 @@ class CodePlan:
         if self.risks:
             lines.extend(["", "## Risks", "", *(f"- {item}" for item in self.risks)])
         if self.questions:
-            lines.extend(["", "## Open questions", "", *(f"- {item}" for item in self.questions)])
+            lines.extend(["", "## Open questions", ""])
+            for index, question in enumerate(self.questions, 1):
+                lines.extend(question.render(index))
         return "\n".join(lines).strip() + "\n"
 
 

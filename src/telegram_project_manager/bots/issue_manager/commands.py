@@ -15,7 +15,13 @@ from telegram_project_manager.integrations.gh.runner import GhError
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextError
 from telegram_project_manager.platform.llm.client import LlmError
 from telegram_project_manager.platform.permissions import PermissionService
-from telegram_project_manager.platform.responses import truncate
+from telegram_project_manager.platform.responses import (
+    OutgoingMessage,
+    callback_button,
+    outgoing_message,
+    truncate,
+    url_button,
+)
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
@@ -34,7 +40,7 @@ class IssueManager:
         self.planner = planner
         self.execution = execution
 
-    async def handle(self, message: IncomingMessage) -> str | None:
+    async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         command, _, rest = message.text.strip().partition(" ")
         command = command.split("@", 1)[0].lower()
         if command == "/issue":
@@ -63,10 +69,11 @@ class IssueManager:
         attachment_error = self._validate_attachments(message)
         if attachment_error:
             return attachment_error
-        chat = self.db.get_chat_settings(message.chat_id)
+        chat = self.db.get_scope_settings(message.chat_id, message.thread_id)
         repo = str(chat.get("active_repo") or "")
         if not repo:
-            return "No active repo for this chat. Admin: /repo set owner/repository"
+            scope = "topic" if message.thread_id is not None else "chat"
+            return f"No active repo for this {scope}. Admin: /repo set owner/repository"
         if not self.db.is_repo_allowed(repo):
             return "Active repo is not in allowed repo list. Admin: /repo allow owner/repository"
         default_branch = str(chat.get("default_branch") or "main")
@@ -74,6 +81,7 @@ class IssueManager:
             draft_id, issue = self.planner.create_draft(
                 request_text=request_text,
                 chat_id=message.chat_id,
+                thread_id=message.thread_id,
                 user_id=message.user_id,
                 repo=repo,
                 default_branch=default_branch,
@@ -137,9 +145,7 @@ class IssueManager:
                     record=record,
                     feedback_history=feedback_history,
                     new_feedback=feedback_text,
-                    local_repo_path=str(
-                        self.db.get_chat_settings(message.chat_id).get("local_repo_path") or ""
-                    ),
+                    local_repo_path=str(record.get("local_repo_path") or ""),
                 )
             else:
                 issue = IssueDraft.from_llm(dict(record["issue_json"]))
@@ -187,16 +193,18 @@ class IssueManager:
             image_count=image_count,
         )
 
-    def confirm(self, message: IncomingMessage, draft_id: str) -> str:
+    def confirm(self, message: IncomingMessage, draft_id: str) -> str | OutgoingMessage:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
         try:
-            result = self.execution.execute(draft_id, message.user_id)
+            result = self.execution.execute(
+                draft_id, message.user_id, message.chat_id, message.thread_id
+            )
         except (ValueError, GhError, TelegramBotApiError) as exc:
             self.db.audit("issue.create", "failed", {"error": str(exc)}, draft_id)
             return f"Issue not created.\nReason: {exc}"
-        return "\n".join(
+        text = "\n".join(
             [
                 "Issue created.",
                 f"Repo: {result.repo}",
@@ -204,6 +212,16 @@ class IssueManager:
                 f"Title: {result.title}",
                 f"Link: {result.url}",
             ]
+        )
+        code_callback = f"command:/code {result.repo}#{result.number}"
+        if len(code_callback.encode("utf-8")) > 64:
+            code_callback = f"command:/code #{result.number}"
+        return outgoing_message(
+            text,
+            keyboard=((
+                callback_button("💻 Code", code_callback),
+                url_button("↗ Issue", result.url),
+            ),),
         )
 
     def cancel(self, message: IncomingMessage, draft_id: str) -> str:
@@ -213,6 +231,11 @@ class IssueManager:
         record = self.db.get_issue_draft(draft_id)
         if not record:
             return "Issue draft not found."
+        if (
+            int(record["telegram_chat_id"]) != message.chat_id
+            or record.get("telegram_thread_id") != message.thread_id
+        ):
+            return "Issue draft belongs to a different chat or topic."
         if record["status"] != "pending":
             return f"Issue draft is not pending. Current status: {record['status']}"
         self.db.update_issue_draft_status(draft_id, "cancelled")
@@ -247,6 +270,8 @@ class IssueManager:
             return "Issue draft not found."
         if int(record["telegram_chat_id"]) != message.chat_id:
             return "Issue draft belongs to a different chat."
+        if record.get("telegram_thread_id") != message.thread_id:
+            return "Issue draft belongs to a different topic."
         if int(record["telegram_user_id"]) != message.user_id:
             return "Only the original author can edit this issue draft."
         if record["status"] != "pending":

@@ -52,6 +52,17 @@ class Database:
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS topic_settings (
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER NOT NULL,
+                    active_repo TEXT,
+                    default_branch TEXT NOT NULL DEFAULT 'main',
+                    local_repo_path TEXT,
+                    updated_by_user_id INTEGER,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (telegram_chat_id, telegram_thread_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
@@ -67,6 +78,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS allowed_repos (
                     repo TEXT PRIMARY KEY,
                     deploy_workflow TEXT,
+                    deploy_enabled INTEGER NOT NULL DEFAULT 0,
                     added_by_user_id INTEGER,
                     created_at INTEGER NOT NULL
                 );
@@ -74,6 +86,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS plans (
                     id TEXT PRIMARY KEY,
                     telegram_chat_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER,
                     telegram_user_id INTEGER NOT NULL,
                     repo TEXT NOT NULL,
                     base_branch TEXT NOT NULL,
@@ -108,9 +121,11 @@ class Database:
                 CREATE TABLE IF NOT EXISTS issue_drafts (
                     id TEXT PRIMARY KEY,
                     telegram_chat_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER,
                     telegram_user_id INTEGER NOT NULL,
                     repo TEXT NOT NULL,
                     default_branch TEXT NOT NULL,
+                    local_repo_path TEXT NOT NULL DEFAULT '',
                     request_text TEXT NOT NULL,
                     issue_json TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -155,6 +170,7 @@ class Database:
                     telegram_user_id INTEGER NOT NULL,
                     telegram_thread_id INTEGER,
                     telegram_message_id INTEGER,
+                    telegram_plan_message_id INTEGER,
                     repo TEXT NOT NULL,
                     issue_number INTEGER NOT NULL,
                     issue_title TEXT NOT NULL,
@@ -174,12 +190,16 @@ class Database:
                     codex_thread_id TEXT,
                     pull_request_number INTEGER,
                     pull_request_url TEXT,
+                    github_plan_question_comment_id INTEGER,
+                    github_plan_question_revision INTEGER NOT NULL DEFAULT 0,
+                    github_plan_comment_cursor INTEGER NOT NULL DEFAULT 0,
                     latest_activity TEXT NOT NULL DEFAULT '',
                     result_json TEXT,
                     ci_head_sha TEXT,
                     ci_wait_started_at INTEGER,
                     ci_repair_attempts INTEGER NOT NULL DEFAULT 0,
                     ci_checks_json TEXT,
+                    deployment_mode TEXT,
                     deployment_status TEXT,
                     deployment_merge_sha TEXT,
                     deployment_run_id INTEGER,
@@ -209,23 +229,64 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_code_job_events_job_id_id
                 ON code_job_events (job_id, id);
+
+                CREATE TABLE IF NOT EXISTS code_plan_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    applied_revision INTEGER,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES code_jobs(id) ON DELETE CASCADE,
+                    UNIQUE(source, source_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_code_plan_feedback_job_state
+                ON code_plan_feedback (job_id, state, id);
                 """
             )
             self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
+            self._ensure_column(conn, "plans", "telegram_thread_id", "INTEGER")
+            self._ensure_column(conn, "issue_drafts", "telegram_thread_id", "INTEGER")
+            self._ensure_column(
+                conn, "issue_drafts", "local_repo_path", "TEXT NOT NULL DEFAULT ''"
+            )
             self._ensure_column(conn, "allowed_repos", "deploy_workflow", "TEXT")
+            self._ensure_column(
+                conn, "allowed_repos", "deploy_enabled", "INTEGER NOT NULL DEFAULT 0"
+            )
             self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
+            self._ensure_column(conn, "code_jobs", "telegram_plan_message_id", "INTEGER")
             self._ensure_column(conn, "code_jobs", "ci_head_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "ci_wait_started_at", "INTEGER")
             self._ensure_column(
                 conn, "code_jobs", "ci_repair_attempts", "INTEGER NOT NULL DEFAULT 0"
             )
             self._ensure_column(conn, "code_jobs", "ci_checks_json", "TEXT")
+            self._ensure_column(conn, "code_jobs", "deployment_mode", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_status", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_merge_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_run_id", "INTEGER")
             self._ensure_column(conn, "code_jobs", "deployment_run_url", "TEXT")
             self._ensure_column(conn, "code_jobs", "deployment_started_at", "INTEGER")
             self._ensure_column(conn, "code_jobs", "deployment_error", "TEXT")
+            self._ensure_column(conn, "code_jobs", "github_plan_question_comment_id", "INTEGER")
+            self._ensure_column(
+                conn, "code_jobs", "github_plan_question_revision", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(
+                conn, "code_jobs", "github_plan_comment_cursor", "INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                """
+                UPDATE code_jobs
+                SET deployment_mode = 'deploy'
+                WHERE deployment_status IS NOT NULL AND deployment_mode IS NULL
+                """
+            )
 
     @staticmethod
     def _ensure_column(
@@ -391,6 +452,81 @@ class Database:
             "local_repo_path": None,
         }
 
+    def get_scope_settings(self, chat_id: int, thread_id: int | None) -> dict[str, Any]:
+        if thread_id is None:
+            return self.get_chat_settings(chat_id)
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM topic_settings
+                WHERE telegram_chat_id = ? AND telegram_thread_id = ?
+                """,
+                (chat_id, thread_id),
+            ).fetchone()
+        if row:
+            return dict(row)
+        return {
+            "telegram_chat_id": chat_id,
+            "telegram_thread_id": thread_id,
+            "active_repo": None,
+            "default_branch": "main",
+            "local_repo_path": None,
+        }
+
+    def set_scope_repo(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        repo: str | None,
+        user_id: int,
+        default_branch: str = "main",
+    ) -> None:
+        if thread_id is None:
+            self.set_chat_repo(chat_id, repo, user_id, default_branch)
+            return
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_settings (
+                    telegram_chat_id, telegram_thread_id, active_repo, default_branch,
+                    updated_by_user_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_chat_id, telegram_thread_id) DO UPDATE SET
+                    active_repo = excluded.active_repo,
+                    default_branch = excluded.default_branch,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, thread_id, repo, default_branch, user_id, now),
+            )
+
+    def set_scope_local_repo(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        path: str | None,
+        user_id: int,
+    ) -> None:
+        if thread_id is None:
+            self.set_chat_local_repo(chat_id, path, user_id)
+            return
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_settings (
+                    telegram_chat_id, telegram_thread_id, active_repo, default_branch,
+                    local_repo_path, updated_by_user_id, updated_at
+                ) VALUES (?, ?, NULL, 'main', ?, ?, ?)
+                ON CONFLICT(telegram_chat_id, telegram_thread_id) DO UPDATE SET
+                    local_repo_path = excluded.local_repo_path,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, thread_id, path, user_id, now),
+            )
+
     def set_chat_local_repo(self, chat_id: int, path: str | None, user_id: int) -> None:
         now = int(time.time())
         with self.session() as conn:
@@ -419,6 +555,67 @@ class Database:
                 """,
                 (repo, user_id, now),
             )
+
+    def complete_repo_setup(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        repo: str,
+        default_branch: str,
+        local_repo_path: str,
+        user_id: int,
+    ) -> None:
+        """Allow and configure a repository only after its cache is ready."""
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO allowed_repos (repo, added_by_user_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(repo) DO NOTHING
+                """,
+                (repo, user_id, now),
+            )
+            if thread_id is None:
+                conn.execute(
+                    """
+                    INSERT INTO chat_settings (
+                        telegram_chat_id, active_repo, default_branch, local_repo_path,
+                        updated_by_user_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_chat_id) DO UPDATE SET
+                        active_repo = excluded.active_repo,
+                        default_branch = excluded.default_branch,
+                        local_repo_path = excluded.local_repo_path,
+                        updated_by_user_id = excluded.updated_by_user_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (chat_id, repo, default_branch, local_repo_path, user_id, now),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO topic_settings (
+                        telegram_chat_id, telegram_thread_id, active_repo, default_branch,
+                        local_repo_path, updated_by_user_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_chat_id, telegram_thread_id) DO UPDATE SET
+                        active_repo = excluded.active_repo,
+                        default_branch = excluded.default_branch,
+                        local_repo_path = excluded.local_repo_path,
+                        updated_by_user_id = excluded.updated_by_user_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        chat_id,
+                        thread_id,
+                        repo,
+                        default_branch,
+                        local_repo_path,
+                        user_id,
+                        now,
+                    ),
+                )
 
     def disallow_repo(self, repo: str) -> None:
         with self.session() as conn:
@@ -450,18 +647,36 @@ class Database:
             ).fetchone()
         return str(row["deploy_workflow"] or "") if row else ""
 
+    def set_repo_deploy_enabled(self, repo: str, enabled: bool) -> None:
+        with self.session() as conn:
+            cursor = conn.execute(
+                "UPDATE allowed_repos SET deploy_enabled = ? WHERE repo = ?",
+                (int(enabled), repo),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("Repo is not allowed.")
+
+    def is_repo_deploy_enabled(self, repo: str) -> bool:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT deploy_enabled FROM allowed_repos WHERE repo = ?", (repo,)
+            ).fetchone()
+        return bool(row and row["deploy_enabled"])
+
     def create_plan(self, plan: dict[str, Any]) -> None:
         with self.session() as conn:
             conn.execute(
                 """
                 INSERT INTO plans (
-                    id, telegram_chat_id, telegram_user_id, repo, base_branch, target_branch,
+                    id, telegram_chat_id, telegram_thread_id, telegram_user_id,
+                    repo, base_branch, target_branch,
                     request_text, plan_json, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan["id"],
                     plan["telegram_chat_id"],
+                    plan.get("telegram_thread_id"),
                     plan["telegram_user_id"],
                     plan["repo"],
                     plan["base_branch"],
@@ -492,16 +707,19 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO issue_drafts (
-                    id, telegram_chat_id, telegram_user_id, repo, default_branch,
-                    request_text, issue_json, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, telegram_chat_id, telegram_thread_id, telegram_user_id,
+                    repo, default_branch, local_repo_path, request_text,
+                    issue_json, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft["id"],
                     draft["telegram_chat_id"],
+                    draft.get("telegram_thread_id"),
                     draft["telegram_user_id"],
                     draft["repo"],
                     draft["default_branch"],
+                    draft.get("local_repo_path", ""),
                     draft["request_text"],
                     json.dumps(draft["issue_json"], separators=(",", ":")),
                     draft["status"],
@@ -771,12 +989,29 @@ class Database:
             ).fetchone()
         return self._decode_code_job(row)
 
-    def list_code_jobs(self, *, chat_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def list_code_jobs(
+        self,
+        *,
+        chat_id: int | None = None,
+        thread_id: int | None = None,
+        exact_thread: bool = False,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
         with self.session() as conn:
             if chat_id is None:
                 rows = conn.execute(
                     "SELECT * FROM code_jobs ORDER BY updated_at DESC LIMIT ?",
                     (limit,),
+                ).fetchall()
+            elif exact_thread:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM code_jobs
+                    WHERE telegram_chat_id = ? AND telegram_thread_id IS ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, thread_id, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -811,6 +1046,7 @@ class Database:
     ) -> bool:
         allowed_columns = {
             "telegram_message_id",
+            "telegram_plan_message_id",
             "base_sha",
             "source_repo_path",
             "status",
@@ -821,12 +1057,16 @@ class Database:
             "codex_thread_id",
             "pull_request_number",
             "pull_request_url",
+            "github_plan_question_comment_id",
+            "github_plan_question_revision",
+            "github_plan_comment_cursor",
             "latest_activity",
             "result_json",
             "ci_head_sha",
             "ci_wait_started_at",
             "ci_repair_attempts",
             "ci_checks_json",
+            "deployment_mode",
             "deployment_status",
             "deployment_merge_sha",
             "deployment_run_id",
@@ -857,21 +1097,165 @@ class Database:
             cursor = conn.execute(query, params)
         return cursor.rowcount == 1
 
-    def start_code_job_deployment(self, job_id: str) -> bool:
+    def add_code_plan_feedback(
+        self,
+        job_id: str,
+        *,
+        source: str,
+        source_id: str,
+        author: str,
+        body: str,
+    ) -> str:
+        text = body.strip()[:8192]
+        if source not in {"telegram", "github"}:
+            raise ValueError("unsupported plan feedback source")
+        if not text:
+            raise ValueError("Plan feedback is required.")
+        now = int(time.time())
+        with self.session() as conn:
+            job = conn.execute(
+                "SELECT status, feedback_json FROM code_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not job:
+                raise ValueError("Code job not found.")
+            if str(job["status"]) not in {
+                "awaiting_clarification",
+                "awaiting_approval",
+                "queued_plan_edit",
+                "editing_plan",
+                "planning",
+            }:
+                raise ValueError("Code job is not awaiting plan feedback.")
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO code_plan_feedback (
+                    job_id, source, source_id, author, body, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (job_id, source, source_id, author, text, now),
+            )
+            if cursor.rowcount != 1:
+                return "duplicate"
+            try:
+                history = json.loads(str(job["feedback_json"] or "[]"))
+            except json.JSONDecodeError:
+                history = []
+            if not isinstance(history, list):
+                history = []
+            history.append(text)
+            queued = str(job["status"]) in {"awaiting_clarification", "awaiting_approval"}
+            conn.execute(
+                """
+                UPDATE code_jobs
+                SET feedback_json = ?, status = CASE WHEN status IN (
+                        'awaiting_clarification', 'awaiting_approval'
+                    ) THEN 'queued_plan_edit' ELSE status END,
+                    resume_phase = 'plan',
+                    latest_activity = CASE WHEN status IN (
+                        'awaiting_clarification', 'awaiting_approval'
+                    ) THEN 'Plan feedback received' ELSE latest_activity END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(history, separators=(",", ":")), now, job_id),
+            )
+        return "queued" if queued else "pending"
+
+    def list_pending_code_plan_feedback(self, job_id: str) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM code_plan_feedback
+                WHERE job_id = ? AND state = 'pending'
+                ORDER BY id
+                """,
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_code_plan_feedback_applied(
+        self, job_id: str, feedback_ids: list[int], revision: int
+    ) -> None:
+        if not feedback_ids:
+            return
+        placeholders = ",".join("?" for _ in feedback_ids)
+        with self.session() as conn:
+            conn.execute(
+                f"""
+                UPDATE code_plan_feedback
+                SET state = 'applied', applied_revision = ?
+                WHERE job_id = ? AND state = 'pending' AND id IN ({placeholders})
+                """,
+                (revision, job_id, *feedback_ids),
+            )
+
+    def queue_pending_code_plan_feedback(self, job_id: str) -> bool:
         now = int(time.time())
         with self.session() as conn:
             cursor = conn.execute(
                 """
                 UPDATE code_jobs
-                SET deployment_status = 'queued', deployment_error = NULL,
+                SET status = 'queued_plan_edit', resume_phase = 'plan',
+                    latest_activity = 'Additional plan feedback received', updated_at = ?
+                WHERE id = ? AND status IN ('awaiting_clarification', 'awaiting_approval')
+                  AND EXISTS (
+                    SELECT 1 FROM code_plan_feedback
+                    WHERE job_id = code_jobs.id AND state = 'pending'
+                  )
+                """,
+                (now, job_id),
+            )
+        return cursor.rowcount == 1
+
+    def list_plan_feedback_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM code_jobs
+                WHERE status IN ('awaiting_clarification', 'awaiting_approval')
+                  AND pull_request_number IS NOT NULL
+                ORDER BY updated_at ASC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [job for row in rows if (job := self._decode_code_job(row)) is not None]
+
+    def start_code_job_operation(self, job_id: str, mode: str) -> str:
+        if mode not in {"merge", "deploy"}:
+            raise ValueError("unsupported code job operation")
+        now = int(time.time())
+        with self.session() as conn:
+            job = conn.execute(
+                """
+                SELECT status, deployment_mode, deployment_status, deployment_merge_sha
+                FROM code_jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if not job:
+                return "missing"
+            if str(job["status"]) != "ready":
+                return "not_ready"
+            operation_status = str(job["deployment_status"] or "")
+            if operation_status in {
+                "queued", "merging", "waiting_workflow", "dispatching", "deploying"
+            }:
+                return "active"
+            merge_sha = str(job["deployment_merge_sha"] or "")
+            if mode == "merge" and merge_sha:
+                return "merged"
+            next_status = "waiting_workflow" if mode == "deploy" and merge_sha else "queued"
+            cursor = conn.execute(
+                """
+                UPDATE code_jobs SET
+                    deployment_mode = ?, deployment_status = ?, deployment_error = NULL,
                     deployment_run_id = NULL, deployment_run_url = NULL,
                     deployment_started_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'ready'
-                  AND (deployment_status IS NULL OR deployment_status = 'failed')
                 """,
-                (now, now, job_id),
+                (mode, next_status, now, now, job_id),
             )
-        return cursor.rowcount == 1
+        return "started" if cursor.rowcount == 1 else "active"
 
     def list_active_deployments(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.session() as conn:

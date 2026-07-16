@@ -60,11 +60,12 @@ class ResponsePresentationTests(unittest.TestCase):
             ],
         )
 
-    def test_deploy_requires_confirmation_while_rebase_runs_directly(self):
+    def test_merge_and_deploy_require_confirmation_while_rebase_runs_directly(self):
         outgoing = outgoing_message(
             "Codex code job\n"
             "Code Job ID: c-abcdef12\n"
             "Rebase onto latest base: /code rebase c-abcdef12\n"
+            "Merge: /merge c-abcdef12\n"
             "Deploy: /deploy c-abcdef12"
         )
         callbacks = [
@@ -78,6 +79,7 @@ class ResponsePresentationTests(unittest.TestCase):
             callbacks,
             [
                 "command:/code rebase c-abcdef12",
+                "confirm_merge:c-abcdef12",
                 "confirm_deploy:c-abcdef12",
             ],
         )

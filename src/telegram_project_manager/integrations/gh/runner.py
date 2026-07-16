@@ -32,7 +32,13 @@ class GhRunner:
         self.cwd = cwd or Path.cwd()
         self.timeout_seconds = timeout_seconds
 
-    def run(self, args: list[str], input_json: dict[str, Any] | None = None, check: bool = True) -> GhResult:
+    def run(
+        self,
+        args: list[str],
+        input_json: dict[str, Any] | None = None,
+        check: bool = True,
+        timeout_seconds: int | None = None,
+    ) -> GhResult:
         start = time.monotonic()
         input_data = None
         full_args = ["gh", *args]
@@ -45,7 +51,7 @@ class GhRunner:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=self.timeout_seconds,
+            timeout=self.timeout_seconds if timeout_seconds is None else timeout_seconds,
             check=False,
         )
         result = GhResult(

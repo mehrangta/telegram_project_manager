@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from telegram_project_manager.platform.responses import callback_button, outgoing_message
@@ -87,6 +88,7 @@ class TelegramBotApi:
         parse_mode: str | None = None,
         reply_markup: dict[str, object] | None = None,
         disable_link_preview: bool = False,
+        reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if message_thread_id is not None:
@@ -97,6 +99,11 @@ class TelegramBotApi:
             payload["reply_markup"] = reply_markup
         if disable_link_preview:
             payload["link_preview_options"] = {"is_disabled": True}
+        if reply_to_message_id is not None:
+            payload["reply_parameters"] = {
+                "message_id": reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
         result = self._call("sendMessage", payload)
         if not isinstance(result, dict) or not isinstance(result.get("message_id"), int):
             raise TelegramBotApiError("Telegram Bot API sendMessage returned invalid data")
@@ -138,6 +145,12 @@ class TelegramBotApi:
                 "message_id": message_id,
                 "reply_markup": reply_markup,
             },
+        )
+
+    def delete_message(self, chat_id: int, message_id: int) -> None:
+        self._call(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": message_id},
         )
 
     def answer_callback_query(self, query_id: str, text: str = "") -> None:
@@ -367,12 +380,31 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             parse_mode=outgoing.parse_mode,
             reply_markup=outgoing.reply_markup(),
             disable_link_preview=outgoing.disable_link_preview,
+            reply_to_message_id=outgoing.reply_to_message_id,
         )
 
-    async def dispatch(incoming: IncomingMessage | None) -> None:
+    async def dispatch(incoming: IncomingMessage | None, update_id: int | None = None) -> None:
         if incoming is None:
             return
-        await send_response(incoming, await router.handle_message(incoming))
+        started = monotonic()
+        try:
+            await send_response(incoming, await router.handle_message(incoming))
+        finally:
+            elapsed = monotonic() - started
+            if elapsed >= 2:
+                command = incoming.text.split(maxsplit=1)[0] if incoming.text.startswith("/") else "message"
+                logging.warning(
+                    "Slow Telegram update: update_id=%s command=%s elapsed=%.2fs",
+                    update_id,
+                    command,
+                    elapsed,
+                )
+
+    async def answer_callback(query_id: str, response: str) -> None:
+        try:
+            await asyncio.to_thread(bot.answer_callback_query, query_id, response)
+        except TelegramBotApiError as exc:
+            logging.warning("Telegram callback acknowledgement failed: %s", exc)
 
     async def dispatch_callback(update: dict[str, Any]) -> None:
         callback = callback_action_from_update(update)
@@ -382,8 +414,9 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         if not router.is_admin(incoming.user_id):
             return
         data = callback.data
-        if data == "cancel_deploy":
-            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Deployment cancelled")
+        if data in {"cancel_deploy", "cancel_merge"}:
+            label = "Merge cancelled" if data == "cancel_merge" else "Deployment cancelled"
+            await answer_callback(callback.query_id, label)
             await asyncio.to_thread(
                 bot.edit_message_reply_markup,
                 incoming.chat_id,
@@ -394,9 +427,9 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         if data.startswith("confirm_deploy:"):
             job_id = data.removeprefix("confirm_deploy:")
             if not CALLBACK_JOB_PATTERN.fullmatch(job_id):
-                await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+                await answer_callback(callback.query_id, "Button expired")
                 return
-            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Confirmation required")
+            await answer_callback(callback.query_id, "Confirmation required")
             confirmation = outgoing_message(
                 "⚠️ Confirm deployment\n"
                 f"Code Job ID: {job_id}\n"
@@ -408,15 +441,33 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             )
             await send_response(incoming, confirmation)
             return
+        if data.startswith("confirm_merge:"):
+            job_id = data.removeprefix("confirm_merge:")
+            if not CALLBACK_JOB_PATTERN.fullmatch(job_id):
+                await answer_callback(callback.query_id, "Button expired")
+                return
+            await answer_callback(callback.query_id, "Confirmation required")
+            confirmation = outgoing_message(
+                "⚠️ Confirm merge\n"
+                f"Code Job ID: {job_id}\n"
+                "This will squash-merge the pull request and delete its branch. "
+                "It will not deploy.",
+                keyboard=((
+                    callback_button("🔀 Confirm merge", f"command:/merge {job_id}"),
+                    callback_button("✖️ Cancel", "cancel_merge"),
+                ),),
+            )
+            await send_response(incoming, confirmation)
+            return
         if not data.startswith("command:"):
-            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+            await answer_callback(callback.query_id, "Button expired")
             return
         command = data.removeprefix("command:").strip()
         if not command.startswith("/"):
-            await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Button expired")
+            await answer_callback(callback.query_id, "Button expired")
             return
-        await asyncio.to_thread(bot.answer_callback_query, callback.query_id, "Action requested")
-        if command.lower().startswith("/deploy "):
+        await answer_callback(callback.query_id, "Action requested")
+        if command.lower().startswith(("/deploy ", "/merge ")):
             await asyncio.to_thread(
                 bot.edit_message_reply_markup,
                 incoming.chat_id,
@@ -432,7 +483,8 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             message_id=incoming.message_id,
             thread_id=incoming.thread_id,
         )
-        await send_response(incoming, await router.handle_message(incoming))
+        update_id = update.get("update_id")
+        await dispatch(incoming, update_id if isinstance(update_id, int) else None)
 
     async def flush_album(media_group_id: str) -> None:
         await asyncio.sleep(0.75)
@@ -448,10 +500,15 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
     while True:
         try:
             updates = await asyncio.to_thread(bot.get_updates, offset)
-            for update in updates:
-                update_id = update.get("update_id")
-                if isinstance(update_id, int):
-                    offset = update_id + 1
+        except TelegramBotApiError:
+            logging.exception("Telegram polling failed; retrying in 1 second")
+            await asyncio.sleep(1)
+            continue
+        for update in updates:
+            update_id = update.get("update_id")
+            if isinstance(update_id, int):
+                offset = update_id + 1
+            try:
                 if "callback_query" in update:
                     await dispatch_callback(update)
                     continue
@@ -467,7 +524,8 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
                         album_tasks[media_group_id] = asyncio.create_task(flush_album(media_group_id))
                     continue
                 incoming = incoming_message_from_update(update)
-                await dispatch(incoming)
-        except TelegramBotApiError:
-            logging.exception("Telegram polling failed; retrying in 5 seconds")
-            await asyncio.sleep(5)
+                await dispatch(incoming, update_id if isinstance(update_id, int) else None)
+            except TelegramBotApiError:
+                logging.exception("Telegram update failed: update_id=%s", update_id)
+            except Exception:
+                logging.exception("Unexpected Telegram update failure: update_id=%s", update_id)

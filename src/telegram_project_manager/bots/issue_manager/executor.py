@@ -11,12 +11,20 @@ class IssueExecutionService:
         self.db = db
         self.executor = executor
 
-    def execute(self, draft_id: str, user_id: int) -> IssueResult:
+    def execute(
+        self,
+        draft_id: str,
+        user_id: int,
+        chat_id: int,
+        thread_id: int | None,
+    ) -> IssueResult:
         record = self.db.get_issue_draft(draft_id)
         if not record:
             raise ValueError("Issue draft not found.")
         if int(record["telegram_user_id"]) != user_id:
             raise ValueError("Only the requesting admin can confirm this issue draft.")
+        if int(record["telegram_chat_id"]) != chat_id or record.get("telegram_thread_id") != thread_id:
+            raise ValueError("Issue draft belongs to a different chat or topic.")
         if record["status"] == "created" and record.get("github_issue_url"):
             return IssueResult(
                 repo=str(record["repo"]),

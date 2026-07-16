@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError, LocalRepositoryService
@@ -25,6 +25,7 @@ SENSITIVE_PATTERNS = (
     "id_ed25519",
     ".github/workflows/*",
 )
+WORKFLOW_PATTERN = ".github/workflows/*"
 MAX_CHANGED_FILES = 100
 MAX_CHANGED_BYTES = 5_000_000
 MAX_CI_DIAGNOSTIC_CHARS = 50_000
@@ -34,6 +35,10 @@ MAX_ISSUE_IMAGE_TOTAL_BYTES = 20_000_000
 ISSUE_IMAGE_DIRECTORY = ".codex/issue-images"
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
 ACTION_RUN_RE = re.compile(r"/actions/runs/(\d+)")
+WORKFLOW_USES_LINE_RE = re.compile(
+    r"(?m)^\s*(?:-\s*)?uses:\s*[\"']?([^\"'#\s]+)[\"']?\s*(?:#\s*([^\r\n]+))?$"
+)
+ACTION_RELEASE_HINT_RE = re.compile(r"\b(?:stable|v\d+(?:\.\d+){0,2})\b", re.IGNORECASE)
 API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", re.IGNORECASE)
 BEARER_TOKEN_RE = re.compile(r"(?i)(authorization:\s*bearer\s+)\S+")
@@ -110,6 +115,38 @@ class GitWorkspaceService:
 
     def validate_source(self, *, source_path: str, repo: str) -> str:
         return str(self.repositories.validate(source_path, repo))
+
+    def prepare_read_only(
+        self,
+        *,
+        source_path: str,
+        repo: str,
+        base_branch: str,
+        path: Path,
+    ) -> str:
+        source = self.repositories.validate(source_path, repo)
+        _, base_sha = self.repositories.fetch(source, base_branch)
+        with self.repositories.lock_for(source):
+            self._remove_existing(source, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.commands.run(["git", "-C", str(source), "worktree", "prune"])
+            self.commands.run(
+                [
+                    "git", "-C", str(source), "worktree", "add", "--detach",
+                    str(path), f"refs/remotes/origin/{base_branch}",
+                ],
+                timeout=900,
+            )
+        return base_sha
+
+    def cleanup_read_only(self, *, source_path: str, path: Path) -> None:
+        source = Path(source_path).expanduser().resolve()
+        with self.repositories.lock_for(source):
+            self._remove_existing(source, path)
+            try:
+                self.commands.run(["git", "-C", str(source), "worktree", "prune"])
+            except WorkspaceError:
+                pass
 
     def prepare(
         self,
@@ -272,7 +309,7 @@ class GitWorkspaceService:
         destination = path / plan_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(markdown, encoding="utf-8")
-        self.commands.run(["git", "add", "--", plan_path], cwd=path)
+        self.commands.run(["git", "add", "-f", "--", plan_path], cwd=path)
         self.commands.run(["git", "commit", "-m", message], cwd=path)
         push = ["git", "push"]
         if first_push:
@@ -280,9 +317,18 @@ class GitWorkspaceService:
         self.commands.run(push, cwd=path, timeout=900)
         return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
 
-    def validate_code_changes(self, *, path: Path, plan_path: str) -> list[str]:
+    def validate_code_changes(
+        self,
+        *,
+        path: Path,
+        plan_path: str,
+        allowed_workflow_paths: tuple[str, ...] = (),
+    ) -> list[str]:
         self.commands.run(["git", "diff", "--check"], cwd=path)
-        raw = self.commands.run(["git", "status", "--porcelain"], cwd=path)
+        raw = self.commands.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=path,
+        )
         changed: list[str] = []
         for line in raw.splitlines():
             if len(line) < 4:
@@ -299,7 +345,11 @@ class GitWorkspaceService:
             raise WorkspaceError("Codex produced no implementation changes")
         if len(unique) > MAX_CHANGED_FILES:
             raise WorkspaceError(f"Codex changed too many files; maximum is {MAX_CHANGED_FILES}")
+        allowed_workflows = set(allowed_workflow_paths)
         for item in unique:
+            is_workflow = fnmatch.fnmatch(item, WORKFLOW_PATTERN)
+            if is_workflow and item in allowed_workflows:
+                continue
             if any(fnmatch.fnmatch(item, pattern) for pattern in SENSITIVE_PATTERNS):
                 raise WorkspaceError(f"sensitive path blocked: {item}")
         total_bytes = sum(
@@ -502,6 +552,107 @@ class CodeGitHubService:
             comments=tuple(comments),
         )
 
+    def get_authenticated_login(self) -> str:
+        user = self.gh.api_json("user")
+        login = str(user.get("login") or "").strip()
+        if not login:
+            raise WorkspaceError("Authenticated GitHub login is unavailable")
+        return login
+
+    def validate_workflow_action_refs(self, *, path: Path, files: list[str]) -> None:
+        references: dict[str, set[str]] = {}
+        workspace = path.resolve()
+        for item in files:
+            if not fnmatch.fnmatch(item, WORKFLOW_PATTERN):
+                continue
+            candidate = (workspace / item).resolve()
+            try:
+                candidate.relative_to(workspace)
+            except ValueError as exc:
+                raise WorkspaceError(f"Workflow path escapes the workspace: {item}") from exc
+            if not candidate.is_file():
+                continue
+            content = candidate.read_text(encoding="utf-8")
+            for reference, comment in WORKFLOW_USES_LINE_RE.findall(content):
+                references.setdefault(reference, set()).add(comment.strip())
+        invalid: list[str] = []
+        for reference in sorted(references):
+            if reference.startswith(("./", "docker://")):
+                continue
+            source, separator, revision = reference.rpartition("@")
+            parts = source.split("/")
+            if not separator or len(parts) < 2 or not revision:
+                raise WorkspaceError(f"Invalid GitHub Action reference: {reference}")
+            action_repo = "/".join(parts[:2])
+            try:
+                self.gh.api_json(
+                    f"repos/{action_repo}/commits/{quote(revision, safe='')}"
+                )
+            except GhError:
+                detail = f"- {reference}"
+                hints = {
+                    match.group(0)
+                    for comment in references[reference]
+                    if (match := ACTION_RELEASE_HINT_RE.search(comment))
+                }
+                for hint in sorted(hints):
+                    try:
+                        resolved = self.gh.api_json(
+                            f"repos/{action_repo}/commits/{quote(hint, safe='')}"
+                        )
+                    except GhError:
+                        continue
+                    sha = str(resolved.get("sha") or "") if isinstance(resolved, dict) else ""
+                    if re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+                        detail += f"; verified {hint} replacement: {source}@{sha.lower()}"
+                        break
+                invalid.append(detail)
+        if invalid:
+            raise WorkspaceError(
+                "GitHub Action references do not exist:\n" + "\n".join(invalid)
+            )
+
+    def list_pr_comments(
+        self, *, repo: str, number: int, after_id: int = 0
+    ) -> list[dict[str, Any]]:
+        raw = self.gh.api_value(
+            f"repos/{repo}/issues/{number}/comments?per_page=100&sort=created&direction=asc"
+        )
+        if not isinstance(raw, list):
+            return []
+        comments = []
+        for item in raw:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), int):
+                continue
+            if int(item["id"]) > after_id:
+                comments.append(item)
+        return comments
+
+    def publish_plan_questions(
+        self,
+        *,
+        repo: str,
+        number: int,
+        body: str,
+        comment_id: int | None,
+    ) -> int:
+        if comment_id:
+            result = self.gh.api_json(
+                f"repos/{repo}/issues/comments/{comment_id}",
+                method="PATCH",
+                body={"body": body},
+            )
+        else:
+            result = self.gh.api_json(
+                f"repos/{repo}/issues/{number}/comments",
+                method="POST",
+                body={"body": body},
+            )
+        value = result.get("id")
+        if not isinstance(value, int):
+            raise WorkspaceError("GitHub plan-question comment has no ID")
+        return value
+
     def create_draft_pr(
         self,
         *,
@@ -591,10 +742,42 @@ class CodeGitHubService:
                 ["run", "view", run_id, "--repo", repo, "--log-failed"],
                 check=False,
             )
-            log = result.stdout.strip() if result.returncode == 0 else ""
+            log = (
+                result.stdout.strip()
+                if result.returncode == 0
+                else self._failed_run_log_via_api(repo, run_id)
+            )
             if log:
                 parts.append(f"Failed GitHub Actions log for run {run_id}:\n{log}")
         return _redact_ci_diagnostics("\n\n".join(parts))[:MAX_CI_DIAGNOSTIC_CHARS]
+
+    def _failed_run_log_via_api(self, repo: str, run_id: str) -> str:
+        try:
+            payload = self.gh.api_value(
+                f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
+            )
+        except GhError:
+            return ""
+        jobs = payload.get("jobs") if isinstance(payload, dict) else None
+        if not isinstance(jobs, list):
+            return ""
+        logs: list[str] = []
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            conclusion = str(job.get("conclusion") or "").lower()
+            job_id = job.get("id")
+            if conclusion not in {"failure", "timed_out", "startup_failure"}:
+                continue
+            if not isinstance(job_id, int):
+                continue
+            result = self.gh.run(
+                ["api", f"repos/{repo}/actions/jobs/{job_id}/logs"],
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                logs.append(result.stdout.strip())
+        return "\n\n".join(logs)
 
     def discard(self, *, repo: str, number: int | None, branch: str) -> None:
         if number is not None:

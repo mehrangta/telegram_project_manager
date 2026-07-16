@@ -1,7 +1,10 @@
 # Pull Request Manager
 
-The pull request manager handles `/deploy c-job_id` after a code job reaches
-`ready`. It revalidates the exact checked PR head, squash-merges it to `main`
-without bypassing branch protection, dispatches the configured GitHub Actions
-workflow with the merge SHA, and watches its run. Merge and workflow state is persisted so
-monitoring resumes after a bot restart.
+The pull request manager handles `/merge c-job_id` and `/deploy c-job_id` after
+a code job reaches `ready`. Both revalidate the exact checked PR head and
+squash-merge without bypassing branch protection. Merge-only accepts the job's
+configured base branch and stops after merging; deploy remains restricted to
+`main`, dispatches the configured GitHub Actions workflow with the merge SHA,
+and watches its run. A later deploy can reuse a main-branch merge created by
+`/merge`. Operation, merge, and workflow state are persisted so work resumes
+after a bot restart.

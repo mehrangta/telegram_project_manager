@@ -21,6 +21,8 @@ POLL_SECONDS = 10
 ACTIVE_DEPLOYMENT_STATUSES = {
     "queued", "merging", "waiting_workflow", "dispatching", "deploying"
 }
+MERGE_MODE = "merge"
+DEPLOY_MODE = "deploy"
 
 
 class DeploymentError(ValueError):
@@ -59,31 +61,74 @@ class MergeDeploymentService:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     async def start(self, job_id: str) -> str:
+        """Backward-compatible deployment entry point."""
+        return await self.start_deploy(job_id)
+
+    async def start_merge(self, job_id: str) -> str:
+        return await self._start(job_id, MERGE_MODE)
+
+    async def start_deploy(self, job_id: str) -> str:
+        return await self._start(job_id, DEPLOY_MODE)
+
+    async def _start(self, job_id: str, mode: str) -> str:
         job = self._require_job(job_id)
         if job["status"] != "ready":
             raise DeploymentError("Code job is not ready. All pull request checks must pass first.")
-        workflow = self.db.get_repo_deploy_workflow(str(job["repo"]))
-        if not workflow:
-            raise DeploymentError(
-                "No deployment workflow configured. Admin: "
-                f"/repo deploy set {job['repo']} <workflow-name-or-file>"
-            )
+        workflow = ""
+        if mode == DEPLOY_MODE:
+            if str(job.get("base_branch") or "") != "main":
+                raise DeploymentError("Deployment only supports pull requests targeting main.")
+            if not self.db.is_repo_deploy_enabled(str(job["repo"])):
+                raise DeploymentError(
+                    f"Deployment is disabled for {job['repo']}. Admin: "
+                    f"/repo deploy enable {job['repo']}"
+                )
+            workflow = self.db.get_repo_deploy_workflow(str(job["repo"]))
+            if not workflow:
+                raise DeploymentError(
+                    "No deployment workflow configured. Admin: "
+                    f"/repo deploy set {job['repo']} <workflow-name-or-file>"
+                )
         deployment_status = str(job.get("deployment_status") or "")
-        if deployment_status == "succeeded":
+        operation_mode = _operation_mode(job)
+        if mode == DEPLOY_MODE and deployment_status == "succeeded":
             return self._status_message(job, "Deployment already succeeded.")
+        if mode == MERGE_MODE and job.get("deployment_merge_sha"):
+            return self._status_message(job, "Pull request already merged.")
         if deployment_status in ACTIVE_DEPLOYMENT_STATUSES:
+            if operation_mode != mode:
+                active = "merge-only" if operation_mode == MERGE_MODE else "merge and deployment"
+                raise DeploymentError(
+                    f"A {active} operation is already in progress. Retry after it completes."
+                )
             self._schedule(job_id)
-            return self._status_message(job, "Merge and deployment already in progress.")
-        if not self.db.start_code_job_deployment(job_id):
+            heading = (
+                "Merge already in progress."
+                if mode == MERGE_MODE
+                else "Merge and deployment already in progress."
+            )
+            return self._status_message(job, heading)
+        outcome = self.db.start_code_job_operation(job_id, mode)
+        if outcome == "merged":
+            return self._status_message(self._require_job(job_id), "Pull request already merged.")
+        if outcome != "started":
             current = self._require_job(job_id)
-            return self._status_message(current, "Merge and deployment already in progress.")
-        self.db.audit("deploy.queue", "ok", {"repo": job["repo"], "workflow": workflow}, job_id)
+            if outcome == "not_ready":
+                raise DeploymentError("Code job is not ready. All pull request checks must pass first.")
+            active_mode = _operation_mode(current)
+            active = "merge" if active_mode == MERGE_MODE else "merge and deployment"
+            return self._status_message(current, f"{active.title()} already in progress.")
+        audit = {"repo": job["repo"]}
+        if workflow:
+            audit["workflow"] = workflow
+        self.db.audit(f"{mode}.queue", "ok", audit, job_id)
         self._schedule(job_id)
         try:
             await self.reporter.refresh(job_id, force=True)
         except Exception:
-            logging.exception("Failed to refresh queued deployment %s", job_id)
-        return f"Merge and deployment queued.\nCode Job ID: {job_id}\nRepo: {job['repo']}"
+            logging.exception("Failed to refresh queued %s operation %s", mode, job_id)
+        heading = "Merge queued." if mode == MERGE_MODE else "Merge and deployment queued."
+        return f"{heading}\nCode Job ID: {job_id}\nRepo: {job['repo']}"
 
     def _schedule(self, job_id: str) -> None:
         existing = self._tasks.get(job_id)
@@ -99,7 +144,7 @@ class MergeDeploymentService:
             if str(job.get("deployment_status") or "") in {"queued", "merging"}:
                 await self._merge(job_id)
             job = self._require_job(job_id)
-            if str(job.get("deployment_status") or "") in {
+            if _operation_mode(job) == DEPLOY_MODE and str(job.get("deployment_status") or "") in {
                 "waiting_workflow", "dispatching", "deploying"
             }:
                 await self._monitor_deployment(job_id)
@@ -108,7 +153,7 @@ class MergeDeploymentService:
         except (DeploymentError, GhError, ValueError) as exc:
             await self._fail(job_id, str(exc))
         except Exception as exc:
-            logging.exception("Unexpected merge/deployment failure: %s", job_id)
+            logging.exception("Unexpected merge or deployment failure: %s", job_id)
             await self._fail(job_id, f"Unexpected failure: {exc}")
 
     async def _merge(self, job_id: str) -> None:
@@ -126,8 +171,10 @@ class MergeDeploymentService:
         if not pr_url:
             raise DeploymentError("Ready code job has no pull request URL.")
         snapshot = await asyncio.to_thread(self.github.get_pr, pr_url)
+        require_main = _operation_mode(job) == DEPLOY_MODE
+        self._validate_checked_identity(job, snapshot, require_main=require_main)
         if not snapshot.merged:
-            self._validate_preflight(job, snapshot)
+            self._validate_preflight(snapshot)
             pr_number = int(job["pull_request_number"])
             suffix = f" (#{pr_number})"
             subject = (
@@ -156,34 +203,42 @@ class MergeDeploymentService:
                 await asyncio.sleep(self.poll_seconds)
         if not snapshot.merge_sha:
             raise DeploymentError("GitHub did not return the merge commit SHA.")
+        mode = _operation_mode(job)
         now = int(time.time())
+        next_status = "merged" if mode == MERGE_MODE else "waiting_workflow"
+        next_activity = (
+            f"Merged into {job['base_branch']}"
+            if mode == MERGE_MODE
+            else "Merged to main; waiting for deployment workflow"
+        )
         self.db.update_code_job(
             job_id,
             {
-                "deployment_status": "waiting_workflow",
+                "deployment_status": next_status,
                 "deployment_merge_sha": snapshot.merge_sha,
                 "deployment_started_at": now,
-                "latest_activity": "Merged to main; waiting for deployment workflow",
+                "deployment_error": None,
+                "latest_activity": next_activity,
             },
         )
         self.db.audit(
-            "deploy.merge",
+            f"{mode}.merge",
             "ok",
             {"repo": job["repo"], "merge_sha": snapshot.merge_sha},
             job_id,
         )
         await self.reporter.refresh(job_id, force=True)
+        if mode == MERGE_MODE:
+            await self._notify_merge(job_id)
 
-    def _validate_preflight(self, job: dict[str, Any], pr: PullRequestSnapshot) -> None:
+    def _validate_preflight(
+        self,
+        pr: PullRequestSnapshot,
+    ) -> None:
         if pr.state != "OPEN":
             raise DeploymentError(f"Pull request is not open. Current state: {pr.state or 'unknown'}")
         if pr.is_draft:
             raise DeploymentError("Pull request is still a draft.")
-        if str(job.get("base_branch") or "") != "main" or pr.base_branch != "main":
-            raise DeploymentError("Deployment only supports pull requests targeting main.")
-        checked_sha = str(job.get("ci_head_sha") or "")
-        if not checked_sha or pr.head_sha != checked_sha:
-            raise DeploymentError("Pull request head changed after checks passed; run a new checked code job.")
         if pr.mergeable != "MERGEABLE":
             raise DeploymentError(f"Pull request is not mergeable: {pr.mergeable or 'unknown'}.")
         if pr.review_decision in {"CHANGES_REQUESTED", "REVIEW_REQUIRED"}:
@@ -198,6 +253,22 @@ class MergeDeploymentService:
         if rejected:
             summary = ", ".join(f"{check.name} ({check.state or check.bucket})" for check in rejected)
             raise DeploymentError(f"Pull request checks are not passing: {summary}")
+
+    def _validate_checked_identity(
+        self,
+        job: dict[str, Any],
+        pr: PullRequestSnapshot,
+        *,
+        require_main: bool,
+    ) -> None:
+        base_branch = str(job.get("base_branch") or "")
+        if not base_branch or pr.base_branch != base_branch:
+            raise DeploymentError("Pull request base branch does not match the checked code job.")
+        if require_main and base_branch != "main":
+            raise DeploymentError("Deployment only supports pull requests targeting main.")
+        checked_sha = str(job.get("ci_head_sha") or "")
+        if not checked_sha or pr.head_sha != checked_sha:
+            raise DeploymentError("Pull request head changed after checks passed; run a new checked code job.")
 
     async def _monitor_deployment(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -313,8 +384,14 @@ class MergeDeploymentService:
         job = self.db.get_code_job(job_id)
         if not job:
             return
+        mode = _operation_mode(job)
         merged = bool(job.get("deployment_merge_sha"))
-        activity = "Merged to main; deployment failed" if merged else "Merge and deployment failed"
+        if mode == MERGE_MODE:
+            activity = "Merge failed"
+            audit_action = "merge.merge"
+        else:
+            activity = "Merged to main; deployment failed" if merged else "Merge and deployment failed"
+            audit_action = "deploy.workflow" if merged else "deploy.merge"
         self.db.update_code_job(
             job_id,
             {
@@ -323,18 +400,27 @@ class MergeDeploymentService:
                 "latest_activity": activity,
             },
         )
-        self.db.audit("deploy.workflow" if merged else "deploy.merge", "failed", {"error": error}, job_id)
+        self.db.audit(audit_action, "failed", {"error": error}, job_id)
         try:
             await self.reporter.refresh(job_id, force=True)
-            await self._notify(job_id)
+            if mode == MERGE_MODE:
+                await self._notify_merge(job_id)
+            else:
+                await self._notify(job_id)
         except Exception:
-            logging.exception("Failed to report deployment failure for %s", job_id)
+            logging.exception("Failed to report %s failure for %s", mode, job_id)
 
     async def _notify(self, job_id: str) -> None:
         try:
             await self.reporter.notify_deployment(job_id)
         except Exception:
             logging.exception("Failed to send deployment notification for %s", job_id)
+
+    async def _notify_merge(self, job_id: str) -> None:
+        try:
+            await self.reporter.notify_merge(job_id)
+        except Exception:
+            logging.exception("Failed to send merge notification for %s", job_id)
 
     def _require_job(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_code_job(job_id)
@@ -345,8 +431,17 @@ class MergeDeploymentService:
     @staticmethod
     def _status_message(job: dict[str, Any], heading: str) -> str:
         lines = [heading, f"Code Job ID: {job['id']}"]
+        if job.get("deployment_merge_sha"):
+            lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
         if job.get("deployment_run_url"):
             lines.append(f"Deployment: {job['deployment_run_url']}")
         if job.get("deployment_error"):
             lines.append(f"Error: {job['deployment_error']}")
         return "\n".join(lines)
+
+
+def _operation_mode(job: dict[str, Any]) -> str:
+    mode = str(job.get("deployment_mode") or "")
+    if mode in {MERGE_MODE, DEPLOY_MODE}:
+        return mode
+    return DEPLOY_MODE if job.get("deployment_status") else ""

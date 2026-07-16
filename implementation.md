@@ -195,13 +195,14 @@ Repository selection behavior:
 
 - Bot admins define the active repository from Telegram chat.
 - Normal users cannot change the active repository.
-- `/repo set owner/repository` sets the active repository for the current Telegram chat.
+- `/repo set owner/repository` sets the active repository for the current Telegram chat or forum topic.
 - `/repo show` shows the current active repository and default branch.
-- `/repo clear` removes the chat-level active repository.
-- Commit requests use the current chat's active repository unless an admin changes it.
+- `/repo clear` removes the active repository from the current chat or forum topic.
+- Forum topics have explicit repository, branch, and local-cache settings and do not inherit chat settings.
+- Commit requests use the current chat or topic's active repository unless an admin changes it.
 - If no repository is configured for the chat, `/commit` should refuse to create a plan and ask an admin to run `/repo set owner/repository`.
 - Repository values must still be checked against `GITHUB_ALLOWED_REPOS`.
-- Repository configuration should be stored per Telegram chat, so different groups can point to different repos later.
+- Repository configuration is stored per Telegram chat and, when present, `message_thread_id`.
 
 ## GitHub Integration
 
