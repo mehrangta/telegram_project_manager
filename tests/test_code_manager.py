@@ -1520,6 +1520,10 @@ class CodeSafetyTests(unittest.TestCase):
 
             def run(self, args, *, cwd=None, timeout=300):
                 self.calls.append((args, cwd, timeout))
+                if args[1:] == ["branch", "--show-current"]:
+                    return "codex/issue-3-c-abcdef12\n"
+                if args[1:3] == ["rev-parse", "refs/remotes/origin/codex/issue-3-c-abcdef12"]:
+                    return "a" * 40
                 return ""
 
         runner = Runner()
@@ -1531,9 +1535,28 @@ class CodeSafetyTests(unittest.TestCase):
             runner.calls,
             [
                 (
+                    ["git", "branch", "--show-current"],
+                    path,
+                    300,
+                ),
+                (
                     [
-                        "git", "push", "--force-with-lease", "--set-upstream",
-                        "origin", "HEAD",
+                        "git", "rev-parse",
+                        "refs/remotes/origin/codex/issue-3-c-abcdef12",
+                    ],
+                    path,
+                    300,
+                ),
+                (
+                    [
+                        "git", "push",
+                        (
+                            "--force-with-lease="
+                            "refs/heads/codex/issue-3-c-abcdef12:"
+                            + ("a" * 40)
+                        ),
+                        "--set-upstream", "origin",
+                        "HEAD:refs/heads/codex/issue-3-c-abcdef12",
                     ],
                     path,
                     900,

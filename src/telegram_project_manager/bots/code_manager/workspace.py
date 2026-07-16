@@ -11,7 +11,11 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
-from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError, LocalRepositoryService
+from telegram_project_manager.integrations.git.local_repository import (
+    LocalRepositoryError,
+    LocalRepositoryService,
+    validate_branch,
+)
 
 
 SENSITIVE_PATTERNS = (
@@ -211,9 +215,18 @@ class GitWorkspaceService:
         return self.commands.run(["git", "rev-parse", f"origin/{base_branch}"], cwd=path).strip()
 
     def push_rebased_branch(self, path: Path) -> None:
+        branch = self.commands.run(["git", "branch", "--show-current"], cwd=path).strip()
+        validate_branch(branch)
+        expected_sha = self.commands.run(
+            ["git", "rev-parse", f"refs/remotes/origin/{branch}"], cwd=path
+        ).strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha):
+            raise WorkspaceError("remote branch returned an invalid object ID")
+        remote_ref = f"refs/heads/{branch}"
         self.commands.run(
             [
-                "git", "push", "--force-with-lease", "--set-upstream", "origin", "HEAD",
+                "git", "push", f"--force-with-lease={remote_ref}:{expected_sha}",
+                "--set-upstream", "origin", f"HEAD:{remote_ref}",
             ],
             cwd=path,
             timeout=900,
