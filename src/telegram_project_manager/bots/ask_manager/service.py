@@ -8,7 +8,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
 from telegram_project_manager.bots.ask_manager.images import stage_attachments
@@ -20,7 +19,11 @@ from telegram_project_manager.bots.ask_manager.schemas import (
     ASK_RESPONSE_SCHEMA,
     AskResponse,
 )
-from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter, CodexSdkError
+from telegram_project_manager.bots.code_manager.codex_sdk import (
+    CODEX_JOB_SANDBOX,
+    CodexSdkAdapter,
+    CodexSdkError,
+)
 from telegram_project_manager.bots.code_manager.workspace import GitWorkspaceService, WorkspaceError
 from telegram_project_manager.platform.responses import outgoing_message
 from telegram_project_manager.platform.router import IncomingAttachment
@@ -156,7 +159,7 @@ class AskService:
                     prompt=ask_prompt(question),
                     image_paths=image_paths,
                     output_schema=ASK_RESPONSE_SCHEMA,
-                    sandbox=Sandbox.read_only,
+                    sandbox=CODEX_JOB_SANDBOX,
                     effort=ReasoningEffort.high,
                     model_role="plan",
                     developer_instructions=ASK_DEVELOPER_INSTRUCTIONS,

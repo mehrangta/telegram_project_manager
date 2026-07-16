@@ -11,7 +11,11 @@ from typing import Any
 from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
-from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter, CodexSdkError
+from telegram_project_manager.bots.code_manager.codex_sdk import (
+    CODEX_JOB_SANDBOX,
+    CodexSdkAdapter,
+    CodexSdkError,
+)
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.prompts import (
     DEVELOPER_INSTRUCTIONS,
@@ -550,7 +554,7 @@ class CodeJobService:
                 path=path,
                 prompt=current_prompt,
                 output_schema=CODE_RESULT_SCHEMA,
-                sandbox=Sandbox.workspace_write,
+                sandbox=CODEX_JOB_SANDBOX,
                 effort=effort,
                 model_role="code",
                 timeout_seconds=CODE_TIMEOUT_SECONDS,
@@ -775,7 +779,7 @@ class CodeJobService:
             path=path,
             prompt=prompt,
             output_schema=CODE_PLAN_SCHEMA,
-            sandbox=Sandbox.read_only,
+            sandbox=CODEX_JOB_SANDBOX,
             effort=ReasoningEffort.high,
             model_role="plan",
             timeout_seconds=PLAN_TIMEOUT_SECONDS,

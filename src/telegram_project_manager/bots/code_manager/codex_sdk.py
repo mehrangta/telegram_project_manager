@@ -15,6 +15,7 @@ from telegram_project_manager.platform.config import CodexModelRole
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 ThreadCallback = Callable[[str], Awaitable[None]]
+CODEX_JOB_SANDBOX = Sandbox.full_access
 
 
 class CodexSdkError(RuntimeError):
@@ -339,5 +340,8 @@ def _codex_config(api_key: str, base_url: str) -> CodexConfig:
             "OPENAI_API_KEY": api_key,
             "OPENAI_BASE_URL": base_url,
         },
-        config_overrides=(f"openai_base_url={json.dumps(base_url)}",),
+        config_overrides=(
+            f"openai_base_url={json.dumps(base_url)}",
+            "sandbox_workspace_write.network_access=true",
+        ),
     )

@@ -133,9 +133,10 @@ prompt as the issue body and generate only a title.
 
 ### Code
 
-/code creates an isolated worktree and draft PR. Planning runs read-only with
+/code creates an isolated worktree and draft PR. Planning uses
 codex_plan_model; approved implementation, CI repair, and rebase repair use
-codex_code_model.
+codex_code_model. Every Codex turn runs with full filesystem access and
+unrestricted outbound network access.
 
 Codex must discover validation commands from repository metadata rather than
 assume scripts or tools exist. Invalid validation triggers up to two recovery
@@ -158,7 +159,7 @@ published as a new plan revision automatically.
 
 ### Repository questions
 
-`/ask <question>` queues an independent, read-only Codex inspection of the
+`/ask <question>` queues an independent Codex inspection of the
 current chat or topic's active repository and default branch. A photo, image
 document, or album can be attached when the command and question are provided
 in the media caption. JPEG, PNG, and GIF images are supported, with a maximum
@@ -169,12 +170,22 @@ paths. Ask sessions are not conversational and are not resumed after a service
 restart. Image support uses the configured Codex plan model and requires no
 additional settings or database migration.
 
-### Full-access jobs
+The ask prompt remains read-only by instruction, but the Codex process has the
+same full filesystem and network permissions as every other Codex job.
+
+### Codex access
 
 `/do <job>` sends the job text directly to the configured Codex coding model
 with unrestricted filesystem access. It is accepted only from registered admins
 in private chats, starts immediately without confirmation, and uses the bot
 service process working directory without requiring an active repository.
+
+`/ask`, `/code`, and `/do` all run with Codex full-access mode. Network
+access is unrestricted. Codex can read or modify any path available to the
+service account and can transmit accessible data off-server. OpenAI recommends
+using full access only with trusted repositories and monitoring it as an
+elevated environment; see
+[Agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security#run-codex-in-dev-containers).
 
 Full-access jobs run one at a time and reply to the original command with the
 plain Codex result. They are kept only in memory and are not resumed after a
@@ -211,8 +222,9 @@ service restart.
 
 - Repository allowlist and independent per-chat/per-topic repository context
 - Service-owned Git caches with strict origin verification
-- Isolated worktrees and Codex sandboxes
-- `/do` is an explicit private-admin-only exception that runs Codex with full host access
+- Isolated worktrees for code-job Git state
+- Full host filesystem and unrestricted network access for all Codex jobs
+- Prompt-level secret and remote-write restrictions are not sandbox-enforced
 - No changes to .env files, private keys, or .github/workflows
 - Maximum 100 changed files and 5 MB per Codex job
 - Host-owned commits, pushes, pull requests, and deployment

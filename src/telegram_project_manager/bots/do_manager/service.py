@@ -8,10 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai_codex import Sandbox
 from openai_codex.types import ReasoningEffort
 
-from telegram_project_manager.bots.code_manager.codex_sdk import CodexSdkAdapter, CodexSdkError
+from telegram_project_manager.bots.code_manager.codex_sdk import (
+    CODEX_JOB_SANDBOX,
+    CodexSdkAdapter,
+    CodexSdkError,
+)
 from telegram_project_manager.bots.do_manager.prompts import DO_DEVELOPER_INSTRUCTIONS
 from telegram_project_manager.platform.responses import outgoing_message
 from telegram_project_manager.platform.storage.db import Database
@@ -114,7 +117,7 @@ class DoService:
                     job_id=do_id,
                     cwd=str(self.working_directory),
                     prompt=job,
-                    sandbox=Sandbox.full_access,
+                    sandbox=CODEX_JOB_SANDBOX,
                     effort=ReasoningEffort.high,
                     model_role="code",
                     developer_instructions=DO_DEVELOPER_INSTRUCTIONS,

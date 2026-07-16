@@ -163,7 +163,7 @@ class FakeCodex:
         raw = (
             self.results.pop(0)
             if self.results
-            else PLAN if kwargs["sandbox"] == Sandbox.read_only else RESULT
+            else PLAN if kwargs["model_role"] == "plan" else RESULT
         )
         return "thread-1", raw
 
@@ -415,7 +415,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://github.com/owner/repo/pull/42", self.bot.sent[1][1])
         self.assertIn(f"/code approve {job_id}", self.bot.sent[1][1])
         await wait_for_plan_message(self.db, job_id, 78)
-        self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.read_only)
+        self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[0]["effort"], ReasoningEffort.high)
         self.assertEqual(self.codex.calls[0]["model_role"], "plan")
 
@@ -425,7 +425,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         ready = await wait_for_status(self.db, job_id, "ready")
         self.assertEqual(ready["result_json"]["commit_sha"], "code-sha")
         self.assertEqual(ready["result_json"]["ci"]["checks"][0]["bucket"], "pass")
-        self.assertEqual(self.codex.calls[1]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(self.codex.calls[1]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[1]["effort"], ReasoningEffort.medium)
         self.assertEqual(self.codex.calls[1]["model_role"], "code")
         self.assertEqual(len(self.github.created), 1)
@@ -505,7 +505,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         ready = await wait_for_status(self.db, job_id, "ready")
         self.assertIsNone(ready["plan_json"])
         self.assertEqual(len(self.codex.calls), 1)
-        self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[0]["model_role"], "code")
         self.assertTrue(self.workspaces.code_commits[0]["first_push"])
         await wait_for_send_count(self.bot, 2)
@@ -1412,7 +1412,10 @@ class CodeSafetyTests(unittest.TestCase):
         self.assertEqual(config.env["OPENAI_BASE_URL"], "http://codex.example.test")
         self.assertEqual(
             config.config_overrides,
-            ('openai_base_url="http://codex.example.test"',),
+            (
+                'openai_base_url="http://codex.example.test"',
+                "sandbox_workspace_write.network_access=true",
+            ),
         )
 
     def test_result_requires_a_successful_validation(self):

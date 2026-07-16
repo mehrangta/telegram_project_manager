@@ -336,7 +336,7 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sent[3]["reply_to_message_id"], 40)
         call = self.codex.calls[0]
         self.assertEqual(call["image_paths"], ())
-        self.assertEqual(call["sandbox"], Sandbox.read_only)
+        self.assertEqual(call["sandbox"], Sandbox.full_access)
         self.assertEqual(call["effort"], ReasoningEffort.high)
         self.assertEqual(call["model_role"], "plan")
         self.assertIsNone(call["thread_id"])
