@@ -243,7 +243,7 @@ service restart.
 - Full host filesystem and unrestricted network access for all Codex jobs
 - Prompt-level secret and remote-write restrictions are not sandbox-enforced
 - No changes to .env files, private keys, or .github/workflows
-- No changed-file count limit; code-job changes retain a 5 MB safety limit
+- No changed-file count limit; code-job changes retain a 20 MB safety limit
 - Host-owned commits, pushes, pull requests, and deployment
 - API keys redacted from configuration and progress output
 

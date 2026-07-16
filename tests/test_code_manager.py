@@ -39,6 +39,7 @@ from telegram_project_manager.bots.code_manager.workspace import (
     CodeGitHubService,
     GitWorkspaceService,
     IssueContext,
+    MAX_CHANGED_BYTES,
     PullRequestCheck,
     WorkspaceError,
     _managed_issue_asset_paths,
@@ -1553,6 +1554,33 @@ class CodeSafetyTests(unittest.TestCase):
         )
 
         self.assertEqual(files, sorted(changed_files))
+
+    def test_changed_file_size_limit_is_twenty_mb(self):
+        class Runner:
+            def run(self, args, *, cwd=None, timeout=300):
+                del cwd, timeout
+                if args[:3] == ["git", "status", "--porcelain"]:
+                    return "?? artifact.bin\n"
+                return ""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            artifact = path / "artifact.bin"
+            with artifact.open("wb") as handle:
+                handle.truncate(MAX_CHANGED_BYTES)
+
+            files = GitWorkspaceService(Runner()).validate_code_changes(
+                path=path, plan_path=".codex/plans/c-test.md"
+            )
+            self.assertEqual(files, ["artifact.bin"])
+            self.assertEqual(MAX_CHANGED_BYTES, 20_000_000)
+
+            with artifact.open("wb") as handle:
+                handle.truncate(MAX_CHANGED_BYTES + 1)
+            with self.assertRaisesRegex(WorkspaceError, "20 MB safety limit"):
+                GitWorkspaceService(Runner()).validate_code_changes(
+                    path=path, plan_path=".codex/plans/c-test.md"
+                )
 
     def test_workflow_changes_require_exact_approved_plan_path(self):
         class Runner:

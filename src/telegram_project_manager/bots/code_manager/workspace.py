@@ -30,7 +30,7 @@ SENSITIVE_PATTERNS = (
     ".github/workflows/*",
 )
 WORKFLOW_PATTERN = ".github/workflows/*"
-MAX_CHANGED_BYTES = 5_000_000
+MAX_CHANGED_BYTES = 20_000_000
 MAX_CI_DIAGNOSTIC_CHARS = 50_000
 MAX_ISSUE_IMAGES = 10
 MAX_ISSUE_IMAGE_BYTES = 10_000_000
@@ -380,7 +380,7 @@ class GitWorkspaceService:
             if (candidate := path / item).is_file()
         )
         if total_bytes > MAX_CHANGED_BYTES:
-            raise WorkspaceError("Codex changes exceed the 5 MB safety limit")
+            raise WorkspaceError("Codex changes exceed the 20 MB safety limit")
         if (path / plan_path).exists():
             raise WorkspaceError(f"Host failed to remove the temporary plan file: {plan_path}")
         return code_paths
