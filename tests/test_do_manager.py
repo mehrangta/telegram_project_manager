@@ -226,6 +226,51 @@ class DoServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "different chat or topic"):
             self.service.status(chat_id=10, thread_id=8, job_id=job_id)
 
+    async def test_queue_snapshot_is_scoped_ordered_and_redacts_payload_paths(self):
+        first = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=1, mode="repo",
+            repo="owner/repo", branch="main", source_path="/cache/repo.git",
+            job="  first   queued request sk-secret-token  ",
+        )
+        second = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=7, message_id=2, mode="repo",
+            repo="owner/repo", branch="develop", source_path="/cache/repo.git",
+            job="second request " + ("x" * 180),
+            attachments=(IncomingAttachment("image", "unique", "image/png", len(PNG)),),
+        )
+        other = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=8, message_id=3, mode="host",
+            job="hidden request",
+        )
+        self.assertTrue(self.db.claim_do_job(first))
+
+        snapshot = self.service.queue_snapshot(chat_id=10, thread_id=7)
+
+        self.assertEqual([item["id"] for item in snapshot["running"]], [first])
+        self.assertEqual([item["id"] for item in snapshot["queued"]], [second])
+        self.assertEqual(
+            snapshot["running"][0]["request"],
+            "first queued request [REDACTED_API_KEY]",
+        )
+        self.assertTrue(snapshot["queued"][0]["request"].endswith("…"))
+        self.assertLessEqual(len(snapshot["queued"][0]["request"]), 120)
+        self.assertEqual(snapshot["queued"][0]["image_count"], 1)
+        self.assertNotIn("payload_path", snapshot["queued"][0])
+        self.assertNotIn(other, {item["id"] for item in snapshot["running"] + snapshot["queued"]})
+
+    async def test_queue_snapshot_survives_missing_or_symlinked_request(self):
+        job_id = await self.service.submit(
+            chat_id=10, user_id=20, thread_id=None, message_id=1,
+            mode="host", job="host request",
+        )
+        payload = Path(self.db.get_do_job(job_id)["payload_path"])
+        (payload / "request.txt").unlink()
+        (payload / "request.txt").symlink_to(Path(self.temp.name) / "outside.txt")
+
+        snapshot = self.service.queue_snapshot(chat_id=10, thread_id=None)
+
+        self.assertEqual(snapshot["queued"][0]["request"], "request unavailable")
+
     async def test_queue_limit_is_durable(self):
         limited = DoService(
             db=self.db, codex=self.codex, bot=self.bot, reporter=self.reporter,

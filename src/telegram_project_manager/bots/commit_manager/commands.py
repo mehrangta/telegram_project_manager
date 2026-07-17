@@ -98,6 +98,7 @@ Commands:
 /do <job> [images] (active repository; admin)
 /do --host <job> [images] (private admin; full host access)
 /do status [d-job_id]
+/queue
 /code #123 [--skip-plan]
 /code approve|edit|discard|retry|rebase|status <code_job_id>
 /deploy <code_job_id> (or reply /deploy to a code-job message)

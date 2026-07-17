@@ -1,0 +1,1 @@
+"""Scoped Codex queue command."""

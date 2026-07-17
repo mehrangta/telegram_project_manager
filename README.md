@@ -66,6 +66,7 @@ Use `/help` in Telegram for the complete command reference.
 /ask <question> [images]                    Inspect the active repository
 /do <job> [images]                          Run a writable repository job
 /do status [d-job_id]                       Show do-job status
+/queue                                      Show current Codex work in this chat/topic
 /merge <c-job_id>                           Merge without deployment
 /deploy <c-job_id>                          Merge and deploy
 /config show                                Show redacted configuration
@@ -89,6 +90,11 @@ existing job. `/do --host <job>` is restricted to private admin chats.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/do` runs writable Codex work in a persistent repository workspace; its
   separate worker keeps queued jobs independent from Telegram polling.
+- **Codex queue:** `/queue` shows `/code`, `/ask`, and `/do` work currently
+  running or queued for the current chat or exact forum topic. It excludes code
+  jobs paused for input, approval, CI, retry, merge, deployment, or completion.
+  Counts are scoped rather than global; `/ask` entries are in memory and vanish
+  after a bot restart, while `/do` queue state is durable.
 - **Images:** `/issue`, `/ask`, and `/do` accept JPEG, PNG, and GIF attachments,
   with up to 10 images, 10 MB each, and 20 MB total.
 - **Merge and deployment:** `/merge` squash-merges a ready pull request without

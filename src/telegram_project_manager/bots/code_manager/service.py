@@ -43,7 +43,7 @@ from telegram_project_manager.bots.code_manager.workspace import (
 )
 from telegram_project_manager.platform.config import CodexModelRole
 from telegram_project_manager.integrations.gh.runner import GhError
-from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.storage.db import CODE_JOB_QUEUED_STATUSES, Database
 
 
 PLAN_PATH_TEMPLATE = ".codex/plans/{job_id}.md"
@@ -59,12 +59,21 @@ MAX_CI_REPAIR_ATTEMPTS = 2
 MAX_VALIDATION_RECOVERY_ATTEMPTS = 2
 MAX_REBASE_CONFLICT_ROUNDS = 20
 TERMINAL_STATUSES = {"ready", "discarded"}
+CODEX_QUEUED_STATUSES = frozenset(CODE_JOB_QUEUED_STATUSES)
+CODEX_RUNNING_STATUSES = frozenset(
+    {
+        "preparing",
+        "planning",
+        "editing_plan",
+        "coding",
+        "validating",
+        "pushing",
+        "repairing_checks",
+        "rebasing",
+    }
+)
 ACTIVE_STATUSES = {
-    "queued_plan",
-    "queued_plan_edit",
-    "queued_code",
-    "queued_checks",
-    "queued_rebase",
+    *CODEX_QUEUED_STATUSES,
     "preparing",
     "planning",
     "editing_plan",
@@ -79,6 +88,17 @@ ACTIVE_STATUSES = {
     "failed",
     "interrupted",
 }
+
+
+def _code_queue_item(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(job["id"]),
+        "repo": str(job["repo"]),
+        "issue_number": int(job["issue_number"]),
+        "status": str(job["status"]),
+        "created_at": int(job["created_at"]),
+        "updated_at": int(job["updated_at"]),
+    }
 
 
 class CodeJobService:
@@ -446,6 +466,27 @@ class CodeJobService:
 
     def status(self, job_id: str) -> dict[str, Any]:
         return self._require_job(job_id)
+
+    def queue_snapshot(
+        self, *, chat_id: int, thread_id: int | None
+    ) -> dict[str, tuple[dict[str, Any], ...]]:
+        jobs = self.db.list_scoped_code_jobs(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            statuses=tuple(sorted(CODEX_RUNNING_STATUSES | CODEX_QUEUED_STATUSES)),
+        )
+        return {
+            "running": tuple(
+                _code_queue_item(job)
+                for job in jobs
+                if job["status"] in CODEX_RUNNING_STATUSES
+            ),
+            "queued": tuple(
+                _code_queue_item(job)
+                for job in jobs
+                if job["status"] in CODEX_QUEUED_STATUSES
+            ),
+        }
 
     def _schedule(self, job_id: str, phase: str) -> None:
         existing = self._tasks.get(job_id)

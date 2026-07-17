@@ -9,6 +9,15 @@ from collections.abc import Iterator
 from typing import Any
 
 
+CODE_JOB_QUEUED_STATUSES = (
+    "queued_plan",
+    "queued_plan_edit",
+    "queued_code",
+    "queued_checks",
+    "queued_rebase",
+)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -1343,15 +1352,37 @@ class Database:
                 ).fetchall()
         return [job for row in rows if (job := self._decode_code_job(row)) is not None]
 
+    def list_scoped_code_jobs(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        statuses: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM code_jobs
+                WHERE telegram_chat_id = ? AND telegram_thread_id IS ?
+                  AND status IN ({placeholders})
+                ORDER BY updated_at ASC, created_at ASC, id ASC
+                """,
+                (chat_id, thread_id, *statuses),
+            ).fetchall()
+        return [job for row in rows if (job := self._decode_code_job(row)) is not None]
+
     def count_queued_code_jobs(self) -> int:
+        placeholders = ",".join("?" for _ in CODE_JOB_QUEUED_STATUSES)
         with self.session() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS count FROM code_jobs
-                WHERE status IN (
-                    'queued_plan', 'queued_plan_edit', 'queued_code', 'queued_checks', 'queued_rebase'
-                )
-                """
+                WHERE status IN ({placeholders})
+                """,
+                CODE_JOB_QUEUED_STATUSES,
             ).fetchone()
         return int(row["count"]) if row else 0
 
