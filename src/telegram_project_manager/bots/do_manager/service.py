@@ -29,6 +29,8 @@ from telegram_project_manager.platform.telegram_bot import TelegramBotApi, Teleg
 DO_TIMEOUT_SECONDS = 10 * 60 * 60
 MAX_OUTSTANDING_DO_JOBS = 10
 MAX_CONCURRENT_DO_JOBS = 2
+DO_QUEUE_REQUEST_MAX_LENGTH = 120
+DO_JOB_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 
 
 class DoService:
@@ -162,6 +164,62 @@ class DoService:
         return DoProgressReporter.render(
             job, self.db.list_do_job_events(str(job["id"]), limit=5)
         )
+
+    def queue_snapshot(
+        self, *, chat_id: int, thread_id: int | None
+    ) -> dict[str, tuple[dict[str, Any], ...]]:
+        jobs = list(
+            reversed(
+                self.db.list_do_jobs(
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    exact_thread=True,
+                    statuses=("preparing", "queued", "running"),
+                    limit=100,
+                )
+            )
+        )
+        return {
+            "running": tuple(
+                self._queue_item(job) for job in jobs if job["status"] == "running"
+            ),
+            "queued": tuple(
+                self._queue_item(job)
+                for job in jobs
+                if job["status"] in {"preparing", "queued"}
+            ),
+        }
+
+    def _queue_item(self, job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(job["id"]),
+            "mode": str(job["mode"]),
+            "repo": str(job.get("repo") or ""),
+            "branch": str(job.get("default_branch") or ""),
+            "status": str(job["status"]),
+            "image_count": int(job.get("image_count") or 0),
+            "request": self._request_preview(str(job["id"])),
+            "created_at": int(job["created_at"]),
+            "updated_at": int(job["updated_at"]),
+        }
+
+    def _request_preview(self, job_id: str) -> str:
+        if not DO_JOB_ID_RE.fullmatch(job_id):
+            return "request unavailable"
+        payload = self.payload_root / job_id
+        request = payload / "request.txt"
+        try:
+            if payload.is_symlink() or request.is_symlink():
+                return "request unavailable"
+            resolved = request.resolve(strict=True)
+            if not resolved.is_relative_to(self.payload_root) or not resolved.is_file():
+                return "request unavailable"
+            normalized = _redact(" ".join(resolved.read_text(encoding="utf-8").split()))
+        except (OSError, UnicodeError):
+            return "request unavailable"
+        if len(normalized) <= DO_QUEUE_REQUEST_MAX_LENGTH:
+            return normalized
+        return normalized[: DO_QUEUE_REQUEST_MAX_LENGTH - 1].rstrip() + "…"
 
     async def run_worker(self) -> None:
         for job_id in self.db.mark_running_do_jobs_interrupted():

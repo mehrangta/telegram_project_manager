@@ -15,6 +15,7 @@ from telegram_project_manager.bots.code_manager.commands import CodeManager
 from telegram_project_manager.bots.code_manager.progress import CodeProgressReporter
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.code_manager.workspace import CodeGitHubService, GitWorkspaceService
+from telegram_project_manager.bots.codex_queue.commands import CodexQueueManager
 from telegram_project_manager.bots.do_manager.commands import DoManager
 from telegram_project_manager.bots.do_manager.progress import DoProgressReporter
 from telegram_project_manager.bots.do_manager.service import DoService
@@ -180,6 +181,12 @@ async def run_bot(db: Database) -> None:
         payload_root=db.path.parent / "do-payloads",
     )
     do_manager = DoManager(db=db, service=do_service)
+    codex_queue_manager = CodexQueueManager(
+        db=db,
+        code_service=code_service,
+        ask_service=ask_service,
+        do_service=do_service,
+    )
     code_manager = CodeManager(
         db=db,
         service=code_service,
@@ -196,6 +203,7 @@ async def run_bot(db: Database) -> None:
     router = TelegramRouter(
         db=db,
         handlers=[
+            codex_queue_manager,
             do_manager,
             ask_manager,
             issue_manager,

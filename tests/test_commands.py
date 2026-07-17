@@ -21,6 +21,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("active repository", help_text)
         self.assertIn("/do --host <job>", help_text)
         self.assertIn("/do status", help_text)
+        self.assertIn("/queue", help_text)
 
     def test_database_upgrade_preserves_chat_settings_and_adds_topic_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
