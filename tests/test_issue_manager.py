@@ -191,7 +191,7 @@ class IssueManagerTests(unittest.TestCase):
             self.assertIn("Issue draft revised", accepted)
             self.assertEqual(planner.revise_calls[0]["local_repo_path"], "/cache/original.git")
 
-    def test_created_issue_has_code_and_issue_buttons(self):
+    def test_created_issue_has_plan_and_issue_buttons(self):
         class SuccessfulExecution:
             @staticmethod
             def execute(draft_id, user_id, chat_id, thread_id):
@@ -216,6 +216,7 @@ class IssueManagerTests(unittest.TestCase):
             self.assertIsInstance(response, OutgoingMessage)
             assert isinstance(response, OutgoingMessage)
             buttons = response.reply_markup()["inline_keyboard"][0]
+            self.assertEqual(buttons[0]["text"], "📝 Plan")
             self.assertEqual(buttons[0]["callback_data"], "command:/code owner/repo#12")
             self.assertEqual(buttons[1]["url"], "https://github.com/owner/repo/issues/12")
 

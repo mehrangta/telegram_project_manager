@@ -213,13 +213,13 @@ class IssueManager:
                 f"Link: {result.url}",
             ]
         )
-        code_callback = f"command:/code {result.repo}#{result.number}"
-        if len(code_callback.encode("utf-8")) > 64:
-            code_callback = f"command:/code #{result.number}"
+        plan_callback = f"command:/code {result.repo}#{result.number}"
+        if len(plan_callback.encode("utf-8")) > 64:
+            plan_callback = f"command:/code #{result.number}"
         return outgoing_message(
             text,
             keyboard=((
-                callback_button("💻 Code", code_callback),
+                callback_button("📝 Plan", plan_callback),
                 url_button("↗ Issue", result.url),
             ),),
         )
