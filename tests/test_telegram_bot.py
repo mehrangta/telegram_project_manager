@@ -183,6 +183,29 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(issue.reply_to_issue_ref, "owner/repo#123")
         self.assertEqual(job.reply_to_code_job_id, "c-abcdef12")
 
+    def test_extracts_code_job_id_from_plan_edit_prompt_reply(self):
+        incoming = incoming_message_from_update(
+            {
+                "message": {
+                    "message_id": 32,
+                    "from": {"id": 1},
+                    "chat": {"id": 2, "type": "supergroup"},
+                    "text": "Add a regression test.",
+                    "reply_to_message": {
+                        "from": {"id": 99, "is_bot": True},
+                        "text": (
+                            "✏️ Edit PR plan\n"
+                            "Code Job ID: c-abcdef12\n"
+                            "Reply to this message with feedback or answers."
+                        ),
+                    },
+                }
+            }
+        )
+
+        assert incoming is not None
+        self.assertEqual(incoming.reply_to_code_job_id, "c-abcdef12")
+
     def test_deploy_reply_extracts_code_job_id(self):
         message = incoming_message_from_update(
             {
@@ -402,6 +425,45 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_edit_button_is_expired_without_side_effects(self):
         bot = self.Bot([
             self.callback(1, "query-1", "edit_issue:not-a-draft", message_id=22)
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, [])
+        self.assertEqual(bot.answers, [("query-1", "Button expired")])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.deleted, [])
+
+    async def test_plan_edit_button_sends_reply_prompt_without_deleting_notification(self):
+        bot = self.Bot([
+            self.callback(
+                1,
+                "query-1",
+                "edit_code_plan:c-abcdef12",
+                message_id=22,
+                thread_id=7,
+            )
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, [])
+        self.assertEqual(bot.answers, [("query-1", "Send feedback")])
+        self.assertEqual(bot.deleted, [])
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][2], 7)
+        self.assertIn("Edit PR plan", bot.sent[0][1])
+        self.assertIn("c-abcdef12", bot.sent[0][1])
+        self.assertIn("/code edit", bot.sent[0][1])
+        self.assertIsNone(bot.sent[0][3]["reply_markup"])
+
+    async def test_invalid_plan_edit_button_is_expired_without_side_effects(self):
+        bot = self.Bot([
+            self.callback(1, "query-1", "edit_code_plan:not-a-job", message_id=22)
         ])
         router = self.Router()
 

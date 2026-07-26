@@ -60,7 +60,7 @@ class ResponsePresentationTests(unittest.TestCase):
             ],
         )
 
-    def test_non_issue_placeholder_command_remains_copy_action(self):
+    def test_code_plan_edit_placeholder_gets_callback_action(self):
         outgoing = outgoing_message(
             "Codex code job\n"
             "Code Job ID: c-abcdef12\n"
@@ -78,9 +78,16 @@ class ResponsePresentationTests(unittest.TestCase):
             for button in row
             if button.callback_data
         ]
+        callback_labels = [
+            button.label
+            for row in outgoing.keyboard
+            for button in row
+            if button.callback_data
+        ]
 
-        self.assertEqual(copied, ["c-abcdef12", "/code edit c-abcdef12"])
-        self.assertEqual(callbacks, [])
+        self.assertEqual(copied, ["c-abcdef12"])
+        self.assertEqual(callbacks, ["edit_code_plan:c-abcdef12"])
+        self.assertEqual(callback_labels, ["✏️ Edit"])
 
     def test_merge_and_deploy_require_confirmation_while_rebase_runs_directly(self):
         outgoing = outgoing_message(
