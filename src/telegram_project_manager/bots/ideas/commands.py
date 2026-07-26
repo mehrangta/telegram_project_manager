@@ -96,27 +96,6 @@ class BrainstormManager:
     ) -> dict[str, Any] | OutgoingMessage:
         settings = self.db.get_scope_settings(message.chat_id, message.thread_id)
         active_repo = str(settings.get("active_repo") or "")
-        configs = self.db.list_brainstorm_configs_for_scope(
-            message.chat_id, message.thread_id
-        )
-
-        selected = next(
-            (config for config in configs if str(config["repo"]) == active_repo),
-            None,
-        )
-        if selected is None:
-            enabled = [config for config in configs if config["enabled"]]
-            if len(enabled) == 1:
-                selected = enabled[0]
-            elif len(enabled) > 1:
-                return self._ambiguous_repository(message, enabled)
-            elif len(configs) == 1:
-                selected = configs[0]
-            elif len(configs) > 1:
-                return self._ambiguous_repository(message, configs)
-
-        if selected is not None:
-            return selected
         if active_repo:
             return {
                 "repo": active_repo,
@@ -127,18 +106,6 @@ class BrainstormManager:
         scope = "topic" if message.thread_id is not None else "chat"
         return outgoing_message(
             f"No active repo for this {scope}. Admin: /repo set owner/repository",
-            reply_to_message_id=message.message_id,
-        )
-
-    @staticmethod
-    def _ambiguous_repository(
-        message: IncomingMessage, configs: list[dict[str, Any]]
-    ) -> OutgoingMessage:
-        repos = ", ".join(str(config["repo"]) for config in configs)
-        scope = "topic" if message.thread_id is not None else "chat"
-        return outgoing_message(
-            f"Multiple brainstorm repos are configured for this {scope}: {repos}. "
-            "Admin: /repo set owner/repository",
             reply_to_message_id=message.message_id,
         )
 
