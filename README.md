@@ -64,7 +64,7 @@ Use `/help` in Telegram for the complete command reference.
 /code approve <c-job_id>                    Approve implementation
 /code status <c-job_id>                     Show code-job status
 /ask <question> [images]                    Inspect the active repository
-/brainstorm                                 Suggest 3 improvements for the active repository
+/brainstorm                                 Suggest 3 new ideas for the active repository
 /do <job> [images]                          Run a writable repository job
 /do status [d-job_id]                       Show do-job status
 /queue                                      Show current Codex work in this chat/topic
@@ -89,8 +89,9 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   Approve the plan before implementation unless `--skip-plan` was used. A job
   becomes ready only after repository validation and GitHub checks pass.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
-  `/brainstorm` returns three ranked repository improvements when brainstorming
-  is enabled for the repository. It detects the repository from the exact chat
+  `/brainstorm` returns three ranked ideas for new capabilities or meaningful
+  extensions when brainstorming is enabled for the repository; it is not a bug
+  finding or maintenance review. It detects the repository from the exact chat
   or topic configured as its brainstorm destination; the active repository is
   used to disambiguate shared destinations and as a fallback. Configure one
   scheduled destination per repo with

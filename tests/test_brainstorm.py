@@ -66,7 +66,10 @@ from telegram_project_manager.bots.ideas.schedule import (
     parse_interval,
     parse_utc_time,
 )
-from telegram_project_manager.bots.ideas.schemas import BrainstormResponse
+from telegram_project_manager.bots.ideas.schemas import (
+    BRAINSTORM_RESPONSE_SCHEMA,
+    BrainstormResponse,
+)
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 
@@ -136,27 +139,36 @@ class ScheduleTests(unittest.TestCase):
 
 
 class BrainstormSchemaTests(unittest.TestCase):
-    def test_requires_exactly_three_unique_improvements(self):
+    def test_requires_exactly_three_unique_ideas(self):
         raw = {
-            "improvements": [
+            "ideas": [
                 {
-                    "title": f"Improve {index}",
-                    "problem": "Problem",
-                    "recommendation": "Recommendation",
-                    "benefit": "Benefit",
+                    "title": f"Idea {index}",
+                    "opportunity": "Opportunity",
+                    "proposal": "Proposal",
+                    "value": "Value",
                     "sources": ["src/app.py", "src/app.py"],
                 }
                 for index in range(3)
             ]
         }
         response = BrainstormResponse.from_json(raw)
-        self.assertEqual(len(response.improvements), 3)
-        self.assertEqual(response.improvements[0].sources, ("src/app.py",))
+        self.assertEqual(len(response.ideas), 3)
+        self.assertEqual(response.ideas[0].sources, ("src/app.py",))
         with self.assertRaisesRegex(ValueError, "exactly 3"):
-            BrainstormResponse.from_json({"improvements": raw["improvements"][:2]})
-        raw["improvements"][1]["title"] = "IMPROVE 0"
+            BrainstormResponse.from_json({"ideas": raw["ideas"][:2]})
+        raw["ideas"][1]["title"] = "IDEA 0"
         with self.assertRaisesRegex(ValueError, "duplicate"):
             BrainstormResponse.from_json(raw)
+
+    def test_schema_uses_idea_oriented_fields(self):
+        self.assertEqual(BRAINSTORM_RESPONSE_SCHEMA["required"], ["ideas"])
+        idea_schema = BRAINSTORM_RESPONSE_SCHEMA["properties"]["ideas"]["items"]
+        self.assertEqual(
+            idea_schema["required"],
+            ["title", "opportunity", "proposal", "value", "sources"],
+        )
+        self.assertNotIn("problem", idea_schema["properties"])
 
 
 class BrainstormDatabaseTests(unittest.TestCase):
@@ -572,12 +584,12 @@ class FakeCodex:
     async def run_turn(self, **kwargs):
         self.calls.append(kwargs)
         return "thread", {
-            "improvements": [
+            "ideas": [
                 {
-                    "title": f"Improvement {index}",
-                    "problem": "A repository-specific problem.",
-                    "recommendation": "Make a focused change.",
-                    "benefit": "Improve reliability.",
+                    "title": f"Idea {index}",
+                    "opportunity": "A repository-specific opportunity.",
+                    "proposal": "Add a focused new capability.",
+                    "value": "Expand what users can accomplish.",
                     "sources": ["src/app.py", "missing.py"],
                 }
                 for index in range(1, 4)
@@ -643,7 +655,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.shutdown()
         self.temp.cleanup()
 
-    async def test_manual_run_sends_three_grounded_improvements(self):
+    async def test_manual_run_sends_three_grounded_ideas(self):
         brainstorm_id = await self.service.submit(
             chat_id=20,
             user_id=10,
@@ -657,14 +669,28 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("queued", self.bot.sent[0][1])
         result = self.bot.sent[1][1]
         self.assertIn("Repository brainstorm", result)
-        self.assertIn("1. Improvement 1", result)
-        self.assertIn("3. Improvement 3", result)
+        self.assertIn("1. Idea 1", result)
+        self.assertIn("3. Idea 3", result)
+        self.assertIn("<b>Opportunity:</b> A repository-specific opportunity.", result)
+        self.assertIn("<b>Proposal:</b> Add a focused new capability.", result)
+        self.assertIn("<b>Value:</b> Expand what users can accomplish.", result)
+        self.assertNotIn("Problem:", result)
+        self.assertNotIn("Change:", result)
         self.assertIn("src/app.py", result)
         self.assertNotIn("missing.py", result)
         call = self.codex.calls[0]
         self.assertEqual(call["effort"], ReasoningEffort.high)
         self.assertEqual(call["model_role"], "plan")
         self.assertEqual(call["sandbox"], Sandbox.full_access)
+        prompt = call["prompt"]
+        self.assertIn("new capabilities", prompt)
+        self.assertIn("Do not propose bug fixes", prompt)
+        self.assertIn("maintenance", prompt)
+        self.assertIn("only when it directly enables", prompt)
+        self.assertIn(
+            "new repository capabilities", call["developer_instructions"]
+        )
+        self.assertEqual(call["output_schema"], BRAINSTORM_RESPONSE_SCHEMA)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
 
     async def test_scheduled_run_advances_and_uses_configured_destination(self):
