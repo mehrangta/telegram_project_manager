@@ -77,7 +77,7 @@ class BrainstormManager:
                 chat_id=message.chat_id,
                 user_id=message.user_id,
                 thread_id=message.thread_id,
-                message_id=message.message_id,
+                reply_to_message_id=message.message_id,
                 repo=repo,
                 branch=str(repository.get("default_branch") or "main"),
                 source_path=str(repository.get("local_repo_path") or ""),
