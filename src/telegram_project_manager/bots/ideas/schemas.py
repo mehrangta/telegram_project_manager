@@ -5,17 +5,19 @@ from typing import Any
 
 IDEA_COUNT = 3
 MAX_TITLE_LENGTH = 100
-MAX_DETAIL_LENGTH = 650
-MAX_SOURCES = 4
-MAX_SOURCE_LENGTH = 180
+MAX_OPPORTUNITY_LENGTH = 240
+MAX_PROPOSAL_LENGTH = 280
+MAX_VALUE_LENGTH = 200
+MAX_SOURCES = 3
+MAX_SOURCE_LENGTH = 90
 
 IDEA_SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string", "maxLength": MAX_TITLE_LENGTH},
-        "opportunity": {"type": "string", "maxLength": MAX_DETAIL_LENGTH},
-        "proposal": {"type": "string", "maxLength": MAX_DETAIL_LENGTH},
-        "value": {"type": "string", "maxLength": MAX_DETAIL_LENGTH},
+        "opportunity": {"type": "string", "maxLength": MAX_OPPORTUNITY_LENGTH},
+        "proposal": {"type": "string", "maxLength": MAX_PROPOSAL_LENGTH},
+        "value": {"type": "string", "maxLength": MAX_VALUE_LENGTH},
         "sources": {
             "type": "array",
             "maxItems": MAX_SOURCES,
@@ -72,22 +74,28 @@ class BrainstormResponse:
             raw_sources = item.get("sources")
             if not isinstance(raw_sources, list):
                 raise ValueError("Codex idea has invalid sources")
+            if len(raw_sources) > MAX_SOURCES:
+                raise ValueError(f"Codex idea has more than {MAX_SOURCES} sources")
             sources: list[str] = []
             seen: set[str] = set()
             for source in raw_sources:
                 normalized = str(source or "").strip().replace("\\", "/")
                 if not normalized or normalized in seen:
                     continue
+                if len(normalized) > MAX_SOURCE_LENGTH:
+                    raise ValueError(
+                        f"Codex idea source exceeds {MAX_SOURCE_LENGTH} characters"
+                    )
                 seen.add(normalized)
-                sources.append(normalized[:MAX_SOURCE_LENGTH])
-                if len(sources) == MAX_SOURCES:
-                    break
+                sources.append(normalized)
             ideas.append(
                 BrainstormIdea(
                     title=title,
-                    opportunity=_required(item, "opportunity", MAX_DETAIL_LENGTH),
-                    proposal=_required(item, "proposal", MAX_DETAIL_LENGTH),
-                    value=_required(item, "value", MAX_DETAIL_LENGTH),
+                    opportunity=_required_detail(
+                        item, "opportunity", MAX_OPPORTUNITY_LENGTH
+                    ),
+                    proposal=_required_detail(item, "proposal", MAX_PROPOSAL_LENGTH),
+                    value=_required_detail(item, "value", MAX_VALUE_LENGTH),
                     sources=tuple(sources),
                 )
             )
@@ -95,7 +103,16 @@ class BrainstormResponse:
 
 
 def _required(item: dict[str, Any], key: str, limit: int) -> str:
-    value = str(item.get(key) or "").strip()
+    value = " ".join(str(item.get(key) or "").split())
     if not value:
         raise ValueError(f"Codex idea has an empty {key}")
-    return value[:limit]
+    if len(value) > limit:
+        raise ValueError(f"Codex idea {key} exceeds {limit} characters")
+    return value
+
+
+def _required_detail(item: dict[str, Any], key: str, limit: int) -> str:
+    value = _required(item, key, limit)
+    if value.endswith(("...", "…")):
+        raise ValueError(f"Codex idea has an incomplete {key}")
+    return value

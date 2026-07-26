@@ -7,4 +7,6 @@ managed with `/repo brainstorm ...`; manual runs detect the repository from the 
 configured chat or topic destination, with the active repository used for
 fallback. Manual runs update their queued Telegram reply with the terminal result;
 scheduled runs post the terminal result directly. Execution uses detached
-worktrees and the Codex plan model.
+worktrees and the Codex plan model. Idea fields are generated to a bounded
+single-message format and delivered as complete text rather than shortened after
+generation.

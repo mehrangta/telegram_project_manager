@@ -95,9 +95,11 @@ existing job. `/do --host <job>` is restricted to private admin chats.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
   extensions when brainstorming is enabled for the current chat or topic's
-  active repository; it is not a bug finding or maintenance review. Scheduled
-  runs continue to use the destination saved for their repository. Configure one
-  scheduled destination per repo with
+  active repository; it is not a bug finding or maintenance review. Each result
+  uses a bounded single-message format so all three ideas are delivered without
+  post-generation sentence truncation. Scheduled runs continue to use the
+  destination saved for their repository. Configure one scheduled destination
+  per repo with
   `/repo brainstorm schedule owner/repository daily 09:00` and
   `/repo brainstorm enable owner/repository`; schedule times are UTC, and
   disabling preserves the cadence and destination.
