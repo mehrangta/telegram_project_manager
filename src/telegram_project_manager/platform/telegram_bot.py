@@ -446,6 +446,21 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             await send_response(incoming, prompt)
             await delete_callback_source(callback)
             return
+        if data.startswith("edit_code_plan:"):
+            job_id = data.removeprefix("edit_code_plan:")
+            if not CALLBACK_JOB_PATTERN.fullmatch(job_id):
+                await answer_callback(callback.query_id, "Button expired")
+                return
+            await answer_callback(callback.query_id, "Send feedback")
+            prompt = outgoing_message(
+                "✏️ Edit PR plan\n"
+                f"Code Job ID: {job_id}\n"
+                "Reply to this message with feedback or answers, or run:\n"
+                f"/code edit {job_id} <feedback>",
+                keyboard=(),
+            )
+            await send_response(incoming, prompt)
+            return
         if data in {"cancel_deploy", "cancel_merge"}:
             label = "Merge cancelled" if data == "cancel_merge" else "Deployment cancelled"
             await answer_callback(callback.query_id, label)

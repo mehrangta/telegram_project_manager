@@ -13,6 +13,7 @@ URL_RE = re.compile(r"https://[^\s<>]+")
 PRIMARY_ID_RE = re.compile(r"(?m)^(Code Job ID|Do Job ID|Draft ID|Plan ID):\s*([^\s]+)\s*$")
 COMMAND_RE = re.compile(r"(/[a-z][a-z0-9_]*(?:\s+[^\n]+)?)", re.IGNORECASE)
 ISSUE_EDIT_COMMAND_RE = re.compile(r"^/edit (i-[0-9a-f]{8})$")
+CODE_PLAN_EDIT_COMMAND_RE = re.compile(r"^/code edit (c-[0-9a-f]{8})$")
 FIELD_RE = re.compile(r"^([^:\n]{1,40}):\s*(.*)$")
 
 
@@ -135,6 +136,12 @@ def keyboard_for_text(text: str) -> tuple[tuple[InlineButton, ...], ...]:
             issue_edit = ISSUE_EDIT_COMMAND_RE.fullmatch(command)
             if issue_edit and issue_edit.group(1) == identifier:
                 buttons.append(callback_button(_command_label(action), f"edit_issue:{identifier}"))
+            elif (
+                code_plan_edit := CODE_PLAN_EDIT_COMMAND_RE.fullmatch(command)
+            ) and code_plan_edit.group(1) == identifier:
+                buttons.append(
+                    callback_button(_command_label(action), f"edit_code_plan:{identifier}")
+                )
             else:
                 buttons.append(copy_button(f"📋 {action}", command))
         elif command.lower().startswith("/deploy "):

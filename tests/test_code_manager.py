@@ -123,6 +123,71 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(other, "No code jobs for this topic.")
             self.assertIn("different topic", rejected)
 
+    async def test_reply_to_plan_edit_prompt_submits_telegram_feedback(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            async def edit_plan(self, job_id, feedback, **metadata):
+                self.calls.append((job_id, feedback, metadata))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(20, "admin", "admin")
+            db.create_code_job(
+                {
+                    "id": "c-abcdef12",
+                    "telegram_chat_id": 10,
+                    "telegram_user_id": 20,
+                    "telegram_thread_id": 30,
+                    "repo": "owner/repo",
+                    "issue_number": 12,
+                    "issue_title": "Issue",
+                    "issue_url": "url",
+                    "issue_context_json": {},
+                    "base_branch": "main",
+                    "target_branch": "branch",
+                    "workspace_path": "/tmp/job",
+                    "source_repo_path": "/tmp/repo",
+                    "status": "awaiting_approval",
+                    "resume_phase": "plan",
+                    "skip_plan": False,
+                }
+            )
+            service = Service()
+            manager = CodeManager(
+                db=db, service=service, github=object(), reporter=object()
+            )
+
+            response = await manager.handle(
+                IncomingMessage(
+                    10,
+                    20,
+                    "admin",
+                    "Add a regression test.",
+                    message_id=99,
+                    thread_id=30,
+                    reply_to_code_job_id="c-abcdef12",
+                )
+            )
+
+            self.assertIsNone(response)
+            self.assertEqual(
+                service.calls,
+                [
+                    (
+                        "c-abcdef12",
+                        "Add a regression test.",
+                        {
+                            "source": "telegram",
+                            "source_id": "10:99",
+                            "author": "20",
+                        },
+                    )
+                ],
+            )
+
 
 class FakeBot:
     def __init__(self):
@@ -418,6 +483,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>Plan revision:</b> 1", self.bot.sent[1][1])
         self.assertIn("https://github.com/owner/repo/pull/42", self.bot.sent[1][1])
         self.assertIn(f"/code approve {job_id}", self.bot.sent[1][1])
+        self.assertIn(
+            f"edit_code_plan:{job_id}",
+            str(self.bot.sent_options[1]["reply_markup"]),
+        )
         await wait_for_plan_message(self.db, job_id, 78)
         self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[0]["effort"], ReasoningEffort.high)
@@ -582,6 +651,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("needs your answers", self.bot.sent[-1][1])
         self.assertIn("Preserve the current API", self.bot.sent[-1][1])
         self.assertNotIn("confirm_code_approve", str(self.bot.sent_options[-1]["reply_markup"]))
+        self.assertIn(
+            f"edit_code_plan:{job_id}",
+            str(self.bot.sent_options[-1]["reply_markup"]),
+        )
         with self.assertRaisesRegex(ValueError, "open questions"):
             await self.service.approve(job_id)
         self.assertEqual(self.bot.deleted, [])
