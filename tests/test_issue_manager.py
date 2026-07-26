@@ -191,7 +191,7 @@ class IssueManagerTests(unittest.TestCase):
             self.assertIn("Issue draft revised", accepted)
             self.assertEqual(planner.revise_calls[0]["local_repo_path"], "/cache/original.git")
 
-    def test_created_issue_has_plan_and_issue_buttons(self):
+    def test_created_issue_has_plan_code_and_issue_buttons(self):
         class SuccessfulExecution:
             @staticmethod
             def execute(draft_id, user_id, chat_id, thread_id):
@@ -218,7 +218,47 @@ class IssueManagerTests(unittest.TestCase):
             buttons = response.reply_markup()["inline_keyboard"][0]
             self.assertEqual(buttons[0]["text"], "📝 Plan")
             self.assertEqual(buttons[0]["callback_data"], "command:/code owner/repo#12")
-            self.assertEqual(buttons[1]["url"], "https://github.com/owner/repo/issues/12")
+            self.assertEqual(buttons[1]["text"], "💻 Code")
+            self.assertEqual(
+                buttons[1]["callback_data"],
+                "command:/code --skip-plan owner/repo#12",
+            )
+            self.assertEqual(buttons[2]["text"], "↗ Issue")
+            self.assertEqual(buttons[2]["url"], "https://github.com/owner/repo/issues/12")
+
+    def test_created_issue_actions_fall_back_to_short_callbacks(self):
+        class SuccessfulExecution:
+            @staticmethod
+            def execute(draft_id, user_id, chat_id, thread_id):
+                repo = f"{'o' * 39}/{'r' * 40}"
+                return IssueResult(
+                    repo=repo,
+                    number=12,
+                    url=f"https://github.com/{repo}/issues/12",
+                    title="Broken button",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
+
+            response = manager.confirm(
+                IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
+                "i-abcdef12",
+            )
+
+            self.assertIsInstance(response, OutgoingMessage)
+            assert isinstance(response, OutgoingMessage)
+            buttons = response.reply_markup()["inline_keyboard"][0]
+            self.assertEqual(buttons[0]["callback_data"], "command:/code #12")
+            self.assertEqual(
+                buttons[1]["callback_data"],
+                "command:/code --skip-plan #12",
+            )
+            self.assertLessEqual(len(buttons[0]["callback_data"].encode("utf-8")), 64)
+            self.assertLessEqual(len(buttons[1]["callback_data"].encode("utf-8")), 64)
 
     def test_issue_draft_round_trip_with_attachment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

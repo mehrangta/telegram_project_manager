@@ -78,6 +78,65 @@ RESULT = {
 
 
 class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skip_plan_command_starts_code_in_current_topic(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            async def create_job(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class GitHub:
+            def __init__(self):
+                self.calls = []
+
+            def get_issue(self, repo, number):
+                self.calls.append((repo, number))
+                return IssueContext(
+                    repo=repo,
+                    number=number,
+                    title="Issue",
+                    body="Body",
+                    url=f"https://github.com/{repo}/issues/{number}",
+                    comments=(),
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(20, "admin", "admin")
+            db.allow_repo("owner/repo", 20)
+            db.set_scope_repo(10, 30, "owner/repo", 20, "develop")
+            db.set_scope_local_repo(10, 30, "/cache/owner-repo.git", 20)
+            service = Service()
+            github = GitHub()
+            manager = CodeManager(
+                db=db, service=service, github=github, reporter=object()
+            )
+
+            response = await manager.handle(
+                IncomingMessage(
+                    10,
+                    20,
+                    "admin",
+                    "/code --skip-plan owner/repo#12",
+                    thread_id=30,
+                )
+            )
+
+            self.assertIsNone(response)
+            self.assertEqual(github.calls, [("owner/repo", 12)])
+            self.assertEqual(len(service.calls), 1)
+            call = service.calls[0]
+            self.assertEqual(call["chat_id"], 10)
+            self.assertEqual(call["user_id"], 20)
+            self.assertEqual(call["thread_id"], 30)
+            self.assertEqual(call["issue"].repo, "owner/repo")
+            self.assertEqual(call["issue"].number, 12)
+            self.assertEqual(call["base_branch"], "develop")
+            self.assertEqual(call["source_path"], "/cache/owner-repo.git")
+            self.assertTrue(call["skip_plan"])
+
     async def test_status_and_controls_are_limited_to_current_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
