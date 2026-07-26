@@ -395,23 +395,27 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("disabled", response.text)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["interval_days"], 1)
 
-    async def test_auto_detects_repository_for_chat_and_topic(self):
+    async def test_uses_active_repository_for_chat_and_topic(self):
+        self.db.set_scope_repo(21, None, "owner/repo", 10, "release")
+        self.db.set_scope_local_repo(21, None, "/cache/chat.git", 10)
         self.db.enable_brainstorm(
             "owner/repo",
-            chat_id=21,
+            chat_id=99,
             thread_id=None,
-            default_branch="release",
-            local_repo_path="/cache/chat.git",
+            default_branch="scheduled-chat",
+            local_repo_path="/cache/scheduled-chat.git",
             next_run_at=None,
             user_id=10,
         )
         self.db.allow_repo("owner/topic", 10)
+        self.db.set_scope_repo(21, 31, "owner/topic", 10, "develop")
+        self.db.set_scope_local_repo(21, 31, "/cache/topic.git", 10)
         self.db.enable_brainstorm(
             "owner/topic",
-            chat_id=21,
-            thread_id=31,
-            default_branch="develop",
-            local_repo_path="/cache/topic.git",
+            chat_id=99,
+            thread_id=None,
+            default_branch="scheduled-topic",
+            local_repo_path="/cache/scheduled-topic.git",
             next_run_at=None,
             user_id=10,
         )
@@ -438,16 +442,25 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.service.calls[1]["source_path"], "/cache/topic.git")
 
-    async def test_detected_repository_overrides_unrelated_active_repo(self):
+    async def test_active_repository_overrides_destination_repository(self):
         self.db.allow_repo("owner/other", 10)
-        self.db.set_scope_repo(21, 31, "owner/other", 10, "wrong")
-        self.db.set_scope_local_repo(21, 31, "/cache/wrong.git", 10)
+        self.db.set_scope_repo(21, 31, "owner/other", 10, "current")
+        self.db.set_scope_local_repo(21, 31, "/cache/current.git", 10)
         self.db.enable_brainstorm(
             "owner/repo",
             chat_id=21,
             thread_id=31,
-            default_branch="detected",
-            local_repo_path="/cache/detected.git",
+            default_branch="destination",
+            local_repo_path="/cache/destination.git",
+            next_run_at=None,
+            user_id=10,
+        )
+        self.db.enable_brainstorm(
+            "owner/other",
+            chat_id=99,
+            thread_id=None,
+            default_branch="scheduled",
+            local_repo_path="/cache/scheduled.git",
             next_run_at=None,
             user_id=10,
         )
@@ -459,9 +472,9 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(response)
-        self.assertEqual(self.service.calls[0]["repo"], "owner/repo")
-        self.assertEqual(self.service.calls[0]["branch"], "detected")
-        self.assertEqual(self.service.calls[0]["source_path"], "/cache/detected.git")
+        self.assertEqual(self.service.calls[0]["repo"], "owner/other")
+        self.assertEqual(self.service.calls[0]["branch"], "current")
+        self.assertEqual(self.service.calls[0]["source_path"], "/cache/current.git")
 
     async def test_topic_does_not_inherit_chat_brainstorm_destination(self):
         self.db.enable_brainstorm(
@@ -484,39 +497,7 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.reply_to_message_id, 45)
         self.assertEqual(self.service.calls, [])
 
-    async def test_active_repo_disambiguates_multiple_destination_repositories(self):
-        self.db.allow_repo("owner/other", 10)
-        for repo, path in (
-            ("owner/repo", "/cache/repo.git"),
-            ("owner/other", "/cache/other.git"),
-        ):
-            self.db.enable_brainstorm(
-                repo,
-                chat_id=21,
-                thread_id=None,
-                default_branch="main",
-                local_repo_path=path,
-                next_run_at=None,
-                user_id=10,
-            )
-
-        ambiguous = await self.manager.handle(
-            IncomingMessage(21, 10, "admin", "/brainstorm", message_id=46)
-        )
-        self.db.set_scope_repo(21, None, "owner/other", 10, "ignored")
-        selected = await self.manager.handle(
-            IncomingMessage(21, 10, "admin", "/brainstorm", message_id=47)
-        )
-
-        self.assertIn("Multiple brainstorm repos", ambiguous.text)
-        self.assertIn("owner/other, owner/repo", ambiguous.text)
-        self.assertEqual(ambiguous.reply_to_message_id, 46)
-        self.assertIsNone(selected)
-        self.assertEqual(len(self.service.calls), 1)
-        self.assertEqual(self.service.calls[0]["repo"], "owner/other")
-        self.assertEqual(self.service.calls[0]["source_path"], "/cache/other.git")
-
-    async def test_auto_detected_disabled_repository_reports_disabled(self):
+    async def test_destination_repository_does_not_replace_missing_active_repo(self):
         self.db.enable_brainstorm(
             "owner/repo",
             chat_id=21,
@@ -526,7 +507,40 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
             next_run_at=None,
             user_id=10,
         )
-        self.db.disable_brainstorm("owner/repo", 10)
+
+        response = await self.manager.handle(
+            IncomingMessage(
+                21, 10, "admin", "/brainstorm", message_id=46, thread_id=31
+            )
+        )
+
+        self.assertIn("No active repo for this topic", response.text)
+        self.assertEqual(response.reply_to_message_id, 46)
+        self.assertEqual(self.service.calls, [])
+
+    async def test_disabled_active_repository_does_not_fall_through(self):
+        self.db.allow_repo("owner/other", 10)
+        self.db.set_scope_repo(21, 31, "owner/other", 10, "develop")
+        self.db.set_scope_local_repo(21, 31, "/cache/other.git", 10)
+        self.db.enable_brainstorm(
+            "owner/repo",
+            chat_id=21,
+            thread_id=31,
+            default_branch="main",
+            local_repo_path="/cache/repo.git",
+            next_run_at=None,
+            user_id=10,
+        )
+        self.db.enable_brainstorm(
+            "owner/other",
+            chat_id=99,
+            thread_id=None,
+            default_branch="main",
+            local_repo_path="/cache/other.git",
+            next_run_at=None,
+            user_id=10,
+        )
+        self.db.disable_brainstorm("owner/other", 10)
 
         response = await self.manager.handle(
             IncomingMessage(
@@ -534,11 +548,11 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertIn("disabled for owner/repo", response.text)
+        self.assertIn("disabled for owner/other", response.text)
         self.assertEqual(response.reply_to_message_id, 47)
         self.assertEqual(self.service.calls, [])
 
-    async def test_falls_back_to_active_repo_without_destination_match(self):
+    async def test_uses_current_scope_metadata_instead_of_scheduled_snapshot(self):
         self.db.enable_brainstorm(
             "owner/repo",
             chat_id=99,
