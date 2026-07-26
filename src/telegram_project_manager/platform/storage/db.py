@@ -189,6 +189,16 @@ class Database:
                     PRIMARY KEY (telegram_chat_id, telegram_thread_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS pull_request_list_messages (
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER NOT NULL,
+                    telegram_message_id INTEGER NOT NULL,
+                    repo TEXT NOT NULL,
+                    render_hash TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (telegram_chat_id, telegram_thread_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS issue_attachments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     draft_id TEXT NOT NULL,
@@ -582,9 +592,9 @@ class Database:
                 SELECT * FROM issue_list_messages
                 WHERE telegram_chat_id = ? AND telegram_thread_id = ?
                 """,
-                (chat_id, self._issue_list_thread_id(thread_id)),
+                (chat_id, self._list_thread_id(thread_id)),
             ).fetchone()
-        return self._decode_issue_list_message(row)
+        return self._decode_list_message(row)
 
     def list_issue_list_messages(self) -> list[dict[str, Any]]:
         with self.session() as conn:
@@ -594,7 +604,7 @@ class Database:
                 ORDER BY telegram_chat_id, telegram_thread_id
                 """
             ).fetchall()
-        return [self._decode_issue_list_message(row) for row in rows if row is not None]
+        return [self._decode_list_message(row) for row in rows if row is not None]
 
     def upsert_issue_list_message(
         self,
@@ -619,7 +629,7 @@ class Database:
                 """,
                 (
                     chat_id,
-                    self._issue_list_thread_id(thread_id),
+                    self._list_thread_id(thread_id),
                     message_id,
                     repo,
                     render_hash,
@@ -647,7 +657,7 @@ class Database:
                     render_hash,
                     int(time.time()),
                     chat_id,
-                    self._issue_list_thread_id(thread_id),
+                    self._list_thread_id(thread_id),
                     message_id,
                     repo,
                 ),
@@ -670,7 +680,111 @@ class Database:
                 """,
                 (
                     chat_id,
-                    self._issue_list_thread_id(thread_id),
+                    self._list_thread_id(thread_id),
+                    message_id,
+                    repo,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def get_pull_request_list_message(
+        self, chat_id: int, thread_id: int | None
+    ) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM pull_request_list_messages
+                WHERE telegram_chat_id = ? AND telegram_thread_id = ?
+                """,
+                (chat_id, self._list_thread_id(thread_id)),
+            ).fetchone()
+        return self._decode_list_message(row)
+
+    def list_pull_request_list_messages(self) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM pull_request_list_messages
+                ORDER BY telegram_chat_id, telegram_thread_id
+                """
+            ).fetchall()
+        return [self._decode_list_message(row) for row in rows if row is not None]
+
+    def upsert_pull_request_list_message(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        message_id: int,
+        repo: str,
+        render_hash: str,
+    ) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO pull_request_list_messages (
+                    telegram_chat_id, telegram_thread_id, telegram_message_id,
+                    repo, render_hash, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_chat_id, telegram_thread_id) DO UPDATE SET
+                    telegram_message_id = excluded.telegram_message_id,
+                    repo = excluded.repo,
+                    render_hash = excluded.render_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    self._list_thread_id(thread_id),
+                    message_id,
+                    repo,
+                    render_hash,
+                    int(time.time()),
+                ),
+            )
+
+    def update_pull_request_list_render_hash(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        message_id: int,
+        repo: str,
+        render_hash: str,
+    ) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pull_request_list_messages
+                SET render_hash = ?, updated_at = ?
+                WHERE telegram_chat_id = ? AND telegram_thread_id = ?
+                  AND telegram_message_id = ? AND repo = ?
+                """,
+                (
+                    render_hash,
+                    int(time.time()),
+                    chat_id,
+                    self._list_thread_id(thread_id),
+                    message_id,
+                    repo,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def delete_pull_request_list_message(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        message_id: int,
+        repo: str,
+    ) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM pull_request_list_messages
+                WHERE telegram_chat_id = ? AND telegram_thread_id = ?
+                  AND telegram_message_id = ? AND repo = ?
+                """,
+                (
+                    chat_id,
+                    self._list_thread_id(thread_id),
                     message_id,
                     repo,
                 ),
@@ -678,11 +792,11 @@ class Database:
         return cursor.rowcount == 1
 
     @staticmethod
-    def _issue_list_thread_id(thread_id: int | None) -> int:
+    def _list_thread_id(thread_id: int | None) -> int:
         return int(thread_id) if thread_id is not None else 0
 
     @staticmethod
-    def _decode_issue_list_message(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    def _decode_list_message(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
         message = dict(row)

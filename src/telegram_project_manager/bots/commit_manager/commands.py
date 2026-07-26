@@ -95,6 +95,7 @@ Commands:
 /repo show
 /repo check
 /issues
+/prs
 /commit <request>
 /issue <prompt> (text or photo/album caption)
 /do <job> [images] (active repository; admin)

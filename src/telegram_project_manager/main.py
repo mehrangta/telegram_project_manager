@@ -27,9 +27,13 @@ from telegram_project_manager.bots.ideas.commands import BrainstormManager
 from telegram_project_manager.bots.ideas.service import BrainstormService
 from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
 from telegram_project_manager.bots.pull_request_manager.github import DeploymentGitHubService
+from telegram_project_manager.bots.pull_request_manager.pull_request_list import (
+    PullRequestListService,
+)
 from telegram_project_manager.bots.pull_request_manager.service import MergeDeploymentService
 from telegram_project_manager.integrations.gh.commits import GhCommitExecutor
 from telegram_project_manager.integrations.gh.issues import GhIssueExecutor, GhIssueReader
+from telegram_project_manager.integrations.gh.pull_requests import GhPullRequestReader
 from telegram_project_manager.integrations.gh.repository_context import RepositoryContextService
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryService
 from telegram_project_manager.integrations.gh.runner import GhRunner
@@ -209,7 +213,16 @@ async def run_bot(db: Database) -> None:
         reporter=code_reporter,
         conflict_rebaser=code_service.rebase_for_operation,
     )
-    pull_request_manager = PullRequestManager(db=db, service=deployment_service)
+    pull_request_lists = PullRequestListService(
+        db=db,
+        bot=bot,
+        reader=GhPullRequestReader(gh),
+    )
+    pull_request_manager = PullRequestManager(
+        db=db,
+        service=deployment_service,
+        pull_request_lists=pull_request_lists,
+    )
     router = TelegramRouter(
         db=db,
         handlers=[
@@ -224,6 +237,7 @@ async def run_bot(db: Database) -> None:
         ],
     )
     await issue_lists.recover()
+    await pull_request_lists.recover()
     await brainstorm_service.recover()
     await code_service.recover()
     await deployment_service.recover()
@@ -231,6 +245,7 @@ async def run_bot(db: Database) -> None:
         await run_polling(bot, router)
     finally:
         await issue_lists.shutdown()
+        await pull_request_lists.shutdown()
         await repository_setup.shutdown()
         await brainstorm_service.shutdown()
         await ask_service.shutdown()

@@ -58,6 +58,7 @@ Use `/help` in Telegram for the complete command reference.
 /repo setup owner/repository                Configure and cache a repository
 /repo show                                  Show current repository settings
 /issues                                     List open issues
+/prs                                        List open pull requests
 /issue <prompt>                             Draft a GitHub issue
 /commit <request>                           Draft a direct commit plan
 /code #123                                  Plan an issue in the active repository
@@ -93,13 +94,10 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   and GitHub checks pass.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
-  extensions when brainstorming is enabled for the repository; it is not a bug
-  finding or maintenance review. Manual runs post one queued reply and update
-  that message with the result or failure; scheduled runs post their result
-  directly. It detects the repository from the exact chat or topic configured
-  as its brainstorm destination; the active repository is used to disambiguate
-  shared destinations and as a fallback. Configure one scheduled destination
-  per repo with
+  extensions when brainstorming is enabled for the current chat or topic's
+  active repository; it is not a bug finding or maintenance review. Scheduled
+  runs continue to use the destination saved for their repository. Configure one
+  scheduled destination per repo with
   `/repo brainstorm schedule owner/repository daily 09:00` and
   `/repo brainstorm enable owner/repository`; schedule times are UTC, and
   disabling preserves the cadence and destination.
