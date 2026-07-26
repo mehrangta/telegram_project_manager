@@ -23,6 +23,8 @@ from telegram_project_manager.bots.do_manager.workspace import DoWorkspaceServic
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
+from telegram_project_manager.bots.ideas.commands import BrainstormManager
+from telegram_project_manager.bots.ideas.service import BrainstormService
 from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
 from telegram_project_manager.bots.pull_request_manager.github import DeploymentGitHubService
 from telegram_project_manager.bots.pull_request_manager.service import MergeDeploymentService
@@ -166,6 +168,13 @@ async def run_bot(db: Database) -> None:
         bot=bot,
     )
     ask_manager = AskManager(db=db, service=ask_service)
+    brainstorm_service = BrainstormService(
+        db=db,
+        codex=codex,
+        workspaces=workspaces,
+        bot=bot,
+    )
+    brainstorm_manager = BrainstormManager(db=db, service=brainstorm_service)
     do_reporter = DoProgressReporter(db, bot)
     do_workspaces = DoWorkspaceService(
         repositories=repositories,
@@ -186,6 +195,7 @@ async def run_bot(db: Database) -> None:
         code_service=code_service,
         ask_service=ask_service,
         do_service=do_service,
+        brainstorm_service=brainstorm_service,
     )
     code_manager = CodeManager(
         db=db,
@@ -206,6 +216,7 @@ async def run_bot(db: Database) -> None:
             codex_queue_manager,
             do_manager,
             ask_manager,
+            brainstorm_manager,
             issue_manager,
             code_manager,
             pull_request_manager,
@@ -213,6 +224,7 @@ async def run_bot(db: Database) -> None:
         ],
     )
     await issue_lists.recover()
+    await brainstorm_service.recover()
     await code_service.recover()
     await deployment_service.recover()
     try:
@@ -220,6 +232,7 @@ async def run_bot(db: Database) -> None:
     finally:
         await issue_lists.shutdown()
         await repository_setup.shutdown()
+        await brainstorm_service.shutdown()
         await ask_service.shutdown()
         await deployment_service.shutdown()
         await code_service.shutdown()

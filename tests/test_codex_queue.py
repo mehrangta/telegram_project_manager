@@ -77,8 +77,26 @@ class CodexQueueManagerTests(unittest.IsolatedAsyncioTestCase):
                 "queued": (),
             }
         )
+        brainstorms = FakeQueueService(
+            {
+                "running": (
+                    {
+                        "id": "b-44444444",
+                        "repo": "owner/ideas",
+                        "branch": "develop",
+                        "trigger": "scheduled",
+                        "status": "running",
+                    },
+                ),
+                "queued": (),
+            }
+        )
         manager = CodexQueueManager(
-            db=self.db, code_service=code, ask_service=asks, do_service=do
+            db=self.db,
+            code_service=code,
+            ask_service=asks,
+            do_service=do,
+            brainstorm_service=brainstorms,
         )
 
         response = await manager.handle(
@@ -91,6 +109,8 @@ class CodexQueueManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("c-11111111 owner/code#8", response.text)
         self.assertIn("Repository questions", response.text)
         self.assertIn("a-22222222 owner/ask@main · 2 images", response.text)
+        self.assertIn("Repository brainstorms", response.text)
+        self.assertIn("b-44444444 owner/ideas@develop — scheduled: running", response.text)
         self.assertIn("Full-access jobs", response.text)
         self.assertIn("d-33333333 host", response.text)
         self.assertIn("&lt;unsafe &amp; value&gt;", response.text)
@@ -99,6 +119,7 @@ class CodexQueueManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code.calls, expected)
         self.assertEqual(asks.calls, expected)
         self.assertEqual(do.calls, expected)
+        self.assertEqual(brainstorms.calls, expected)
 
     async def test_empty_scope_unexpected_arguments_and_permissions(self):
         empty = FakeQueueService({"running": (), "queued": ()})

@@ -90,6 +90,8 @@ Commands:
 /repo local set <absolute-path>
 /repo deploy enable|disable owner/repository
 /repo deploy set owner/repository <workflow-name-or-file>
+/repo brainstorm show|enable|disable owner/repository
+/repo brainstorm schedule owner/repository <daily|weekly|Nd> <HH:MM>
 /repo show
 /repo check
 /issues
@@ -99,6 +101,7 @@ Commands:
 /do --host <job> [images] (private admin; full host access)
 /do status [d-job_id]
 /queue
+/brainstorm
 /code #123 [--skip-plan]
 /code approve|edit|discard|retry|rebase|status <code_job_id>
 /deploy <code_job_id> (or reply /deploy to a code-job message)
@@ -257,6 +260,7 @@ Commands:
                 cache = f"{resolved} (ok)"
             except LocalRepositoryError as exc:
                 cache = f"{path} (invalid: {exc})"
+        brainstorm = self.db.get_brainstorm_config(repo) if repo else None
         return "\n".join(
             [
                 f"Active repo: {repo or 'not set'}",
@@ -266,6 +270,15 @@ Commands:
                 f"Deploy workflow: {self.db.get_repo_deploy_workflow(repo) or 'not set'}"
                 if repo
                 else "Deploy workflow: not set",
+                f"Brainstorm enabled: {'yes' if brainstorm and brainstorm['enabled'] else 'no'}",
+                "Brainstorm schedule: "
+                + (
+                    f"every {brainstorm['interval_days']} day(s) at "
+                    f"{int(brainstorm['run_at_minute_utc']) // 60:02d}:"
+                    f"{int(brainstorm['run_at_minute_utc']) % 60:02d} UTC"
+                    if brainstorm and brainstorm.get("interval_days") is not None
+                    else "not set"
+                ),
             ]
         )
 
