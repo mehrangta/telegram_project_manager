@@ -338,6 +338,9 @@ class FakeGitHub:
         self.diagnostics = []
         self.plan_question_comments = []
         self.pr_comments = []
+        self.pr_comment_calls = []
+        self.pr_state = "open"
+        self.pr_state_calls = []
         self.authenticated_login = "bot-owner"
         self.workflow_validation_errors = []
         self.workflow_validation_calls = 0
@@ -356,7 +359,12 @@ class FakeGitHub:
     def get_authenticated_login(self):
         return self.authenticated_login
 
+    def get_pr_state(self, **kwargs):
+        self.pr_state_calls.append(kwargs)
+        return self.pr_state
+
     def list_pr_comments(self, *, after_id=0, **kwargs):
+        self.pr_comment_calls.append({"after_id": after_id, **kwargs})
         return [item for item in self.pr_comments if int(item["id"]) > after_id]
 
     def mark_ready(self, url):
@@ -732,6 +740,57 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.db.session() as conn:
             count = conn.execute("SELECT COUNT(*) FROM code_plan_feedback").fetchone()[0]
         self.assertEqual(count, 1)
+
+    async def test_closed_pr_deletes_plan_notification_and_skips_feedback(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False,
+        )
+        await wait_for_status(self.db, job_id, "awaiting_approval")
+        await wait_for_plan_message(self.db, job_id, 78)
+        question_count = len(self.github.plan_question_comments)
+        self.github.pr_state = "closed"
+
+        await self.service.poll_plan_feedback_once()
+
+        self.assertEqual(
+            self.github.pr_state_calls,
+            [{"repo": "owner/repo", "number": 42}],
+        )
+        self.assertEqual(self.bot.deleted, [(10, 78)])
+        self.assertIsNone(self.db.get_code_job(job_id)["telegram_plan_message_id"])
+        self.assertEqual(self.db.get_code_job(job_id)["status"], "awaiting_approval")
+        self.assertEqual(len(self.github.plan_question_comments), question_count)
+        self.assertEqual(self.github.pr_comment_calls, [])
+
+        await self.service.poll_plan_feedback_once()
+
+        self.assertEqual(self.bot.deleted, [(10, 78)])
+        self.assertEqual(self.github.pr_comment_calls, [])
+
+    async def test_closed_pr_plan_notification_delete_retries_after_failure(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False,
+        )
+        await wait_for_status(self.db, job_id, "awaiting_approval")
+        await wait_for_plan_message(self.db, job_id, 78)
+        self.github.pr_state = "closed"
+        self.bot.fail_delete = True
+
+        await self.service.poll_plan_feedback_once()
+
+        self.assertEqual(self.bot.deleted, [])
+        self.assertEqual(
+            self.db.get_code_job(job_id)["telegram_plan_message_id"], 78
+        )
+        self.assertEqual(self.github.pr_comment_calls, [])
+
+        self.bot.fail_delete = False
+        await self.service.poll_plan_feedback_once()
+
+        self.assertEqual(self.bot.deleted, [(10, 78)])
+        self.assertIsNone(self.db.get_code_job(job_id)["telegram_plan_message_id"])
 
     async def test_pending_plan_feedback_resumes_after_restart(self):
         self.codex.results = [QUESTION_PLAN, PLAN]
@@ -1781,6 +1840,49 @@ class CodeSafetyTests(unittest.TestCase):
 
 
 class CodeGitHubCheckTests(unittest.TestCase):
+    def test_get_pr_state_normalizes_supported_states(self):
+        class Gh:
+            def __init__(self, state):
+                self.state = state
+                self.calls = []
+
+            def api_json(self, endpoint):
+                self.calls.append(endpoint)
+                return {"state": self.state}
+
+        for raw, expected in (("OPEN", "open"), ("closed", "closed")):
+            with self.subTest(state=raw):
+                gh = Gh(raw)
+
+                state = CodeGitHubService(gh).get_pr_state(
+                    repo="owner/repo", number=42
+                )
+
+                self.assertEqual(state, expected)
+                self.assertEqual(gh.calls, ["repos/owner/repo/pulls/42"])
+
+    def test_get_pr_state_rejects_missing_or_unknown_state(self):
+        class Gh:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def api_json(self, endpoint):
+                self.endpoint = endpoint
+                return self.payload
+
+        for payload in ({}, {"state": "merged"}):
+            with self.subTest(payload=payload):
+                gh = Gh(payload)
+
+                with self.assertRaisesRegex(
+                    WorkspaceError, "pull request has no valid state"
+                ):
+                    CodeGitHubService(gh).get_pr_state(
+                        repo="owner/repo", number=42
+                    )
+
+                self.assertEqual(gh.endpoint, "repos/owner/repo/pulls/42")
+
     def test_validates_remote_action_references_against_github(self):
         class Gh:
             def __init__(self):

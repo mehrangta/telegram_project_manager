@@ -1340,16 +1340,25 @@ class CodeJobService:
                 logging.exception("GitHub plan feedback polling failed")
 
     async def poll_plan_feedback_once(self) -> None:
-        if not self._github_login:
-            self._github_login = await asyncio.to_thread(
-                self.github.get_authenticated_login
-            )
         for job in self.db.list_plan_feedback_jobs():
+            job_id = str(job["id"])
+            state = await asyncio.to_thread(
+                self.github.get_pr_state,
+                repo=str(job["repo"]),
+                number=int(job["pull_request_number"]),
+            )
+            if state == "closed":
+                await self.reporter.dismiss_plan_ready(job_id)
+                continue
+            if not self._github_login:
+                self._github_login = await asyncio.to_thread(
+                    self.github.get_authenticated_login
+                )
             if int(job.get("github_plan_question_revision") or 0) < int(
                 job.get("plan_revision") or 0
             ):
-                await self._publish_plan_questions(str(job["id"]))
-                job = self._require_job(str(job["id"]))
+                await self._publish_plan_questions(job_id)
+                job = self._require_job(job_id)
             comments = await asyncio.to_thread(
                 self.github.list_pr_comments,
                 repo=str(job["repo"]),
@@ -1371,7 +1380,7 @@ class CodeJobService:
                 ):
                     continue
                 result = self.db.add_code_plan_feedback(
-                    str(job["id"]),
+                    job_id,
                     source="github",
                     source_id=str(comment_id),
                     author=login,
@@ -1384,16 +1393,16 @@ class CodeJobService:
                         "code.plan.feedback",
                         result,
                         {"source": "github", "comment_id": comment_id, "author": login},
-                        str(job["id"]),
+                        job_id,
                     )
             if cursor != int(job.get("github_plan_comment_cursor") or 0):
                 self.db.update_code_job(
                     str(job["id"]), {"github_plan_comment_cursor": cursor}
                 )
             if queued:
-                await self.reporter.dismiss_plan_ready(str(job["id"]))
-                await self.reporter.refresh(str(job["id"]), force=True)
-                self._schedule(str(job["id"]), "plan")
+                await self.reporter.dismiss_plan_ready(job_id)
+                await self.reporter.refresh(job_id, force=True)
+                self._schedule(job_id, "plan")
 
     async def _report_plan_ready(self, job_id: str) -> None:
         try:

@@ -650,6 +650,13 @@ class CodeGitHubService:
                 comments.append(item)
         return comments
 
+    def get_pr_state(self, *, repo: str, number: int) -> str:
+        result = self.gh.api_json(f"repos/{repo}/pulls/{number}")
+        state = str(result.get("state") or "").lower()
+        if state not in {"open", "closed"}:
+            raise WorkspaceError("GitHub pull request has no valid state")
+        return state
+
     def publish_plan_questions(
         self,
         *,
