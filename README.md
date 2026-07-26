@@ -90,8 +90,11 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   becomes ready only after repository validation and GitHub checks pass.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked repository improvements when brainstorming
-  is enabled for the repository. Configure one scheduled destination per repo
-  with `/repo brainstorm schedule owner/repository daily 09:00` and
+  is enabled for the repository. It detects the repository from the exact chat
+  or topic configured as its brainstorm destination; the active repository is
+  used to disambiguate shared destinations and as a fallback. Configure one
+  scheduled destination per repo with
+  `/repo brainstorm schedule owner/repository daily 09:00` and
   `/repo brainstorm enable owner/repository`; schedule times are UTC, and
   disabling preserves the cadence and destination.
   `/do` runs writable Codex work in a persistent repository workspace; its

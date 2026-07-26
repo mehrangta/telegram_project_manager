@@ -122,6 +122,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_brainstorm_configs_due
                 ON brainstorm_configs (enabled, next_run_at);
 
+                CREATE INDEX IF NOT EXISTS idx_brainstorm_configs_destination
+                ON brainstorm_configs (
+                    telegram_chat_id, telegram_thread_id, enabled, repo
+                );
+
                 CREATE TABLE IF NOT EXISTS plans (
                     id TEXT PRIMARY KEY,
                     telegram_chat_id INTEGER NOT NULL,
@@ -881,6 +886,30 @@ class Database:
                 "SELECT * FROM brainstorm_configs WHERE repo = ?", (repo,)
             ).fetchone()
         return dict(row) if row else None
+
+    def list_brainstorm_configs_for_scope(
+        self, chat_id: int, thread_id: int | None
+    ) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            if thread_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM brainstorm_configs
+                    WHERE telegram_chat_id = ? AND telegram_thread_id IS NULL
+                    ORDER BY repo
+                    """,
+                    (chat_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM brainstorm_configs
+                    WHERE telegram_chat_id = ? AND telegram_thread_id = ?
+                    ORDER BY repo
+                    """,
+                    (chat_id, thread_id),
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def configure_brainstorm_schedule(
         self,

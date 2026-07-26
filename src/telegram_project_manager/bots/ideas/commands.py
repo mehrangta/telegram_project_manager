@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
-from typing import Callable
+from typing import Any, Callable
 
 from telegram_project_manager.bots.code_manager.workspace import WorkspaceError
 from telegram_project_manager.bots.commit_manager.schemas import PlanValidationError, validate_repo
@@ -57,14 +57,10 @@ class BrainstormManager:
             return outgoing_message(
                 "Usage: /brainstorm", reply_to_message_id=message.message_id
             )
-        settings = self.db.get_scope_settings(message.chat_id, message.thread_id)
-        repo = str(settings.get("active_repo") or "")
-        if not repo:
-            scope = "topic" if message.thread_id is not None else "chat"
-            return outgoing_message(
-                f"No active repo for this {scope}. Admin: /repo set owner/repository",
-                reply_to_message_id=message.message_id,
-            )
+        repository = self._resolve_manual_repository(message)
+        if isinstance(repository, OutgoingMessage):
+            return repository
+        repo = str(repository["repo"])
         if not self.db.is_repo_allowed(repo):
             return outgoing_message(
                 "Active repo is not in allowed repo list. Admin: /repo allow owner/repository",
@@ -83,8 +79,8 @@ class BrainstormManager:
                 thread_id=message.thread_id,
                 message_id=message.message_id,
                 repo=repo,
-                branch=str(settings.get("default_branch") or "main"),
-                source_path=str(settings.get("local_repo_path") or ""),
+                branch=str(repository.get("default_branch") or "main"),
+                source_path=str(repository.get("local_repo_path") or ""),
             )
         except (LocalRepositoryError, ValueError, WorkspaceError) as exc:
             return outgoing_message(
@@ -94,6 +90,57 @@ class BrainstormManager:
         except TelegramBotApiError:
             raise
         return None
+
+    def _resolve_manual_repository(
+        self, message: IncomingMessage
+    ) -> dict[str, Any] | OutgoingMessage:
+        settings = self.db.get_scope_settings(message.chat_id, message.thread_id)
+        active_repo = str(settings.get("active_repo") or "")
+        configs = self.db.list_brainstorm_configs_for_scope(
+            message.chat_id, message.thread_id
+        )
+
+        selected = next(
+            (config for config in configs if str(config["repo"]) == active_repo),
+            None,
+        )
+        if selected is None:
+            enabled = [config for config in configs if config["enabled"]]
+            if len(enabled) == 1:
+                selected = enabled[0]
+            elif len(enabled) > 1:
+                return self._ambiguous_repository(message, enabled)
+            elif len(configs) == 1:
+                selected = configs[0]
+            elif len(configs) > 1:
+                return self._ambiguous_repository(message, configs)
+
+        if selected is not None:
+            return selected
+        if active_repo:
+            return {
+                "repo": active_repo,
+                "default_branch": settings.get("default_branch"),
+                "local_repo_path": settings.get("local_repo_path"),
+            }
+
+        scope = "topic" if message.thread_id is not None else "chat"
+        return outgoing_message(
+            f"No active repo for this {scope}. Admin: /repo set owner/repository",
+            reply_to_message_id=message.message_id,
+        )
+
+    @staticmethod
+    def _ambiguous_repository(
+        message: IncomingMessage, configs: list[dict[str, Any]]
+    ) -> OutgoingMessage:
+        repos = ", ".join(str(config["repo"]) for config in configs)
+        scope = "topic" if message.thread_id is not None else "chat"
+        return outgoing_message(
+            f"Multiple brainstorm repos are configured for this {scope}: {repos}. "
+            "Admin: /repo set owner/repository",
+            reply_to_message_id=message.message_id,
+        )
 
     async def _configure(self, message: IncomingMessage, parts: list[str]) -> str:
         admin_error = self.permissions.require_admin(message.user_id)
