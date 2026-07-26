@@ -61,6 +61,7 @@ Use `/help` in Telegram for the complete command reference.
 /issue <prompt>                             Draft a GitHub issue
 /commit <request>                           Draft a direct commit plan
 /code #123                                  Plan an issue in the active repository
+/code --skip-plan #123                      Code an issue without planning first
 /code approve <c-job_id>                    Approve implementation
 /code status <c-job_id>                     Show code-job status
 /ask <question> [images]                    Inspect the active repository
@@ -84,10 +85,12 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   repository, detect its default branch, create or refresh its managed cache,
   and select it for the current chat or forum topic. Topic settings are
   independent from group-level settings.
-- **Issues and code:** `/issue` creates a reviewable issue draft. `/code` plans
-  an existing issue in an isolated worktree and opens a draft pull request.
-  Approve the plan before implementation unless `--skip-plan` was used. A job
-  becomes ready only after repository validation and GitHub checks pass.
+- **Issues and code:** `/issue` creates a reviewable issue draft. After creation,
+  choose Plan for the plan-and-approval workflow or Code to skip directly to
+  implementation. `/code` works on an existing issue in an isolated worktree
+  and opens a draft pull request. Approve the plan before implementation unless
+  `--skip-plan` was used. A job becomes ready only after repository validation
+  and GitHub checks pass.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
   extensions when brainstorming is enabled for the repository; it is not a bug

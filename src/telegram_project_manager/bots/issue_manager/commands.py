@@ -16,6 +16,7 @@ from telegram_project_manager.integrations.gh.repository_context import Reposito
 from telegram_project_manager.platform.llm.client import LlmError
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import (
+    CALLBACK_DATA_LIMIT,
     OutgoingMessage,
     callback_button,
     outgoing_message,
@@ -31,6 +32,14 @@ SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif"}
 MAX_IMAGES = 10
 MAX_IMAGE_BYTES = 10_000_000
 MAX_TOTAL_IMAGE_BYTES = 20_000_000
+
+
+def _code_callback(repo: str, number: int, *, skip_plan: bool) -> str:
+    command = "/code --skip-plan" if skip_plan else "/code"
+    callback = f"command:{command} {repo}#{number}"
+    if len(callback.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        callback = f"command:{command} #{number}"
+    return callback
 
 
 class IssueManager:
@@ -213,13 +222,13 @@ class IssueManager:
                 f"Link: {result.url}",
             ]
         )
-        plan_callback = f"command:/code {result.repo}#{result.number}"
-        if len(plan_callback.encode("utf-8")) > 64:
-            plan_callback = f"command:/code #{result.number}"
+        plan_callback = _code_callback(result.repo, result.number, skip_plan=False)
+        code_callback = _code_callback(result.repo, result.number, skip_plan=True)
         return outgoing_message(
             text,
             keyboard=((
                 callback_button("📝 Plan", plan_callback),
+                callback_button("💻 Code", code_callback),
                 url_button("↗ Issue", result.url),
             ),),
         )
