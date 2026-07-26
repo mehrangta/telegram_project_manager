@@ -27,8 +27,8 @@ from telegram_project_manager.bots.ideas.prompts import (
 from telegram_project_manager.bots.ideas.schedule import advance_run_at
 from telegram_project_manager.bots.ideas.schemas import (
     BRAINSTORM_RESPONSE_SCHEMA,
+    BrainstormIdea,
     BrainstormResponse,
-    Improvement,
 )
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError
 from telegram_project_manager.platform.responses import outgoing_message
@@ -367,15 +367,14 @@ class BrainstormService:
                     on_thread=_ignore_thread,
                 )
                 response = BrainstormResponse.from_json(raw)
-                improvements = tuple(
-                    _with_existing_sources(workspace, improvement)
-                    for improvement in response.improvements
+                ideas = tuple(
+                    _with_existing_sources(workspace, idea) for idea in response.ideas
                 )
                 await self._send(
                     chat_id=chat_id,
                     thread_id=thread_id,
                     reply_to_message_id=message_id,
-                    text=_render_result(repo, branch, commit, improvements, trigger),
+                    text=_render_result(repo, branch, commit, ideas, trigger),
                 )
                 status = "ok"
                 self.db.audit(
@@ -481,18 +480,18 @@ async def _ignore_thread(thread_id: str) -> None:
     del thread_id
 
 
-def _with_existing_sources(workspace: Path, improvement: Improvement) -> Improvement:
+def _with_existing_sources(workspace: Path, idea: BrainstormIdea) -> BrainstormIdea:
     sources: list[str] = []
     root = workspace.resolve()
-    for source in improvement.sources:
+    for source in idea.sources:
         candidate = (root / source).resolve()
         if candidate.is_relative_to(root) and candidate.exists():
             sources.append(source)
-    return Improvement(
-        title=improvement.title,
-        problem=improvement.problem,
-        recommendation=improvement.recommendation,
-        benefit=improvement.benefit,
+    return BrainstormIdea(
+        title=idea.title,
+        opportunity=idea.opportunity,
+        proposal=idea.proposal,
+        value=idea.value,
         sources=tuple(sources),
     )
 
@@ -501,7 +500,7 @@ def _render_result(
     repo: str,
     branch: str,
     commit: str,
-    improvements: tuple[Improvement, ...],
+    ideas: tuple[BrainstormIdea, ...],
     trigger: str,
 ) -> str:
     lines = [
@@ -511,20 +510,20 @@ def _render_result(
         f"Commit: {commit[:12]}",
         f"Trigger: {trigger}",
     ]
-    for index, improvement in enumerate(improvements, start=1):
+    for index, idea in enumerate(ideas, start=1):
         lines.extend(
             [
                 "",
-                f"{index}. {_shorten(improvement.title, 100)}",
-                f"Problem: {_shorten(improvement.problem, 240)}",
-                f"Change: {_shorten(improvement.recommendation, 280)}",
-                f"Benefit: {_shorten(improvement.benefit, 200)}",
+                f"{index}. {_shorten(idea.title, 100)}",
+                f"Opportunity: {_shorten(idea.opportunity, 240)}",
+                f"Proposal: {_shorten(idea.proposal, 280)}",
+                f"Value: {_shorten(idea.value, 200)}",
             ]
         )
-        if improvement.sources:
+        if idea.sources:
             lines.append(
                 "Sources: "
-                + ", ".join(_shorten(source, 90) for source in improvement.sources[:3])
+                + ", ".join(_shorten(source, 90) for source in idea.sources[:3])
             )
     return "\n".join(lines)
 
