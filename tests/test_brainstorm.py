@@ -72,6 +72,7 @@ from telegram_project_manager.bots.ideas.schemas import (
 )
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
 if SDK_AVAILABLE:
     from telegram_project_manager.bots.codex_queue.commands import _render_queue
@@ -570,19 +571,34 @@ class BrainstormManagerTests(unittest.IsolatedAsyncioTestCase):
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.edited = []
+        self.edit_error = None
 
     def send_message(self, chat_id, text, thread_id=None, **options):
         self.sent.append((chat_id, text, thread_id, options))
         return {"message_id": len(self.sent)}
+
+    def edit_message_text(self, chat_id, message_id, text, **options):
+        self.edited.append((chat_id, message_id, text, options))
+        if self.edit_error:
+            raise self.edit_error
 
 
 class FakeCodex:
     def __init__(self):
         self.calls = []
         self.interrupted = []
+        self.error = None
+        self.block = False
+        self.started = asyncio.Event()
 
     async def run_turn(self, **kwargs):
         self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        if self.block:
+            self.started.set()
+            await asyncio.Future()
         return "thread", {
             "ideas": [
                 {
@@ -660,14 +676,18 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             chat_id=20,
             user_id=10,
             thread_id=30,
-            message_id=40,
+            reply_to_message_id=40,
             repo="owner/repo",
             branch="main",
             source_path="/cache/repo.git",
         )
         await wait_for_completion(self.service, brainstorm_id)
+        self.assertEqual(len(self.bot.sent), 1)
         self.assertIn("queued", self.bot.sent[0][1])
-        result = self.bot.sent[1][1]
+        self.assertEqual(self.bot.sent[0][3]["reply_to_message_id"], 40)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertEqual(self.bot.edited[0][0:2], (20, 1))
+        result = self.bot.edited[0][2]
         self.assertIn("Repository brainstorm", result)
         self.assertIn("1. Idea 1", result)
         self.assertIn("3. Idea 3", result)
@@ -710,7 +730,70 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[0][0], 22)
         self.assertEqual(self.bot.sent[0][2], 33)
         self.assertIn("scheduled", self.bot.sent[0][1])
+        self.assertEqual(self.bot.edited, [])
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["next_run_at"], 172850)
+
+    async def test_manual_failure_updates_queued_message(self):
+        self.codex.error = ValueError("invalid brainstorm response")
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertEqual(self.bot.edited[0][0:2], (20, 1))
+        self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
+        self.assertIn("invalid brainstorm response", self.bot.edited[0][2])
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "failed")
+
+    async def test_manual_edit_failure_does_not_send_fallback_message(self):
+        self.bot.edit_error = TelegramBotApiError("message can't be edited")
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "failed")
+
+    async def test_shutdown_updates_manual_message_as_cancelled(self):
+        self.codex.block = True
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+        await asyncio.wait_for(self.codex.started.wait(), timeout=1)
+
+        await self.service.shutdown()
+
+        self.assertNotIn(brainstorm_id, self.service._tasks)
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertIn("Repository brainstorm cancelled", self.bot.edited[0][2])
+        self.assertEqual(
+            self.db.get_brainstorm_config("owner/repo")["last_status"], "cancelled"
+        )
 
     async def test_recover_starts_once_and_shutdown_stops_scheduler(self):
         await self.service.recover()

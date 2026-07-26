@@ -89,7 +89,7 @@ class BrainstormService:
         chat_id: int,
         user_id: int,
         thread_id: int | None,
-        message_id: int | None,
+        reply_to_message_id: int | None,
         repo: str,
         branch: str,
         source_path: str,
@@ -111,10 +111,10 @@ class BrainstormService:
         if not claimed:
             raise ValueError("Brainstorming is disabled or already running for this repository.")
         try:
-            await self._send(
+            status_message_id = await self._send(
                 chat_id=chat_id,
                 thread_id=thread_id,
-                reply_to_message_id=message_id,
+                reply_to_message_id=reply_to_message_id,
                 text="\n".join(
                     [
                         "Repository brainstorm queued.",
@@ -129,17 +129,28 @@ class BrainstormService:
                 repo, brainstorm_id, "failed", "Telegram acknowledgement failed.", self.clock()
             )
             raise
-        self._start_task(
-            brainstorm_id=brainstorm_id,
-            chat_id=chat_id,
-            user_id=user_id,
-            thread_id=thread_id,
-            message_id=message_id,
-            repo=repo,
-            branch=branch,
-            source_path=resolved_source,
-            trigger="manual",
-        )
+        try:
+            self._start_task(
+                brainstorm_id=brainstorm_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                status_message_id=status_message_id,
+                repo=repo,
+                branch=branch,
+                source_path=resolved_source,
+                trigger="manual",
+            )
+        except Exception:
+            await self._send_failure(
+                chat_id,
+                thread_id,
+                reply_to_message_id,
+                status_message_id,
+                "Brainstorm task could not be started.",
+            )
+            raise
         self.db.audit(
             "brainstorm.run",
             "queued",
@@ -236,7 +247,8 @@ class BrainstormService:
                 chat_id=chat_id,
                 user_id=int(claimed.get("updated_by_user_id") or 0),
                 thread_id=claimed.get("telegram_thread_id"),
-                message_id=None,
+                reply_to_message_id=None,
+                status_message_id=None,
                 repo=repo,
                 branch=str(claimed.get("default_branch") or "main"),
                 source_path=str(claimed.get("local_repo_path") or ""),
@@ -270,7 +282,8 @@ class BrainstormService:
         chat_id: int,
         user_id: int,
         thread_id: int | None,
-        message_id: int | None,
+        reply_to_message_id: int | None,
+        status_message_id: int | None,
         repo: str,
         branch: str,
         source_path: str,
@@ -290,7 +303,8 @@ class BrainstormService:
             chat_id=chat_id,
             user_id=user_id,
             thread_id=thread_id,
-            message_id=message_id,
+            reply_to_message_id=reply_to_message_id,
+            status_message_id=status_message_id,
             repo=repo,
             branch=branch,
             source_path=source_path,
@@ -328,7 +342,8 @@ class BrainstormService:
         chat_id: int,
         user_id: int,
         thread_id: int | None,
-        message_id: int | None,
+        reply_to_message_id: int | None,
+        status_message_id: int | None,
         repo: str,
         branch: str,
         source_path: str,
@@ -370,10 +385,11 @@ class BrainstormService:
                 ideas = tuple(
                     _with_existing_sources(workspace, idea) for idea in response.ideas
                 )
-                await self._send(
+                await self._deliver(
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    reply_to_message_id=message_id,
+                    reply_to_message_id=reply_to_message_id,
+                    status_message_id=status_message_id,
                     text=_render_result(repo, branch, commit, ideas, trigger),
                 )
                 status = "ok"
@@ -385,6 +401,13 @@ class BrainstormService:
         except asyncio.CancelledError:
             status = "cancelled"
             error = "Brainstorm interrupted during service shutdown."
+            await self._send_cancelled(
+                chat_id,
+                thread_id,
+                reply_to_message_id,
+                status_message_id,
+                error,
+            )
             raise
         except TelegramBotApiError as exc:
             error = _safe_error(exc)
@@ -401,7 +424,13 @@ class BrainstormService:
                 "failed",
                 {"repo": repo, "trigger": trigger, "error": error},
             )
-            await self._send_failure(chat_id, thread_id, message_id, error)
+            await self._send_failure(
+                chat_id,
+                thread_id,
+                reply_to_message_id,
+                status_message_id,
+                error,
+            )
         except Exception as exc:
             error = _safe_error(exc)
             logging.exception("Unexpected repository brainstorm failure %s", brainstorm_id)
@@ -410,7 +439,13 @@ class BrainstormService:
                 "failed",
                 {"repo": repo, "trigger": trigger, "error": error},
             )
-            await self._send_failure(chat_id, thread_id, message_id, error)
+            await self._send_failure(
+                chat_id,
+                thread_id,
+                reply_to_message_id,
+                status_message_id,
+                error,
+            )
         finally:
             self.db.finish_brainstorm_run(repo, brainstorm_id, status, error, self.clock())
             try:
@@ -427,18 +462,39 @@ class BrainstormService:
         self,
         chat_id: int,
         thread_id: int | None,
-        message_id: int | None,
+        reply_to_message_id: int | None,
+        status_message_id: int | None,
         error: str,
     ) -> None:
         try:
-            await self._send(
+            await self._deliver(
                 chat_id=chat_id,
                 thread_id=thread_id,
-                reply_to_message_id=message_id,
+                reply_to_message_id=reply_to_message_id,
+                status_message_id=status_message_id,
                 text=f"Repository brainstorm failed.\nReason: {error}",
             )
         except TelegramBotApiError:
             logging.exception("Failed to send repository brainstorm error")
+
+    async def _send_cancelled(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        reply_to_message_id: int | None,
+        status_message_id: int | None,
+        error: str,
+    ) -> None:
+        try:
+            await self._deliver(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                status_message_id=status_message_id,
+                text=f"Repository brainstorm cancelled.\nReason: {error}",
+            )
+        except TelegramBotApiError:
+            logging.exception("Failed to update cancelled repository brainstorm")
 
     async def _send(
         self,
@@ -447,9 +503,9 @@ class BrainstormService:
         thread_id: int | None,
         reply_to_message_id: int | None,
         text: str,
-    ) -> None:
+    ) -> int:
         outgoing = outgoing_message(text, reply_to_message_id=reply_to_message_id)
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self.bot.send_message,
             chat_id,
             outgoing.text,
@@ -459,6 +515,39 @@ class BrainstormService:
             disable_link_preview=outgoing.disable_link_preview,
             reply_to_message_id=outgoing.reply_to_message_id,
         )
+        return int(result["message_id"])
+
+    async def _deliver(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        reply_to_message_id: int | None,
+        status_message_id: int | None,
+        text: str,
+    ) -> None:
+        if status_message_id is None:
+            await self._send(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                text=text,
+            )
+            return
+        outgoing = outgoing_message(text)
+        try:
+            await asyncio.to_thread(
+                self.bot.edit_message_text,
+                chat_id,
+                status_message_id,
+                outgoing.text,
+                parse_mode=outgoing.parse_mode,
+                reply_markup=outgoing.reply_markup(include_empty=True),
+                disable_link_preview=outgoing.disable_link_preview,
+            )
+        except TelegramBotApiError as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
 
     def _task_finished(self, brainstorm_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(brainstorm_id) is task:
