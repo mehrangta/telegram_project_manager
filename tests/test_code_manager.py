@@ -33,6 +33,7 @@ from telegram_project_manager.bots.code_manager.schemas import (
 )
 from telegram_project_manager.bots.code_manager.service import (
     CODE_TIMEOUT_SECONDS,
+    MAX_CONCURRENT_CODE_JOBS,
     CodeJobService,
 )
 from telegram_project_manager.bots.code_manager.workspace import (
@@ -477,6 +478,38 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.service.shutdown()
         self.temp.cleanup()
+
+    async def test_default_allows_four_concurrent_codex_jobs(self):
+        release = asyncio.Semaphore(0)
+        started: list[str] = []
+
+        async def blocking_code_job(job_id: str) -> None:
+            started.append(job_id)
+            await release.acquire()
+
+        self.service._run_code = blocking_code_job
+        tasks = [
+            asyncio.create_task(self.service._run(f"c-{index}", "code"))
+            for index in range(5)
+        ]
+        try:
+            for _ in range(200):
+                if len(started) == MAX_CONCURRENT_CODE_JOBS:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(MAX_CONCURRENT_CODE_JOBS, 4)
+            self.assertEqual(len(started), 4)
+
+            release.release()
+            for _ in range(200):
+                if len(started) == 5:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(started), 5)
+        finally:
+            for _ in tasks:
+                release.release()
+            await asyncio.gather(*tasks)
 
     async def test_plan_approval_runs_code_and_marks_draft_pr_ready(self):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False)

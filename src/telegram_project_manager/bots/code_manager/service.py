@@ -48,6 +48,7 @@ from telegram_project_manager.platform.storage.db import CODE_JOB_QUEUED_STATUSE
 
 PLAN_PATH_TEMPLATE = ".codex/plans/{job_id}.md"
 MAX_QUEUED_JOBS = 10
+MAX_CONCURRENT_CODE_JOBS = 4
 PLAN_TIMEOUT_SECONDS = 2 * 60 * 60
 CODE_TIMEOUT_SECONDS = 10 * 60 * 60
 CHECK_POLL_SECONDS = 10
@@ -110,7 +111,7 @@ class CodeJobService:
         workspaces: GitWorkspaceService,
         github: CodeGitHubService,
         reporter: CodeProgressReporter,
-        max_concurrent: int = 2,
+        max_concurrent: int = MAX_CONCURRENT_CODE_JOBS,
         check_poll_seconds: float = CHECK_POLL_SECONDS,
         check_grace_seconds: float = CHECK_GRACE_SECONDS,
         check_timeout_seconds: float = CHECK_TIMEOUT_SECONDS,
