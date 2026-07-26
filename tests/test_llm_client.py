@@ -15,6 +15,13 @@ from telegram_project_manager.platform.storage.db import Database
 
 
 class LlmClientTests(unittest.TestCase):
+    def configured_client(self, root: Path) -> tuple[Database, OpenAICompatibleClient]:
+        db = Database(root / "bot.db")
+        db.initialize()
+        db.set_setting("openai_model", "test-model")
+        db.set_secret("openai_api_key", "test-key")
+        return db, OpenAICompatibleClient(db)
+
     def test_database_credentials_configure_langchain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -102,6 +109,89 @@ class LlmClientTests(unittest.TestCase):
                 include_raw=True,
             )
 
+    def test_recovers_missing_parsed_object_from_raw_message(self):
+        cases = (
+            (
+                AIMessage(content="", additional_kwargs={"parsed": {"source": "metadata"}}),
+                {"source": "metadata"},
+            ),
+            (AIMessage(content='{"source":"string"}'), {"source": "string"}),
+            (
+                AIMessage(content=[{"type": "text", "text": '{"source":"block"}'}]),
+                {"source": "block"},
+            ),
+        )
+        for raw, expected in cases:
+            with self.subTest(source=expected["source"]), tempfile.TemporaryDirectory() as temp_dir:
+                _, client = self.configured_client(Path(temp_dir))
+                with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                    structured = chat_openai.return_value.with_structured_output.return_value
+                    structured.invoke.return_value = {
+                        "raw": raw,
+                        "parsed": None,
+                        "parsing_error": None,
+                    }
+                    self.assertEqual(client.chat_json("system", "user"), expected)
+                structured.invoke.assert_called_once()
+
+    def test_retries_missing_parsed_object_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, client = self.configured_client(Path(temp_dir))
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.side_effect = [
+                    {
+                        "raw": AIMessage(content="null"),
+                        "parsed": None,
+                        "parsing_error": None,
+                    },
+                    {
+                        "raw": AIMessage(content='{"title":"Recovered"}'),
+                        "parsed": {"title": "Recovered"},
+                        "parsing_error": None,
+                    },
+                ]
+                self.assertEqual(client.chat_json("system", "user"), {"title": "Recovered"})
+            self.assertEqual(structured.invoke.call_count, 2)
+
+    def test_missing_parsed_object_fails_after_one_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, client = self.configured_client(Path(temp_dir))
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content="null"),
+                    "parsed": None,
+                    "parsing_error": None,
+                }
+                with self.assertRaisesRegex(LlmError, "missing parsed object"):
+                    client.chat_json("system", "user")
+            self.assertEqual(structured.invoke.call_count, 2)
+
+    def test_structured_parsing_error_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, client = self.configured_client(Path(temp_dir))
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content="not-json"),
+                    "parsed": None,
+                    "parsing_error": ValueError("invalid JSON"),
+                }
+                with self.assertRaisesRegex(LlmError, "invalid structured output"):
+                    client.chat_json("system", "user")
+            structured.invoke.assert_called_once()
+
+    def test_invalid_structured_response_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, client = self.configured_client(Path(temp_dir))
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = AIMessage(content='{"title":"Bug"}')
+                with self.assertRaisesRegex(LlmError, "structured response is invalid"):
+                    client.chat_json("system", "user")
+            structured.invoke.assert_called_once()
+
     def test_replays_persistent_memory_for_same_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -129,6 +219,58 @@ class LlmClientTests(unittest.TestCase):
 
             self.assertEqual(
                 [(message.type, message.content) for message in prompts[1]],
+                [
+                    ("system", "system"),
+                    ("human", "first"),
+                    ("ai", '{"turn":1}'),
+                    ("human", "second"),
+                ],
+            )
+
+    def test_retry_persists_only_successful_response_in_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db, client = self.configured_client(root)
+            prompts = []
+            responses = iter(
+                [
+                    {
+                        "raw": AIMessage(content="null"),
+                        "parsed": None,
+                        "parsing_error": None,
+                    },
+                    {
+                        "raw": AIMessage(content='{"turn":1}'),
+                        "parsed": {"turn": 1},
+                        "parsing_error": None,
+                    },
+                    {
+                        "raw": AIMessage(content='{"turn":2}'),
+                        "parsed": {"turn": 2},
+                        "parsing_error": None,
+                    },
+                ]
+            )
+
+            def respond(prompt):
+                prompts.append(prompt.to_messages())
+                return next(responses)
+
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                chat_openai.return_value.with_structured_output.return_value = RunnableLambda(respond)
+                self.assertEqual(client.chat_json("system", "first", memory_key="chat:1"), {"turn": 1})
+                self.assertEqual(
+                    db.list_llm_messages("chat:1", 12),
+                    [
+                        {"role": "human", "content": "first"},
+                        {"role": "ai", "content": '{"turn":1}'},
+                    ],
+                )
+                self.assertEqual(client.chat_json("system", "second", memory_key="chat:1"), {"turn": 2})
+
+            self.assertEqual(len(prompts), 3)
+            self.assertEqual(
+                [(message.type, message.content) for message in prompts[2]],
                 [
                     ("system", "system"),
                     ("human", "first"),

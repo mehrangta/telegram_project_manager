@@ -11,6 +11,9 @@ from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESS
 from telegram_project_manager.platform.storage.db import Database
 
 
+STRUCTURED_OUTPUT_ATTEMPTS = 2
+
+
 class LlmError(RuntimeError):
     pass
 
@@ -119,30 +122,35 @@ class OpenAICompatibleClient:
                         "user_prompt": user_prompt,
                     }
                 )
-                response = llm.invoke(prompt_value)
+                invocation_input = prompt_value
             else:
-                response = llm.invoke(
-                    [
-                        ("system", system_prompt),
-                        ("human", user_prompt),
-                    ]
-                )
+                invocation_input = [
+                    ("system", system_prompt),
+                    ("human", user_prompt),
+                ]
         except Exception as exc:
             raise LlmError(f"LLM request failed: {exc}") from exc
 
-        if not isinstance(response, dict):
-            raise LlmError("LLM structured response is invalid")
-        parsing_error = response.get("parsing_error")
-        if parsing_error:
-            raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
-        parsed = response.get("parsed")
-        if hasattr(parsed, "model_dump"):
-            parsed = parsed.model_dump()
-        if not isinstance(parsed, dict):
+        response = None
+        parsed = None
+        for _ in range(STRUCTURED_OUTPUT_ATTEMPTS):
+            try:
+                response = llm.invoke(invocation_input)
+            except Exception as exc:
+                raise LlmError(f"LLM request failed: {exc}") from exc
+            if not isinstance(response, dict):
+                raise LlmError("LLM structured response is invalid")
+            parsing_error = response.get("parsing_error")
+            if parsing_error:
+                raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
+            parsed = _structured_response_object(response)
+            if parsed is not None:
+                break
+        if parsed is None:
             raise LlmError("LLM structured response missing parsed object")
         if history is not None:
             raw = response.get("raw")
-            content = raw.content if isinstance(raw, AIMessage) and isinstance(raw.content, str) else json.dumps(parsed)
+            content = _raw_message_text(raw) or json.dumps(parsed)
             history.add_messages([HumanMessage(content=user_prompt), AIMessage(content=content)])
         return parsed
 
@@ -155,6 +163,40 @@ class OpenAICompatibleClient:
         if limit < 2 or limit % 2:
             raise LlmError("LLM memory limit must be an even number of at least 2 messages.")
         return limit
+
+
+def _structured_response_object(response: dict) -> dict | None:
+    parsed = _as_dict(response.get("parsed"))
+    if parsed is not None:
+        return parsed
+
+    raw = response.get("raw")
+    if not isinstance(raw, AIMessage):
+        return None
+    parsed = _as_dict(raw.additional_kwargs.get("parsed"))
+    if parsed is not None:
+        return parsed
+
+    content = _raw_message_text(raw)
+    if not content:
+        return None
+    try:
+        return parse_json_object(content)
+    except LlmError:
+        return None
+
+
+def _as_dict(value: object) -> dict | None:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    return value if isinstance(value, dict) else None
+
+
+def _raw_message_text(raw: object) -> str | None:
+    if not isinstance(raw, AIMessage):
+        return None
+    text = raw.text
+    return text if isinstance(text, str) and text else None
 
 
 def parse_json_object(content: str) -> dict:
