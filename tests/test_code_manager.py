@@ -33,6 +33,7 @@ from telegram_project_manager.bots.code_manager.schemas import (
 )
 from telegram_project_manager.bots.code_manager.service import (
     CODE_TIMEOUT_SECONDS,
+    MAX_CONCURRENT_CODE_JOBS,
     CodeJobService,
 )
 from telegram_project_manager.bots.code_manager.workspace import (
@@ -536,6 +537,83 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.service.shutdown()
         self.temp.cleanup()
+
+    async def test_default_allows_four_concurrent_code_jobs(self):
+        class BlockingCodex(FakeCodex):
+            def __init__(self):
+                super().__init__()
+                self.releases = [asyncio.Event() for _ in range(5)]
+
+            async def run_turn(self, **kwargs):
+                call_index = len(self.calls)
+                self.calls.append(kwargs)
+                await self.releases[call_index].wait()
+                return "thread-1", RESULT
+
+        blocking_codex = BlockingCodex()
+        self.codex = blocking_codex
+        self.service.codex = blocking_codex
+        job_ids = []
+
+        try:
+            for issue_number in range(20, 25):
+                issue = IssueContext(
+                    repo="owner/repo",
+                    number=issue_number,
+                    title=f"Issue {issue_number}",
+                    body="Implement the requested change.",
+                    url=f"https://github.com/owner/repo/issues/{issue_number}",
+                    comments=(),
+                )
+                job_ids.append(
+                    await self.service.create_job(
+                        chat_id=10,
+                        user_id=20,
+                        thread_id=None,
+                        issue=issue,
+                        base_branch="main",
+                        source_path="/cache/owner-repo.git",
+                        skip_plan=True,
+                    )
+                )
+
+            for _ in range(200):
+                if len(blocking_codex.calls) == MAX_CONCURRENT_CODE_JOBS:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError(
+                    f"expected {MAX_CONCURRENT_CODE_JOBS} concurrent Codex turns, "
+                    f"got {len(blocking_codex.calls)}"
+                )
+
+            await asyncio.sleep(0)
+            snapshot = self.service.queue_snapshot(chat_id=10, thread_id=None)
+            self.assertEqual(MAX_CONCURRENT_CODE_JOBS, 4)
+            self.assertEqual(
+                {item["id"] for item in snapshot["running"]},
+                set(job_ids[:MAX_CONCURRENT_CODE_JOBS]),
+            )
+            self.assertEqual(
+                [item["id"] for item in snapshot["queued"]],
+                [job_ids[MAX_CONCURRENT_CODE_JOBS]],
+            )
+            self.assertEqual(snapshot["queued"][0]["status"], "queued_code")
+
+            blocking_codex.releases[0].set()
+            for _ in range(200):
+                if len(blocking_codex.calls) == 5:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("queued code job did not start after a slot was released")
+
+            fifth_job = self.db.get_code_job(job_ids[4])
+            self.assertEqual(fifth_job["status"], "coding")
+        finally:
+            for release in blocking_codex.releases:
+                release.set()
+            await self.service.shutdown()
 
     async def test_plan_approval_runs_code_and_marks_draft_pr_ready(self):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False)
