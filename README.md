@@ -58,6 +58,7 @@ Use `/help` in Telegram for the complete command reference.
 /repo setup owner/repository                Configure and cache a repository
 /repo show                                  Show current repository settings
 /issues                                     List open issues
+/prs                                        List open pull requests
 /issue <prompt>                             Draft a GitHub issue
 /commit <request>                           Draft a direct commit plan
 /code #123                                  Plan an issue in the active repository

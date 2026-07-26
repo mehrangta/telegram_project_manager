@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import time
 import unittest
@@ -11,6 +12,9 @@ from telegram_project_manager.bots.pull_request_manager.github import (
     DeploymentGitHubService,
     PullRequestSnapshot,
     WorkflowRun,
+)
+from telegram_project_manager.bots.pull_request_manager.pull_request_list import (
+    PullRequestListError,
 )
 from telegram_project_manager.integrations.gh.runner import GhResult
 from telegram_project_manager.bots.pull_request_manager.service import (
@@ -544,6 +548,16 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
+    class PullRequestLists:
+        def __init__(self, error=None):
+            self.error = error
+            self.calls = []
+
+        async def publish(self, *, chat_id, thread_id, repo):
+            self.calls.append((chat_id, thread_id, repo))
+            if self.error:
+                raise self.error
+
     async def test_command_requires_admin_and_same_chat_and_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
@@ -566,7 +580,11 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 async def start_merge(self, job_id):
                     return f"merged {job_id}"
 
-            manager = PullRequestManager(db=db, service=Service())
+            manager = PullRequestManager(
+                db=db,
+                service=Service(),
+                pull_request_lists=object(),
+            )
             unauthorized = await manager.handle(IncomingMessage(10, 99, "user", "/deploy c-abcdef12"))
             self.assertIn("Unauthorized", unauthorized)
             db.upsert_user(99, "admin", "admin")
@@ -604,7 +622,11 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 async def start_merge(self, job_id):
                     return f"merged {job_id}"
 
-            manager = PullRequestManager(db=db, service=Service())
+            manager = PullRequestManager(
+                db=db,
+                service=Service(),
+                pull_request_lists=object(),
+            )
             message = IncomingMessage(
                 10,
                 99,
@@ -618,6 +640,89 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 10, 99, "admin", "/merge", reply_to_code_job_id="c-abcdef12"
             )
             self.assertEqual(await manager.handle(merge_message), "merged c-abcdef12")
+
+
+    async def test_prs_command_uses_active_topic_repository_and_bot_mention(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(99, "admin", "admin")
+            db.allow_repo("owner/topic", 99)
+            db.set_scope_repo(10, 30, "owner/topic", 99, "main")
+            pull_request_lists = self.PullRequestLists()
+            manager = PullRequestManager(
+                db=db,
+                service=object(),
+                pull_request_lists=pull_request_lists,
+            )
+
+            response = await manager.handle(
+                IncomingMessage(10, 99, "admin", "/prs@MyBot", thread_id=30)
+            )
+
+            self.assertIsNone(response)
+            self.assertEqual(pull_request_lists.calls, [(10, 30, "owner/topic")])
+
+    async def test_prs_command_validates_admin_usage_and_repository(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            pull_request_lists = self.PullRequestLists()
+            manager = PullRequestManager(
+                db=db,
+                service=object(),
+                pull_request_lists=pull_request_lists,
+            )
+
+            unauthorized = await manager.handle(
+                IncomingMessage(10, 99, "user", "/prs")
+            )
+            db.upsert_user(99, "admin", "admin")
+            usage = await manager.handle(
+                IncomingMessage(10, 99, "admin", "/prs closed")
+            )
+            missing = await manager.handle(IncomingMessage(10, 99, "admin", "/prs"))
+            db.set_chat_repo(10, "owner/not-allowed", 99, "main")
+            disallowed = await manager.handle(
+                IncomingMessage(10, 99, "admin", "/prs")
+            )
+
+            self.assertIn("Unauthorized", unauthorized)
+            self.assertEqual(usage, "Usage: /prs")
+            self.assertIn("No active repo for this chat", missing)
+            self.assertIn("not in allowed repo list", disallowed)
+            self.assertEqual(pull_request_lists.calls, [])
+
+    async def test_prs_command_reports_and_audits_reader_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(99, "admin", "admin")
+            db.allow_repo("owner/repo", 99)
+            db.set_chat_repo(10, "owner/repo", 99, "main")
+            manager = PullRequestManager(
+                db=db,
+                service=object(),
+                pull_request_lists=self.PullRequestLists(
+                    PullRequestListError("auth failed")
+                ),
+            )
+
+            response = await manager.handle(
+                IncomingMessage(10, 99, "admin", "/prs")
+            )
+
+            self.assertEqual(response, "Pull requests not loaded.\nReason: auth failed")
+            with db.session() as conn:
+                event = conn.execute(
+                    "SELECT action, status, details_json FROM audit_events ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            self.assertEqual(event["action"], "prs.list")
+            self.assertEqual(event["status"], "failed")
+            self.assertEqual(
+                json.loads(event["details_json"]),
+                {"repo": "owner/repo", "error": "auth failed"},
+            )
 
 
 class DeploymentGitHubAdapterTests(unittest.TestCase):

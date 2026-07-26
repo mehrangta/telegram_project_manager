@@ -24,6 +24,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("/queue", help_text)
         self.assertIn("/brainstorm", help_text)
         self.assertIn("/repo brainstorm schedule", help_text)
+        self.assertIn("/prs", help_text)
 
     def test_database_upgrade_preserves_chat_settings_and_adds_topic_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,6 +95,9 @@ class CommandTests(unittest.TestCase):
                 issue_list_table = upgraded.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issue_list_messages'"
                 ).fetchone()
+                pull_request_list_table = upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pull_request_list_messages'"
+                ).fetchone()
                 brainstorm_table = upgraded.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'brainstorm_configs'"
                 ).fetchone()
@@ -111,6 +115,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("deployment_conflict_attempts", code_job_columns)
             self.assertIsNotNone(feedback_table)
             self.assertIsNotNone(issue_list_table)
+            self.assertIsNotNone(pull_request_list_table)
             self.assertIsNotNone(brainstorm_table)
             self.assertIsNone(db.get_brainstorm_config("owner/repo"))
 
