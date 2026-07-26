@@ -94,6 +94,34 @@ class Database:
                     created_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS brainstorm_configs (
+                    repo TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                    interval_days INTEGER CHECK (
+                        interval_days IS NULL OR interval_days BETWEEN 1 AND 365
+                    ),
+                    run_at_minute_utc INTEGER CHECK (
+                        run_at_minute_utc IS NULL OR run_at_minute_utc BETWEEN 0 AND 1439
+                    ),
+                    next_run_at INTEGER,
+                    telegram_chat_id INTEGER,
+                    telegram_thread_id INTEGER,
+                    default_branch TEXT,
+                    local_repo_path TEXT,
+                    active_run_id TEXT,
+                    active_run_started_at INTEGER,
+                    last_run_at INTEGER,
+                    last_trigger TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    updated_by_user_id INTEGER,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(repo) REFERENCES allowed_repos(repo) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_brainstorm_configs_due
+                ON brainstorm_configs (enabled, next_run_at);
+
                 CREATE TABLE IF NOT EXISTS plans (
                     id TEXT PRIMARY KEY,
                     telegram_chat_id INTEGER NOT NULL,
@@ -846,6 +874,198 @@ class Database:
                 "SELECT deploy_enabled FROM allowed_repos WHERE repo = ?", (repo,)
             ).fetchone()
         return bool(row and row["deploy_enabled"])
+
+    def get_brainstorm_config(self, repo: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM brainstorm_configs WHERE repo = ?", (repo,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def configure_brainstorm_schedule(
+        self,
+        repo: str,
+        interval_days: int,
+        run_at_minute_utc: int,
+        next_run_at: int,
+        user_id: int,
+    ) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO brainstorm_configs (
+                    repo, enabled, interval_days, run_at_minute_utc, next_run_at,
+                    updated_by_user_id, updated_at
+                ) VALUES (?, 0, ?, ?, NULL, ?, ?)
+                ON CONFLICT(repo) DO UPDATE SET
+                    interval_days = excluded.interval_days,
+                    run_at_minute_utc = excluded.run_at_minute_utc,
+                    next_run_at = CASE
+                        WHEN brainstorm_configs.enabled = 1 THEN ? ELSE NULL
+                    END,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    repo,
+                    interval_days,
+                    run_at_minute_utc,
+                    user_id,
+                    now,
+                    next_run_at,
+                ),
+            )
+
+    def enable_brainstorm(
+        self,
+        repo: str,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        default_branch: str,
+        local_repo_path: str,
+        next_run_at: int | None,
+        user_id: int,
+    ) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO brainstorm_configs (
+                    repo, enabled, next_run_at, telegram_chat_id, telegram_thread_id,
+                    default_branch, local_repo_path, updated_by_user_id, updated_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo) DO UPDATE SET
+                    enabled = 1,
+                    next_run_at = excluded.next_run_at,
+                    telegram_chat_id = excluded.telegram_chat_id,
+                    telegram_thread_id = excluded.telegram_thread_id,
+                    default_branch = excluded.default_branch,
+                    local_repo_path = excluded.local_repo_path,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    repo,
+                    next_run_at,
+                    chat_id,
+                    thread_id,
+                    default_branch,
+                    local_repo_path,
+                    user_id,
+                    now,
+                ),
+            )
+
+    def disable_brainstorm(self, repo: str, user_id: int) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO brainstorm_configs (repo, enabled, updated_by_user_id, updated_at)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(repo) DO UPDATE SET
+                    enabled = 0,
+                    next_run_at = NULL,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (repo, user_id, now),
+            )
+
+    def list_due_brainstorms(self, now: int, limit: int = 20) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM brainstorm_configs
+                WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+                ORDER BY next_run_at, repo
+                LIMIT ?
+                """,
+                (now, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_brainstorm_run(
+        self,
+        repo: str,
+        run_id: str,
+        trigger: str,
+        now: int,
+        stale_before: int,
+        *,
+        scheduled_for: int | None = None,
+        next_run_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conditions = [
+                "repo = ?",
+                "enabled = 1",
+                "(active_run_id IS NULL OR active_run_started_at <= ?)",
+            ]
+            parameters: list[Any] = [repo, stale_before]
+            if trigger == "scheduled":
+                if scheduled_for is None or next_run_at is None:
+                    raise ValueError("Scheduled brainstorm claim is incomplete.")
+                conditions.append("next_run_at = ?")
+                parameters.append(scheduled_for)
+                conditions.append("next_run_at <= ?")
+                parameters.append(now)
+            updates = [
+                "active_run_id = ?",
+                "active_run_started_at = ?",
+                "last_trigger = ?",
+                "last_status = 'running'",
+                "last_error = NULL",
+            ]
+            update_parameters: list[Any] = [run_id, now, trigger]
+            if trigger == "scheduled":
+                updates.append("next_run_at = ?")
+                update_parameters.append(next_run_at)
+            cursor = conn.execute(
+                f"UPDATE brainstorm_configs SET {', '.join(updates)} "
+                f"WHERE {' AND '.join(conditions)}",
+                (*update_parameters, *parameters),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            row = conn.execute(
+                "SELECT * FROM brainstorm_configs WHERE repo = ?", (repo,)
+            ).fetchone()
+            conn.commit()
+            return dict(row) if row else None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def finish_brainstorm_run(
+        self,
+        repo: str,
+        run_id: str,
+        status: str,
+        error: str,
+        finished_at: int,
+    ) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE brainstorm_configs SET
+                    active_run_id = NULL,
+                    active_run_started_at = NULL,
+                    last_run_at = ?,
+                    last_status = ?,
+                    last_error = ?
+                WHERE repo = ? AND active_run_id = ?
+                """,
+                (finished_at, status, error or None, repo, run_id),
+            )
+        return cursor.rowcount == 1
 
     def create_plan(self, plan: dict[str, Any]) -> None:
         with self.session() as conn:

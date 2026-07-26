@@ -6,6 +6,7 @@ from typing import Any
 from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.do_manager.service import DoService
+from telegram_project_manager.bots.ideas.service import BrainstormService
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import OutgoingMessage, outgoing_message
 from telegram_project_manager.platform.router import IncomingMessage
@@ -23,11 +24,13 @@ class CodexQueueManager:
         code_service: CodeJobService,
         ask_service: AskService,
         do_service: DoService,
+        brainstorm_service: BrainstormService | None = None,
     ) -> None:
         self.permissions = PermissionService(db)
         self.code_service = code_service
         self.ask_service = ask_service
         self.do_service = do_service
+        self.brainstorm_service = brainstorm_service
 
     async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         command, _, rest = message.text.strip().partition(" ")
@@ -48,6 +51,13 @@ class CodexQueueManager:
         do = self.do_service.queue_snapshot(
             chat_id=message.chat_id, thread_id=message.thread_id
         )
+        brainstorms = (
+            self.brainstorm_service.queue_snapshot(
+                chat_id=message.chat_id, thread_id=message.thread_id
+            )
+            if self.brainstorm_service is not None
+            else {"running": (), "queued": ()}
+        )
         if not any(
             (
                 *code["running"],
@@ -56,17 +66,26 @@ class CodexQueueManager:
                 *asks["queued"],
                 *do["running"],
                 *do["queued"],
+                *brainstorms["running"],
+                *brainstorms["queued"],
             )
         ):
             scope = "topic" if message.thread_id is not None else "chat"
             return f"No Codex work is running or queued for this {scope}."
-        return outgoing_message(_render_queue(code, asks, do))
+        return outgoing_message(_render_queue(code, asks, do, brainstorms))
 
 
-def _render_queue(code: QueueSnapshot, asks: QueueSnapshot, do: QueueSnapshot) -> str:
+def _render_queue(
+    code: QueueSnapshot,
+    asks: QueueSnapshot,
+    do: QueueSnapshot,
+    brainstorms: QueueSnapshot | None = None,
+) -> str:
     lines = ["Codex queue"]
     _append_section(lines, "Code jobs", code, _render_code_item)
     _append_section(lines, "Repository questions", asks, _render_ask_item)
+    if brainstorms is not None:
+        _append_section(lines, "Repository brainstorms", brainstorms, _render_brainstorm_item)
     _append_section(lines, "Full-access jobs", do, _render_do_item)
     return "\n".join(lines)
 
@@ -108,6 +127,13 @@ def _render_do_item(item: dict[str, Any]) -> str:
     )
     status = str(item["status"]).replace("_", " ")
     return f"{item['id']} {target}{_image_label(item)} — {status}: {item['request']}"
+
+
+def _render_brainstorm_item(item: dict[str, Any]) -> str:
+    return (
+        f"{item['id']} {item['repo']}@{item['branch']} — "
+        f"{item['trigger']}: {item['status']}"
+    )
 
 
 def _image_label(item: dict[str, Any]) -> str:

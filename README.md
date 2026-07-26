@@ -64,6 +64,7 @@ Use `/help` in Telegram for the complete command reference.
 /code approve <c-job_id>                    Approve implementation
 /code status <c-job_id>                     Show code-job status
 /ask <question> [images]                    Inspect the active repository
+/brainstorm                                 Suggest 3 improvements for the active repository
 /do <job> [images]                          Run a writable repository job
 /do status [d-job_id]                       Show do-job status
 /queue                                      Show current Codex work in this chat/topic
@@ -88,13 +89,18 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   Approve the plan before implementation unless `--skip-plan` was used. A job
   becomes ready only after repository validation and GitHub checks pass.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
+  `/brainstorm` returns three ranked repository improvements when brainstorming
+  is enabled for the repository. Configure one scheduled destination per repo
+  with `/repo brainstorm schedule owner/repository daily 09:00` and
+  `/repo brainstorm enable owner/repository`; schedule times are UTC, and
+  disabling preserves the cadence and destination.
   `/do` runs writable Codex work in a persistent repository workspace; its
   separate worker keeps queued jobs independent from Telegram polling.
-- **Codex queue:** `/queue` shows `/code`, `/ask`, and `/do` work currently
+- **Codex queue:** `/queue` shows `/code`, `/ask`, `/brainstorm`, and `/do` work currently
   running or queued for the current chat or exact forum topic. It excludes code
   jobs paused for input, approval, CI, retry, merge, deployment, or completion.
-  Counts are scoped rather than global; `/ask` entries are in memory and vanish
-  after a bot restart, while `/do` queue state is durable.
+  Counts are scoped rather than global; `/ask` and `/brainstorm` entries are in
+  memory and vanish after a bot restart, while `/do` queue state is durable.
 - **Images:** `/issue`, `/ask`, and `/do` accept JPEG, PNG, and GIF attachments,
   with up to 10 images, 10 MB each, and 20 MB total.
 - **Merge and deployment:** `/merge` squash-merges a ready pull request without
@@ -108,7 +114,7 @@ existing job. `/do --host <job>` is restricted to private admin chats.
 
 ## Safety
 
-> **Warning:** `/ask`, `/code`, and `/do` run Codex with full host filesystem
+> **Warning:** `/ask`, `/brainstorm`, `/code`, and `/do` run Codex with full host filesystem
 > access and unrestricted outbound network access. Prompt restrictions are not
 > sandbox-enforced. Use only trusted repositories and monitor the environment.
 
