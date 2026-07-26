@@ -19,5 +19,13 @@ ideas. Supporting technical work is acceptable only when it directly enables the
 capability. Prefer concrete repository-specific ideas over generic advice, do not recommend work
 that is already implemented, and keep each proposal focused enough to become a future issue.
 
+For every idea:
+- Write the title without a ranking number or numeric prefix; the caller adds numbering.
+- Use opportunity to explain the repository-backed product gap or unmet workflow.
+- Use proposal to describe the user-visible behavior and the key implementation surfaces.
+- Use value to explain expected impact, repository fit, feasibility, and confidence.
+- Keep every field within its schema limit and use concise, complete standalone sentences.
+- Never end a field with an ellipsis or return a sentence fragment.
+
 Return only the structured repository brainstorm JSON.
 """

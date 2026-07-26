@@ -31,7 +31,7 @@ from telegram_project_manager.bots.ideas.schemas import (
     BrainstormResponse,
 )
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError
-from telegram_project_manager.platform.responses import outgoing_message
+from telegram_project_manager.platform.responses import TELEGRAM_TEXT_LIMIT, outgoing_message
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
 
@@ -603,18 +603,20 @@ def _render_result(
         lines.extend(
             [
                 "",
-                f"{index}. {_shorten(idea.title, 100)}",
-                f"Opportunity: {_shorten(idea.opportunity, 240)}",
-                f"Proposal: {_shorten(idea.proposal, 280)}",
-                f"Value: {_shorten(idea.value, 200)}",
+                f"{index}. {idea.title}",
+                f"Opportunity: {idea.opportunity}",
+                f"Proposal: {idea.proposal}",
+                f"Value: {idea.value}",
             ]
         )
         if idea.sources:
-            lines.append(
-                "Sources: "
-                + ", ".join(_shorten(source, 90) for source in idea.sources[:3])
-            )
-    return "\n".join(lines)
+            lines.append("Sources: " + ", ".join(idea.sources))
+    result = "\n".join(lines)
+    if len(result) > TELEGRAM_TEXT_LIMIT:
+        raise ValueError(
+            f"Repository brainstorm exceeds Telegram's {TELEGRAM_TEXT_LIMIT}-character limit"
+        )
+    return result
 
 
 def _queue_item(entry: BrainstormQueueEntry) -> dict[str, Any]:
@@ -625,13 +627,6 @@ def _queue_item(entry: BrainstormQueueEntry) -> dict[str, Any]:
         "trigger": entry.trigger,
         "status": entry.status,
     }
-
-
-def _shorten(value: str, limit: int) -> str:
-    normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1].rstrip() + "…"
 
 
 def _safe_error(exc: BaseException) -> str:

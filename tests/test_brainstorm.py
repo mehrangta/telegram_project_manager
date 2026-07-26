@@ -68,8 +68,16 @@ from telegram_project_manager.bots.ideas.schedule import (
 )
 from telegram_project_manager.bots.ideas.schemas import (
     BRAINSTORM_RESPONSE_SCHEMA,
+    MAX_OPPORTUNITY_LENGTH,
+    MAX_PROPOSAL_LENGTH,
+    MAX_SOURCE_LENGTH,
+    MAX_SOURCES,
+    MAX_TITLE_LENGTH,
+    MAX_VALUE_LENGTH,
+    BrainstormIdea,
     BrainstormResponse,
 )
+from telegram_project_manager.platform.responses import TELEGRAM_TEXT_LIMIT, outgoing_message
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
@@ -77,11 +85,12 @@ from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 if SDK_AVAILABLE:
     from telegram_project_manager.bots.codex_queue.commands import _render_queue
     from telegram_project_manager.bots.ideas.commands import BrainstormManager
-    from telegram_project_manager.bots.ideas.service import BrainstormService
+    from telegram_project_manager.bots.ideas.service import BrainstormService, _render_result
 else:
     _render_queue = None
     BrainstormManager = None
     BrainstormService = None
+    _render_result = None
 
 
 def timestamp(year, month, day, hour, minute):
@@ -170,6 +179,155 @@ class BrainstormSchemaTests(unittest.TestCase):
             ["title", "opportunity", "proposal", "value", "sources"],
         )
         self.assertNotIn("problem", idea_schema["properties"])
+
+    def test_schema_matches_single_message_content_limits(self):
+        idea_schema = BRAINSTORM_RESPONSE_SCHEMA["properties"]["ideas"]["items"]
+        properties = idea_schema["properties"]
+
+        self.assertEqual(properties["title"]["maxLength"], MAX_TITLE_LENGTH)
+        self.assertEqual(
+            properties["opportunity"]["maxLength"], MAX_OPPORTUNITY_LENGTH
+        )
+        self.assertEqual(properties["proposal"]["maxLength"], MAX_PROPOSAL_LENGTH)
+        self.assertEqual(properties["value"]["maxLength"], MAX_VALUE_LENGTH)
+        self.assertEqual(properties["sources"]["maxItems"], MAX_SOURCES)
+        self.assertEqual(
+            properties["sources"]["items"]["maxLength"], MAX_SOURCE_LENGTH
+        )
+
+    def test_preserves_complete_normalized_fields_at_limits(self):
+        raw = {
+            "ideas": [
+                {
+                    "title": f"Idea {index}".ljust(MAX_TITLE_LENGTH, "T"),
+                    "opportunity": "O" * (MAX_OPPORTUNITY_LENGTH - 1) + ".",
+                    "proposal": "P" * (MAX_PROPOSAL_LENGTH - 1) + ".",
+                    "value": "V" * (MAX_VALUE_LENGTH - 1) + ".",
+                    "sources": ["s" * MAX_SOURCE_LENGTH],
+                }
+                for index in range(3)
+            ]
+        }
+        raw["ideas"][0]["opportunity"] = "  Complete\n\topportunity.  "
+
+        response = BrainstormResponse.from_json(raw)
+
+        self.assertEqual(response.ideas[0].opportunity, "Complete opportunity.")
+        self.assertEqual(len(response.ideas[1].proposal), MAX_PROPOSAL_LENGTH)
+        self.assertEqual(len(response.ideas[2].value), MAX_VALUE_LENGTH)
+        self.assertEqual(response.ideas[0].sources, ("s" * MAX_SOURCE_LENGTH,))
+
+    def test_rejects_oversized_or_incomplete_fields(self):
+        limits = {
+            "title": MAX_TITLE_LENGTH,
+            "opportunity": MAX_OPPORTUNITY_LENGTH,
+            "proposal": MAX_PROPOSAL_LENGTH,
+            "value": MAX_VALUE_LENGTH,
+        }
+        for field, limit in limits.items():
+            raw = {
+                "ideas": [
+                    {
+                        "title": f"Idea {index}",
+                        "opportunity": "Complete opportunity.",
+                        "proposal": "Complete proposal.",
+                        "value": "Complete value.",
+                        "sources": [],
+                    }
+                    for index in range(3)
+                ]
+            }
+            raw["ideas"][0][field] = "x" * (limit + 1)
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "exceeds"
+            ):
+                BrainstormResponse.from_json(raw)
+
+        for field in ("opportunity", "proposal", "value"):
+            raw = {
+                "ideas": [
+                    {
+                        "title": f"Idea {index}",
+                        "opportunity": "Complete opportunity.",
+                        "proposal": "Complete proposal.",
+                        "value": "Complete value.",
+                        "sources": [],
+                    }
+                    for index in range(3)
+                ]
+            }
+            raw["ideas"][0][field] = "Incomplete…"
+            with self.subTest(incomplete=field), self.assertRaisesRegex(
+                ValueError, "incomplete"
+            ):
+                BrainstormResponse.from_json(raw)
+
+    def test_rejects_sources_outside_schema_limits(self):
+        raw = {
+            "ideas": [
+                {
+                    "title": f"Idea {index}",
+                    "opportunity": "Complete opportunity.",
+                    "proposal": "Complete proposal.",
+                    "value": "Complete value.",
+                    "sources": [],
+                }
+                for index in range(3)
+            ]
+        }
+        raw["ideas"][0]["sources"] = ["a"] * (MAX_SOURCES + 1)
+        with self.assertRaisesRegex(ValueError, "more than"):
+            BrainstormResponse.from_json(raw)
+
+        raw["ideas"][0]["sources"] = ["s" * (MAX_SOURCE_LENGTH + 1)]
+        with self.assertRaisesRegex(ValueError, "source exceeds"):
+            BrainstormResponse.from_json(raw)
+
+
+@unittest.skipUnless(SDK_AVAILABLE, "openai_codex dependency is unavailable")
+class BrainstormRenderingTests(unittest.TestCase):
+    def test_near_limit_result_remains_complete(self):
+        ideas = tuple(
+            BrainstormIdea(
+                title=f"Idea {index} ".ljust(MAX_TITLE_LENGTH, "T"),
+                opportunity="O" * (MAX_OPPORTUNITY_LENGTH - 1) + ".",
+                proposal="P" * (MAX_PROPOSAL_LENGTH - 1) + ".",
+                value="V" * (MAX_VALUE_LENGTH - 1) + ".",
+                sources=(
+                    "a" * MAX_SOURCE_LENGTH,
+                    "b" * MAX_SOURCE_LENGTH,
+                    "c" * MAX_SOURCE_LENGTH,
+                ),
+            )
+            for index in range(1, 4)
+        )
+
+        result = _render_result("owner/repo", "main", "a" * 40, ideas, "manual")
+        outgoing = outgoing_message(result)
+
+        self.assertLessEqual(len(result), TELEGRAM_TEXT_LIMIT)
+        self.assertIn("3. Idea 3", result)
+        self.assertIn("V" * (MAX_VALUE_LENGTH - 1) + ".", result)
+        self.assertIn("c" * MAX_SOURCE_LENGTH, result)
+        self.assertNotIn("…", result)
+        self.assertNotIn("... truncated ...", outgoing.text)
+
+    def test_rejects_result_over_telegram_limit(self):
+        idea = BrainstormIdea(
+            title="Complete idea",
+            opportunity="Complete opportunity.",
+            proposal="Complete proposal.",
+            value="Complete value.",
+            sources=(),
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds Telegram"):
+            _render_result(
+                f"owner/{'r' * TELEGRAM_TEXT_LIMIT}",
+                "main",
+                "a" * 40,
+                (idea, idea, idea),
+                "manual",
+            )
 
 
 class BrainstormDatabaseTests(unittest.TestCase):
@@ -708,6 +866,8 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>Opportunity:</b> A repository-specific opportunity.", result)
         self.assertIn("<b>Proposal:</b> Add a focused new capability.", result)
         self.assertIn("<b>Value:</b> Expand what users can accomplish.", result)
+        self.assertNotIn("…", result)
+        self.assertNotIn("... truncated ...", result)
         self.assertNotIn("Problem:", result)
         self.assertNotIn("Change:", result)
         self.assertIn("src/app.py", result)
@@ -721,6 +881,9 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not propose bug fixes", prompt)
         self.assertIn("maintenance", prompt)
         self.assertIn("only when it directly enables", prompt)
+        self.assertIn("without a ranking number", prompt)
+        self.assertIn("complete standalone sentences", prompt)
+        self.assertIn("Never end a field with an ellipsis", prompt)
         self.assertIn(
             "new repository capabilities", call["developer_instructions"]
         )
@@ -767,6 +930,37 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
         self.assertIn("invalid brainstorm response", self.bot.edited[0][2])
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "failed")
+
+    async def test_over_budget_result_updates_manual_message_as_failed(self):
+        repo = f"owner/{'r' * TELEGRAM_TEXT_LIMIT}"
+        self.db.allow_repo(repo, 10)
+        self.db.enable_brainstorm(
+            repo,
+            chat_id=20,
+            thread_id=30,
+            default_branch="main",
+            local_repo_path="/cache/repo.git",
+            next_run_at=None,
+            user_id=10,
+        )
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo=repo,
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
+        self.assertIn("exceeds Telegram", self.bot.edited[0][2])
+        self.assertNotIn("... truncated ...", self.bot.edited[0][2])
+        self.assertEqual(self.db.get_brainstorm_config(repo)["last_status"], "failed")
 
     async def test_manual_edit_failure_does_not_send_fallback_message(self):
         self.bot.edit_error = TelegramBotApiError("message can't be edited")
