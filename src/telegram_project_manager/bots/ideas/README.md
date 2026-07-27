@@ -8,5 +8,5 @@ configured chat or topic destination, with the active repository used for
 fallback. Manual runs update their queued Telegram reply with the terminal result;
 scheduled runs post the terminal result directly. Execution uses detached
 worktrees and the Codex plan model. Idea fields are generated to a bounded
-single-message format and delivered as complete text rather than shortened after
-generation.
+single-message format, validated as complete sentences, and regenerated once when
+model output is incomplete rather than shortened after generation.
