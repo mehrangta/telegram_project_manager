@@ -3,15 +3,12 @@ from __future__ import annotations
 import json
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from telegram_project_manager.platform.config import normalize_config_value
 from telegram_project_manager.platform.llm.memory import DEFAULT_MEMORY_MAX_MESSAGES, SQLiteChatMessageHistory
 from telegram_project_manager.platform.storage.db import Database
-
-
-STRUCTURED_OUTPUT_ATTEMPTS = 2
 
 
 class LlmError(RuntimeError):
@@ -92,16 +89,18 @@ class OpenAICompatibleClient:
                 "OpenAI API key is not configured. Admin private chat: /config set openai_api_key <key>"
             )
         history = None
+        schema = response_schema or COMMIT_PLAN_RESPONSE_SCHEMA
         try:
-            llm = ChatOpenAI(
+            chat_model = ChatOpenAI(
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
                 temperature=0.1,
                 timeout=90,
                 max_retries=2,
-            ).with_structured_output(
-                response_schema or COMMIT_PLAN_RESPONSE_SCHEMA,
+            )
+            structured_llm = chat_model.with_structured_output(
+                schema,
                 method="json_schema",
                 include_raw=True,
             )
@@ -123,34 +122,45 @@ class OpenAICompatibleClient:
                     }
                 )
                 invocation_input = prompt_value
+                invocation_messages = prompt_value.to_messages()
             else:
                 invocation_input = [
                     ("system", system_prompt),
                     ("human", user_prompt),
                 ]
+                invocation_messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
         except Exception as exc:
             raise LlmError(f"LLM request failed: {exc}") from exc
 
-        response = None
-        parsed = None
-        for _ in range(STRUCTURED_OUTPUT_ATTEMPTS):
+        try:
+            response = structured_llm.invoke(invocation_input)
+        except Exception as exc:
+            raise LlmError(f"LLM request failed: {exc}") from exc
+        if not isinstance(response, dict):
+            raise LlmError("LLM structured response is invalid")
+        parsing_error = response.get("parsing_error")
+        if parsing_error:
+            raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
+
+        parsed = _structured_response_object(response)
+        successful_raw = response.get("raw")
+        if parsed is None:
+            repair_input = [
+                *invocation_messages,
+                HumanMessage(content=_structured_output_repair_prompt(schema)),
+            ]
             try:
-                response = llm.invoke(invocation_input)
+                successful_raw = chat_model.invoke(repair_input)
             except Exception as exc:
                 raise LlmError(f"LLM request failed: {exc}") from exc
-            if not isinstance(response, dict):
-                raise LlmError("LLM structured response is invalid")
-            parsing_error = response.get("parsing_error")
-            if parsing_error:
-                raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
-            parsed = _structured_response_object(response)
-            if parsed is not None:
-                break
+            parsed = _raw_message_object(successful_raw)
         if parsed is None:
             raise LlmError("LLM structured response missing parsed object")
         if history is not None:
-            raw = response.get("raw")
-            content = _raw_message_text(raw) or json.dumps(parsed)
+            content = _raw_message_text(successful_raw) or json.dumps(parsed)
             history.add_messages([HumanMessage(content=user_prompt), AIMessage(content=content)])
         return parsed
 
@@ -170,7 +180,10 @@ def _structured_response_object(response: dict) -> dict | None:
     if parsed is not None:
         return parsed
 
-    raw = response.get("raw")
+    return _raw_message_object(response.get("raw"))
+
+
+def _raw_message_object(raw: object) -> dict | None:
     if not isinstance(raw, AIMessage):
         return None
     parsed = _as_dict(raw.additional_kwargs.get("parsed"))
@@ -184,6 +197,16 @@ def _structured_response_object(response: dict) -> dict | None:
         return parse_json_object(content)
     except LlmError:
         return None
+
+
+def _structured_output_repair_prompt(response_schema: dict) -> str:
+    schema = json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "The previous response did not contain a parseable JSON object. "
+        "Return exactly one non-null JSON object matching this JSON Schema. "
+        "Do not include markdown or commentary.\n"
+        f"JSON Schema:\n{schema}"
+    )
 
 
 def _as_dict(value: object) -> dict | None:

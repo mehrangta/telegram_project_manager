@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -133,28 +134,66 @@ class LlmClientTests(unittest.TestCase):
                     }
                     self.assertEqual(client.chat_json("system", "user"), expected)
                 structured.invoke.assert_called_once()
+                chat_openai.return_value.invoke.assert_not_called()
 
-    def test_retries_missing_parsed_object_once(self):
+    def test_repairs_missing_parsed_object_with_schema_guidance(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             _, client = self.configured_client(Path(temp_dir))
+            schema = {
+                "title": "issue",
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            }
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
                 structured = chat_openai.return_value.with_structured_output.return_value
-                structured.invoke.side_effect = [
-                    {
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content="null"),
+                    "parsed": None,
+                    "parsing_error": None,
+                }
+                chat_openai.return_value.invoke.return_value = AIMessage(
+                    content='{"title":"Recovered"}'
+                )
+                self.assertEqual(
+                    client.chat_json("system", "user", response_schema=schema),
+                    {"title": "Recovered"},
+                )
+            structured.invoke.assert_called_once()
+            chat_openai.return_value.invoke.assert_called_once()
+            repair_input = chat_openai.return_value.invoke.call_args.args[0]
+            self.assertEqual(
+                [(message.type, message.content) for message in repair_input[:2]],
+                [("system", "system"), ("human", "user")],
+            )
+            repair_prompt = repair_input[-1].content
+            self.assertIn("exactly one non-null JSON object", repair_prompt)
+            self.assertIn(
+                json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+                repair_prompt,
+            )
+
+    def test_missing_parsed_object_fails_after_repair(self):
+        for repair_content in ("", "null", "[]", "not-json"):
+            with self.subTest(repair_content=repair_content), tempfile.TemporaryDirectory() as temp_dir:
+                _, client = self.configured_client(Path(temp_dir))
+                with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                    structured = chat_openai.return_value.with_structured_output.return_value
+                    structured.invoke.return_value = {
                         "raw": AIMessage(content="null"),
                         "parsed": None,
                         "parsing_error": None,
-                    },
-                    {
-                        "raw": AIMessage(content='{"title":"Recovered"}'),
-                        "parsed": {"title": "Recovered"},
-                        "parsing_error": None,
-                    },
-                ]
-                self.assertEqual(client.chat_json("system", "user"), {"title": "Recovered"})
-            self.assertEqual(structured.invoke.call_count, 2)
+                    }
+                    chat_openai.return_value.invoke.return_value = AIMessage(
+                        content=repair_content
+                    )
+                    with self.assertRaisesRegex(LlmError, "missing parsed object"):
+                        client.chat_json("system", "user")
+                structured.invoke.assert_called_once()
+                chat_openai.return_value.invoke.assert_called_once()
 
-    def test_missing_parsed_object_fails_after_one_retry(self):
+    def test_wraps_repair_request_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             _, client = self.configured_client(Path(temp_dir))
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
@@ -164,9 +203,11 @@ class LlmClientTests(unittest.TestCase):
                     "parsed": None,
                     "parsing_error": None,
                 }
-                with self.assertRaisesRegex(LlmError, "missing parsed object"):
+                chat_openai.return_value.invoke.side_effect = RuntimeError("repair unavailable")
+                with self.assertRaisesRegex(LlmError, "repair unavailable"):
                     client.chat_json("system", "user")
-            self.assertEqual(structured.invoke.call_count, 2)
+            structured.invoke.assert_called_once()
+            chat_openai.return_value.invoke.assert_called_once()
 
     def test_structured_parsing_error_is_not_retried(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -181,6 +222,7 @@ class LlmClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(LlmError, "invalid structured output"):
                     client.chat_json("system", "user")
             structured.invoke.assert_called_once()
+            chat_openai.return_value.invoke.assert_not_called()
 
     def test_invalid_structured_response_is_not_retried(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -191,6 +233,7 @@ class LlmClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(LlmError, "structured response is invalid"):
                     client.chat_json("system", "user")
             structured.invoke.assert_called_once()
+            chat_openai.return_value.invoke.assert_not_called()
 
     def test_replays_persistent_memory_for_same_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -227,21 +270,16 @@ class LlmClientTests(unittest.TestCase):
                 ],
             )
 
-    def test_retry_persists_only_successful_response_in_memory(self):
+    def test_repair_persists_only_successful_response_in_memory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             db, client = self.configured_client(root)
             prompts = []
-            responses = iter(
+            structured_responses = iter(
                 [
                     {
                         "raw": AIMessage(content="null"),
                         "parsed": None,
-                        "parsing_error": None,
-                    },
-                    {
-                        "raw": AIMessage(content='{"turn":1}'),
-                        "parsed": {"turn": 1},
                         "parsing_error": None,
                     },
                     {
@@ -254,10 +292,11 @@ class LlmClientTests(unittest.TestCase):
 
             def respond(prompt):
                 prompts.append(prompt.to_messages())
-                return next(responses)
+                return next(structured_responses)
 
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
                 chat_openai.return_value.with_structured_output.return_value = RunnableLambda(respond)
+                chat_openai.return_value.invoke.return_value = AIMessage(content='{"turn":1}')
                 self.assertEqual(client.chat_json("system", "first", memory_key="chat:1"), {"turn": 1})
                 self.assertEqual(
                     db.list_llm_messages("chat:1", 12),
@@ -268,9 +307,16 @@ class LlmClientTests(unittest.TestCase):
                 )
                 self.assertEqual(client.chat_json("system", "second", memory_key="chat:1"), {"turn": 2})
 
-            self.assertEqual(len(prompts), 3)
+            self.assertEqual(len(prompts), 2)
+            chat_openai.return_value.invoke.assert_called_once()
+            repair_input = chat_openai.return_value.invoke.call_args.args[0]
             self.assertEqual(
-                [(message.type, message.content) for message in prompts[2]],
+                [(message.type, message.content) for message in repair_input[:2]],
+                [("system", "system"), ("human", "first")],
+            )
+            self.assertIn("previous response", repair_input[-1].content.lower())
+            self.assertEqual(
+                [(message.type, message.content) for message in prompts[1]],
                 [
                     ("system", "system"),
                     ("human", "first"),
