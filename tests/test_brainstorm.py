@@ -76,6 +76,7 @@ from telegram_project_manager.bots.ideas.schemas import (
     MAX_VALUE_LENGTH,
     BrainstormIdea,
     BrainstormResponse,
+    BrainstormValidationError,
 )
 from telegram_project_manager.platform.responses import TELEGRAM_TEXT_LIMIT, outgoing_message
 from telegram_project_manager.platform.router import IncomingMessage
@@ -154,9 +155,9 @@ class BrainstormSchemaTests(unittest.TestCase):
             "ideas": [
                 {
                     "title": f"Idea {index}",
-                    "opportunity": "Opportunity",
-                    "proposal": "Proposal",
-                    "value": "Value",
+                    "opportunity": "Opportunity.",
+                    "proposal": "Proposal.",
+                    "value": "Value.",
                     "sources": ["src/app.py", "src/app.py"],
                 }
                 for index in range(3)
@@ -217,6 +218,27 @@ class BrainstormSchemaTests(unittest.TestCase):
         self.assertEqual(len(response.ideas[2].value), MAX_VALUE_LENGTH)
         self.assertEqual(response.ideas[0].sources, ("s" * MAX_SOURCE_LENGTH,))
 
+    def test_accepts_terminal_punctuation_with_closing_delimiters(self):
+        raw = {
+            "ideas": [
+                {
+                    "title": f"Idea {index}",
+                    "opportunity": "A complete opportunity!”",
+                    "proposal": "A complete proposal?)",
+                    "value": "A complete value。",
+                    "sources": ["src/path-without-punctuation"],
+                }
+                for index in range(3)
+            ]
+        }
+
+        response = BrainstormResponse.from_json(raw)
+
+        self.assertEqual(response.ideas[0].title, "Idea 0")
+        self.assertEqual(
+            response.ideas[0].sources, ("src/path-without-punctuation",)
+        )
+
     def test_rejects_oversized_or_incomplete_fields(self):
         limits = {
             "title": MAX_TITLE_LENGTH,
@@ -244,23 +266,26 @@ class BrainstormSchemaTests(unittest.TestCase):
                 BrainstormResponse.from_json(raw)
 
         for field in ("opportunity", "proposal", "value"):
-            raw = {
-                "ideas": [
-                    {
-                        "title": f"Idea {index}",
-                        "opportunity": "Complete opportunity.",
-                        "proposal": "Complete proposal.",
-                        "value": "Complete value.",
-                        "sources": [],
-                    }
-                    for index in range(3)
-                ]
-            }
-            raw["ideas"][0][field] = "Incomplete…"
-            with self.subTest(incomplete=field), self.assertRaisesRegex(
-                ValueError, "incomplete"
-            ):
-                BrainstormResponse.from_json(raw)
+            for incomplete in ("Incomplete fragment", "Incomplete...", "Incomplete…”"):
+                raw = {
+                    "ideas": [
+                        {
+                            "title": f"Idea {index}",
+                            "opportunity": "Complete opportunity.",
+                            "proposal": "Complete proposal.",
+                            "value": "Complete value.",
+                            "sources": [],
+                        }
+                        for index in range(3)
+                    ]
+                }
+                raw["ideas"][0][field] = incomplete
+                with self.subTest(
+                    field=field, incomplete=incomplete
+                ), self.assertRaisesRegex(
+                    BrainstormValidationError, f"idea 1 has an incomplete {field}"
+                ):
+                    BrainstormResponse.from_json(raw)
 
     def test_rejects_sources_outside_schema_limits(self):
         raw = {
@@ -763,15 +788,11 @@ class FakeCodex:
         self.error = None
         self.block = False
         self.started = asyncio.Event()
+        self.responses = []
 
-    async def run_turn(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.error:
-            raise self.error
-        if self.block:
-            self.started.set()
-            await asyncio.Future()
-        return "thread", {
+    @staticmethod
+    def complete_response():
+        return {
             "ideas": [
                 {
                     "title": f"Idea {index}",
@@ -783,6 +804,16 @@ class FakeCodex:
                 for index in range(1, 4)
             ]
         }
+
+    async def run_turn(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        if self.block:
+            self.started.set()
+            await asyncio.Future()
+        response = self.responses.pop(0) if self.responses else self.complete_response()
+        return kwargs.get("thread_id") or "thread", response
 
     async def interrupt(self, job_id):
         self.interrupted.append(job_id)
@@ -888,9 +919,73 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             "new repository capabilities", call["developer_instructions"]
         )
         self.assertEqual(call["output_schema"], BRAINSTORM_RESPONSE_SCHEMA)
+        self.assertEqual(len(self.codex.calls), 1)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
 
+    async def test_incomplete_result_is_repaired_on_same_thread(self):
+        incomplete = self.codex.complete_response()
+        incomplete["ideas"][0]["proposal"] = "Add a focused new capability"
+        self.codex.responses = [incomplete, self.codex.complete_response()]
+
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.codex.calls), 2)
+        self.assertIsNone(self.codex.calls[0]["thread_id"])
+        self.assertEqual(self.codex.calls[1]["thread_id"], "thread")
+        self.assertIn("failed validation", self.codex.calls[1]["prompt"])
+        self.assertIn(
+            "idea 1 has an incomplete proposal", self.codex.calls[1]["prompt"]
+        )
+        self.assertIn("Regenerate the entire response", self.codex.calls[1]["prompt"])
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertIn("3. Idea 3", self.bot.edited[0][2])
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
+
+    async def test_two_incomplete_results_fail_after_single_repair(self):
+        first = self.codex.complete_response()
+        first["ideas"][0]["value"] = "Incomplete value"
+        second = self.codex.complete_response()
+        second["ideas"][1]["opportunity"] = "Still incomplete"
+        self.codex.responses = [first, second]
+
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.codex.calls), 2)
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
+        self.assertIn("after 2 attempts", self.bot.edited[0][2])
+        self.assertIn(
+            "idea 2 has an incomplete opportunity", self.bot.edited[0][2]
+        )
+        self.assertNotIn("Still incomplete", self.bot.edited[0][2])
+        self.assertEqual(
+            self.db.get_brainstorm_config("owner/repo")["last_status"], "failed"
+        )
+
     async def test_scheduled_run_advances_and_uses_configured_destination(self):
+        incomplete = self.codex.complete_response()
+        incomplete["ideas"][0]["opportunity"] = "Incomplete opportunity"
+        self.codex.responses = [incomplete, self.codex.complete_response()]
         self.db.configure_brainstorm_schedule("owner/repo", 2, 0, 50, 10)
         self.db.enable_brainstorm(
             "owner/repo",
@@ -908,6 +1003,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[0][2], 33)
         self.assertIn("scheduled", self.bot.sent[0][1])
         self.assertEqual(self.bot.edited, [])
+        self.assertEqual(len(self.codex.calls), 2)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["next_run_at"], 172850)
 
     async def test_manual_failure_updates_queued_message(self):
@@ -960,6 +1056,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
         self.assertIn("exceeds Telegram", self.bot.edited[0][2])
         self.assertNotIn("... truncated ...", self.bot.edited[0][2])
+        self.assertEqual(len(self.codex.calls), 1)
         self.assertEqual(self.db.get_brainstorm_config(repo)["last_status"], "failed")
 
     async def test_manual_edit_failure_does_not_send_fallback_message(self):

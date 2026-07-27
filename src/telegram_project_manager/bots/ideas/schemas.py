@@ -10,6 +10,8 @@ MAX_PROPOSAL_LENGTH = 280
 MAX_VALUE_LENGTH = 200
 MAX_SOURCES = 3
 MAX_SOURCE_LENGTH = 90
+TERMINAL_PUNCTUATION = (".", "!", "?", "。", "！", "？")
+TRAILING_CLOSERS = "\"'’”)]}"
 
 IDEA_SCHEMA = {
     "type": "object",
@@ -43,6 +45,10 @@ BRAINSTORM_RESPONSE_SCHEMA = {
 }
 
 
+class BrainstormValidationError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class BrainstormIdea:
     title: str
@@ -60,22 +66,30 @@ class BrainstormResponse:
     def from_json(cls, raw: dict[str, Any]) -> "BrainstormResponse":
         items = raw.get("ideas")
         if not isinstance(items, list) or len(items) != IDEA_COUNT:
-            raise ValueError("Codex must return exactly 3 repository ideas")
+            raise BrainstormValidationError("Codex must return exactly 3 repository ideas")
         ideas: list[BrainstormIdea] = []
         titles: set[str] = set()
-        for item in items:
+        for index, item in enumerate(items, start=1):
             if not isinstance(item, dict):
-                raise ValueError("Codex returned an invalid repository idea")
-            title = _required(item, "title", MAX_TITLE_LENGTH)
+                raise BrainstormValidationError(
+                    f"Codex returned an invalid repository idea at position {index}"
+                )
+            title = _required(item, "title", MAX_TITLE_LENGTH, index)
             normalized_title = title.casefold()
             if normalized_title in titles:
-                raise ValueError("Codex returned duplicate repository ideas")
+                raise BrainstormValidationError(
+                    f"Codex returned duplicate repository idea {index}"
+                )
             titles.add(normalized_title)
             raw_sources = item.get("sources")
             if not isinstance(raw_sources, list):
-                raise ValueError("Codex idea has invalid sources")
+                raise BrainstormValidationError(
+                    f"Codex idea {index} has invalid sources"
+                )
             if len(raw_sources) > MAX_SOURCES:
-                raise ValueError(f"Codex idea has more than {MAX_SOURCES} sources")
+                raise BrainstormValidationError(
+                    f"Codex idea {index} has more than {MAX_SOURCES} sources"
+                )
             sources: list[str] = []
             seen: set[str] = set()
             for source in raw_sources:
@@ -83,8 +97,8 @@ class BrainstormResponse:
                 if not normalized or normalized in seen:
                     continue
                 if len(normalized) > MAX_SOURCE_LENGTH:
-                    raise ValueError(
-                        f"Codex idea source exceeds {MAX_SOURCE_LENGTH} characters"
+                    raise BrainstormValidationError(
+                        f"Codex idea {index} source exceeds {MAX_SOURCE_LENGTH} characters"
                     )
                 seen.add(normalized)
                 sources.append(normalized)
@@ -92,27 +106,40 @@ class BrainstormResponse:
                 BrainstormIdea(
                     title=title,
                     opportunity=_required_detail(
-                        item, "opportunity", MAX_OPPORTUNITY_LENGTH
+                        item, "opportunity", MAX_OPPORTUNITY_LENGTH, index
                     ),
-                    proposal=_required_detail(item, "proposal", MAX_PROPOSAL_LENGTH),
-                    value=_required_detail(item, "value", MAX_VALUE_LENGTH),
+                    proposal=_required_detail(
+                        item, "proposal", MAX_PROPOSAL_LENGTH, index
+                    ),
+                    value=_required_detail(item, "value", MAX_VALUE_LENGTH, index),
                     sources=tuple(sources),
                 )
             )
         return cls(ideas=tuple(ideas))
 
 
-def _required(item: dict[str, Any], key: str, limit: int) -> str:
+def _required(item: dict[str, Any], key: str, limit: int, idea_index: int) -> str:
     value = " ".join(str(item.get(key) or "").split())
     if not value:
-        raise ValueError(f"Codex idea has an empty {key}")
+        raise BrainstormValidationError(
+            f"Codex idea {idea_index} has an empty {key}"
+        )
     if len(value) > limit:
-        raise ValueError(f"Codex idea {key} exceeds {limit} characters")
+        raise BrainstormValidationError(
+            f"Codex idea {idea_index} {key} exceeds {limit} characters"
+        )
     return value
 
 
-def _required_detail(item: dict[str, Any], key: str, limit: int) -> str:
-    value = _required(item, key, limit)
-    if value.endswith(("...", "…")):
-        raise ValueError(f"Codex idea has an incomplete {key}")
+def _required_detail(
+    item: dict[str, Any], key: str, limit: int, idea_index: int
+) -> str:
+    value = _required(item, key, limit, idea_index)
+    sentence = value.rstrip(TRAILING_CLOSERS)
+    if sentence.endswith(("...", "…")) or not sentence.endswith(
+        TERMINAL_PUNCTUATION
+    ):
+        raise BrainstormValidationError(
+            f"Codex idea {idea_index} has an incomplete {key}"
+        )
     return value
