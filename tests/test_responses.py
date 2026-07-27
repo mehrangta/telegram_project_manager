@@ -24,6 +24,36 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertIn("<blockquote expandable>", outgoing.text)
         self.assertNotIn("<tags>", outgoing.text)
 
+    def test_renders_independent_preformatted_sections(self):
+        outgoing = outgoing_message(
+            "Repository brainstorm\n"
+            "Repo: owner/repo\n\n"
+            "1. Idea <one>\n"
+            "Opportunity: Use A & B.\n\n"
+            "2. Idea two\n"
+            "Proposal: Keep the final section complete.",
+            preformatted_prefixes=("1. ", "2. "),
+        )
+
+        self.assertIn("ℹ️ <b>Repository brainstorm</b>", outgoing.text)
+        self.assertIn("<b>Repo:</b> owner/repo", outgoing.text)
+        self.assertEqual(outgoing.text.count("<pre>"), 2)
+        self.assertIn(
+            "<pre>1. Idea &lt;one&gt;\nOpportunity: Use A &amp; B.</pre>",
+            outgoing.text,
+        )
+        self.assertIn(
+            "<pre>2. Idea two\nProposal: Keep the final section complete.</pre>",
+            outgoing.text,
+        )
+        self.assertNotIn("\n\n</pre>", outgoing.text)
+
+    def test_numbered_lines_keep_default_rendering_without_opt_in(self):
+        outgoing = outgoing_message("Status\n1. Ordinary numbered line")
+
+        self.assertNotIn("<pre>", outgoing.text)
+        self.assertIn("1. Ordinary numbered line", outgoing.text)
+
     def test_primary_id_commands_get_native_action_buttons(self):
         outgoing = outgoing_message(
             "Issue draft created.\n"

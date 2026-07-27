@@ -394,6 +394,9 @@ class BrainstormService:
                     reply_to_message_id=reply_to_message_id,
                     status_message_id=status_message_id,
                     text=_render_result(repo, branch, commit, ideas, trigger),
+                    preformatted_prefixes=tuple(
+                        f"{index}. " for index in range(1, len(ideas) + 1)
+                    ),
                 )
                 status = "ok"
                 self.db.audit(
@@ -583,8 +586,13 @@ class BrainstormService:
         thread_id: int | None,
         reply_to_message_id: int | None,
         text: str,
+        preformatted_prefixes: tuple[str, ...] = (),
     ) -> int:
-        outgoing = outgoing_message(text, reply_to_message_id=reply_to_message_id)
+        outgoing = outgoing_message(
+            text,
+            preformatted_prefixes=preformatted_prefixes,
+            reply_to_message_id=reply_to_message_id,
+        )
         result = await asyncio.to_thread(
             self.bot.send_message,
             chat_id,
@@ -605,6 +613,7 @@ class BrainstormService:
         reply_to_message_id: int | None,
         status_message_id: int | None,
         text: str,
+        preformatted_prefixes: tuple[str, ...] = (),
     ) -> None:
         if status_message_id is None:
             await self._send(
@@ -612,9 +621,13 @@ class BrainstormService:
                 thread_id=thread_id,
                 reply_to_message_id=reply_to_message_id,
                 text=text,
+                preformatted_prefixes=preformatted_prefixes,
             )
             return
-        outgoing = outgoing_message(text)
+        outgoing = outgoing_message(
+            text,
+            preformatted_prefixes=preformatted_prefixes,
+        )
         try:
             await asyncio.to_thread(
                 self.bot.edit_message_text,

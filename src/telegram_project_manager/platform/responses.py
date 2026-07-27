@@ -78,6 +78,7 @@ def outgoing_message(
     *,
     keyboard: Sequence[Sequence[InlineButton]] | None = None,
     expandable_prefixes: Sequence[str] = (),
+    preformatted_prefixes: Sequence[str] = (),
     reply_to_message_id: int | None = None,
 ) -> OutgoingMessage:
     if isinstance(value, OutgoingMessage):
@@ -89,7 +90,11 @@ def outgoing_message(
         else keyboard_for_text(plain)
     )
     return OutgoingMessage(
-        text=_render_html(plain, expandable_prefixes=tuple(expandable_prefixes)),
+        text=_render_html(
+            plain,
+            expandable_prefixes=tuple(expandable_prefixes),
+            preformatted_prefixes=tuple(preformatted_prefixes),
+        ),
         keyboard=resolved_keyboard,
         reply_to_message_id=reply_to_message_id,
     )
@@ -204,7 +209,12 @@ def _command_label(action: str) -> str:
     return f"{icon} {action}"
 
 
-def _render_html(text: str, *, expandable_prefixes: tuple[str, ...]) -> str:
+def _render_html(
+    text: str,
+    *,
+    expandable_prefixes: tuple[str, ...],
+    preformatted_prefixes: tuple[str, ...],
+) -> str:
     lines = text.splitlines()
     rendered: list[str] = []
     first_content = True
@@ -214,6 +224,20 @@ def _render_html(text: str, *, expandable_prefixes: tuple[str, ...]) -> str:
         if not line:
             rendered.append("")
             index += 1
+            continue
+        if preformatted_prefixes and line.startswith(preformatted_prefixes):
+            section = [line]
+            index += 1
+            while index < len(lines) and not lines[index].startswith(
+                preformatted_prefixes
+            ):
+                section.append(lines[index])
+                index += 1
+            while section and not section[-1]:
+                section.pop()
+            content = "\n".join(html.escape(item) for item in section)
+            rendered.append(f"<pre>{content}</pre>")
+            first_content = False
             continue
         if expandable_prefixes and line.startswith(expandable_prefixes):
             section = [line]
