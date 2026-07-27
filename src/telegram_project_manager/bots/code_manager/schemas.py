@@ -12,7 +12,13 @@ PLAN_QUESTION_MAX_LENGTH = 500
 CODE_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string"},
+        "summary": {
+            "type": "string",
+            "description": (
+                "Begin with exactly two complete sentences explaining only the current "
+                "problem and its impact or context; discuss solutions only afterward."
+            ),
+        },
         "steps": {
             "type": "array",
             "minItems": 1,
