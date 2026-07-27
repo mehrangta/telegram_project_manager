@@ -116,7 +116,9 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   deploying. Deployment is disabled per repository until an admin configures a
   workflow and enables it. `/deploy` requires a ready pull request targeting
   `main` and dispatches the configured `workflow_dispatch` workflow at the
-  accepted merge SHA.
+  accepted merge SHA. If GitHub reports conflicts, the bot merges the latest
+  base into the pull-request branch, asks Codex to resolve guarded content
+  conflicts, reruns CI, and then resumes the requested merge or deployment.
 - **Recovery:** Interrupted code jobs require `/code retry` or `/code discard`.
   Interrupted `/do` jobs are not rerun automatically because they may have
   produced partial or non-idempotent changes.

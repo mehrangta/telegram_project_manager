@@ -317,6 +317,10 @@ class FakeWorkspaces:
         self.rebase_continuation_results = []
         self.rebase_started = []
         self.rebase_pushed = []
+        self.merge_conflicts = []
+        self.merge_started = []
+        self.merge_finished = []
+        self.merge_pushed = []
         self.image_paths = []
         self.staged_images = []
         self.removed_images = []
@@ -348,6 +352,17 @@ class FakeWorkspaces:
     def continue_conflict_aware_rebase(self, path, conflicts):
         self.rebase_continuations.append((path, list(conflicts)))
         return self.rebase_continuation_results.pop(0) if self.rebase_continuation_results else []
+
+    def start_conflict_aware_merge(self, path, base_branch):
+        self.merge_started.append((path, base_branch))
+        return "new-base-sha", list(self.merge_conflicts), True
+
+    def finish_conflict_aware_merge(self, path, **kwargs):
+        self.merge_finished.append((path, kwargs))
+        return "merge-resolution-sha"
+
+    def push_merged_branch(self, path, **kwargs):
+        self.merge_pushed.append((path, kwargs))
 
     def head_sha(self, path):
         return "rebase-sha"
@@ -1185,7 +1200,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["result_json"]["rebase"]["conflict_resolutions"], [])
         self.assertTrue(self.workspaces.rebase_pushed)
 
-    async def test_operation_rebase_preserves_pending_merge_state(self):
+    async def test_operation_conflict_resolution_merges_base_and_preserves_pending_state(self):
         job_id = await self.service.create_job(
             chat_id=10, user_id=20, thread_id=None, issue=self.issue,
             base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
@@ -1199,15 +1214,24 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
                 "deployment_conflict_attempts": 1,
             },
         )
-        self.github.head_shas = ["code-sha", "code-sha", "rebase-sha"]
+        self.github.head_shas = [
+            "code-sha", "code-sha", "code-sha", "merge-resolution-sha"
+        ]
 
-        await self.service.rebase_for_operation(job_id)
+        await self.service.resolve_conflicts_for_operation(job_id)
         ready = await wait_for_status(self.db, job_id, "ready")
 
-        self.assertEqual(ready["ci_head_sha"], "rebase-sha")
+        self.assertEqual(ready["ci_head_sha"], "merge-resolution-sha")
         self.assertEqual(ready["deployment_mode"], "merge")
         self.assertEqual(ready["deployment_status"], "resolving_conflicts")
         self.assertEqual(ready["deployment_conflict_attempts"], 1)
+        self.assertEqual(
+            ready["result_json"]["conflict_resolution"]["base_sha"],
+            "new-base-sha",
+        )
+        self.assertEqual(len(self.workspaces.merge_started), 1)
+        self.assertEqual(len(self.workspaces.merge_pushed), 1)
+        self.assertFalse(self.workspaces.rebase_started)
 
     async def test_operation_rebase_restarts_after_service_interruption(self):
         job_id = await self.service.create_job(
@@ -1225,14 +1249,46 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
                 "deployment_conflict_attempts": 1,
             },
         )
-        self.github.head_shas = ["code-sha", "rebase-sha"]
+        self.github.head_shas = [
+            "code-sha", "code-sha", "merge-resolution-sha"
+        ]
 
         await self.service.recover()
         ready = await wait_for_status(self.db, job_id, "ready")
 
-        self.assertEqual(ready["ci_head_sha"], "rebase-sha")
+        self.assertEqual(ready["ci_head_sha"], "merge-resolution-sha")
         self.assertEqual(ready["deployment_status"], "resolving_conflicts")
         self.assertIsNone(ready["error"])
+
+    async def test_operation_conflict_is_resolved_by_codex_before_ci(self):
+        job_id = await self.service.create_job(
+            chat_id=10, user_id=20, thread_id=None, issue=self.issue,
+            base_branch="main", source_path="/cache/owner-repo.git", skip_plan=True,
+        )
+        await wait_for_status(self.db, job_id, "ready")
+        self.db.update_code_job(
+            job_id,
+            {
+                "deployment_mode": "merge",
+                "deployment_status": "resolving_conflicts",
+                "deployment_conflict_attempts": 1,
+            },
+        )
+        self.workspaces.merge_conflicts = ["src/handler.py"]
+        self.github.head_shas = [
+            "code-sha", "code-sha", "code-sha", "merge-resolution-sha"
+        ]
+
+        await self.service.resolve_conflicts_for_operation(job_id)
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        resolution = ready["result_json"]["conflict_resolution"]
+        self.assertEqual(resolution["files"], ["src/handler.py"])
+        self.assertIsNotNone(resolution["codex_result"])
+        self.assertEqual(self.codex.calls[-1]["effort"], ReasoningEffort.high)
+        self.assertEqual(self.codex.calls[-1]["model_role"], "code")
+        self.assertIn("Git merge conflicts", self.codex.calls[-1]["prompt"])
+        self.assertIn("Fetched base commit: new-base-sha", self.codex.calls[-1]["prompt"])
 
     async def test_rebase_conflict_is_resolved_by_codex_before_ci(self):
         job_id = await self.service.create_job(
@@ -1897,6 +1953,25 @@ class CodeSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "non-conflict path"):
             GitWorkspaceService(Runner()).continue_conflict_aware_rebase(
                 Path("repo"), ["src/conflict.py"]
+            )
+
+    def test_merge_resolution_rejects_unrelated_worktree_changes(self):
+        class Runner:
+            def run(self, args, *, cwd=None, timeout=300):
+                del cwd, timeout
+                if args[1:4] == ["rev-parse", "--verify", "MERGE_HEAD"]:
+                    return "a" * 40
+                if args[1:4] == ["diff", "--name-only", "--diff-filter=U"]:
+                    return "src/conflict.py\n"
+                if args[1:3] == ["status", "--porcelain"]:
+                    return "UU src/conflict.py\n M src/unrelated.py\n"
+                return ""
+
+        with self.assertRaisesRegex(WorkspaceError, "non-conflict path"):
+            GitWorkspaceService(Runner()).finish_conflict_aware_merge(
+                Path("repo"),
+                conflict_files=["src/conflict.py"],
+                base_branch="main",
             )
 
     def test_more_than_one_hundred_rebase_conflicts_are_allowed(self):

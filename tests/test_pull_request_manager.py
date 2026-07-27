@@ -58,6 +58,7 @@ class FakeGitHub:
         self.prs = [pr(), pr(state="MERGED", merge_sha="merge-sha")]
         self.merges = []
         self.dispatches = []
+        self.branch_head_shas = ["a" * 40]
         self.workflow = WorkflowRun(91, "completed", "success", "https://run/91", "merge-sha", "Deploy")
 
     def get_pr(self, url):
@@ -67,6 +68,11 @@ class FakeGitHub:
 
     def squash_merge(self, **kwargs):
         self.merges.append(kwargs)
+
+    def get_branch_head_sha(self, **kwargs):
+        if len(self.branch_head_shas) > 1:
+            return self.branch_head_shas.pop(0)
+        return self.branch_head_shas[0]
 
     def dispatch_workflow(self, **kwargs):
         self.dispatches.append(kwargs)
@@ -413,6 +419,80 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("did not determine", failed["deployment_error"])
         self.assertEqual(self.conflict_rebase_calls, [])
 
+    async def test_conflict_resolution_waits_for_refreshed_mergeability(self):
+        async def complete_resolution(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "ready",
+                    "resume_phase": "checks",
+                    "ci_head_sha": "resolved-sha",
+                    "ci_checks_json": [check().to_json()],
+                    "result_json": {
+                        "conflict_resolution": {
+                            "base_sha": "b" * 40,
+                            "head_sha": "resolved-sha",
+                        }
+                    },
+                },
+            )
+
+        self.conflict_rebase_handler = complete_resolution
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY"),
+            pr(
+                head="resolved-sha",
+                mergeable="CONFLICTING",
+                merge_state_status="DIRTY",
+            ),
+            pr(head="resolved-sha"),
+            pr(state="MERGED", head="resolved-sha", merge_sha="merge-sha"),
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        merged = await wait_for_deployment(self.db, "c-abcdef12", "merged")
+
+        self.assertEqual(merged["deployment_conflict_attempts"], 1)
+        self.assertEqual(self.conflict_rebase_calls, ["c-abcdef12"])
+
+    async def test_same_base_is_not_resolved_twice(self):
+        base_sha = "b" * 40
+
+        async def complete_resolution(job_id):
+            self.db.update_code_job(
+                job_id,
+                {
+                    "status": "ready",
+                    "resume_phase": "checks",
+                    "ci_head_sha": "resolved-sha",
+                    "ci_checks_json": [check().to_json()],
+                    "result_json": {
+                        "conflict_resolution": {
+                            "base_sha": base_sha,
+                            "head_sha": "resolved-sha",
+                        }
+                    },
+                },
+            )
+
+        self.service.mergeability_timeout_seconds = 0
+        self.github.branch_head_shas = [base_sha]
+        self.conflict_rebase_handler = complete_resolution
+        self.github.prs = [
+            pr(mergeable="CONFLICTING", merge_state_status="DIRTY"),
+            pr(
+                head="resolved-sha",
+                mergeable="CONFLICTING",
+                merge_state_status="DIRTY",
+            ),
+        ]
+
+        await self.service.start_merge("c-abcdef12")
+        failed = await wait_for_deployment(self.db, "c-abcdef12", "failed")
+
+        self.assertEqual(self.conflict_rebase_calls, ["c-abcdef12"])
+        self.assertIn("merged the latest main commit", failed["deployment_error"])
+
     async def test_conflict_recovery_stops_after_two_attempts(self):
         rebased_heads = iter(("rebased-one", "rebased-two"))
 
@@ -726,6 +806,32 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeploymentGitHubAdapterTests(unittest.TestCase):
+    def test_reads_encoded_branch_head_sha(self):
+        class Runner:
+            def __init__(self):
+                self.args = None
+
+            def run(self, args):
+                self.args = args
+                return GhResult(
+                    ["gh", *args],
+                    0,
+                    json.dumps({"object": {"sha": "a" * 40}}),
+                    "",
+                    10,
+                )
+
+        runner = Runner()
+        sha = DeploymentGitHubService(runner).get_branch_head_sha(
+            repo="owner/repo", branch="release/next"
+        )
+
+        self.assertEqual(sha, "a" * 40)
+        self.assertEqual(
+            runner.args,
+            ["api", "repos/owner/repo/git/ref/heads/release%2Fnext"],
+        )
+
     def test_squash_merge_uses_explicit_commit_message(self):
         class Runner:
             def __init__(self):
