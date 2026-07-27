@@ -23,12 +23,14 @@ from telegram_project_manager.bots.code_manager.workspace import GitWorkspaceSer
 from telegram_project_manager.bots.ideas.prompts import (
     BRAINSTORM_DEVELOPER_INSTRUCTIONS,
     BRAINSTORM_PROMPT,
+    brainstorm_repair_prompt,
 )
 from telegram_project_manager.bots.ideas.schedule import advance_run_at
 from telegram_project_manager.bots.ideas.schemas import (
     BRAINSTORM_RESPONSE_SCHEMA,
     BrainstormIdea,
     BrainstormResponse,
+    BrainstormValidationError,
 )
 from telegram_project_manager.integrations.git.local_repository import LocalRepositoryError
 from telegram_project_manager.platform.responses import TELEGRAM_TEXT_LIMIT, outgoing_message
@@ -41,6 +43,7 @@ BRAINSTORM_SCHEDULER_SECONDS = 60.0
 BRAINSTORM_COMPLETION_NOTICE_SECONDS = 5.0
 MAX_OUTSTANDING_BRAINSTORMS = 10
 MAX_CONCURRENT_BRAINSTORMS = 1
+MAX_BRAINSTORM_GENERATION_ATTEMPTS = 2
 
 
 @dataclass
@@ -377,21 +380,11 @@ class BrainstormService:
                     base_branch=branch,
                     path=workspace,
                 )
-                _, raw = await self.codex.run_turn(
-                    job_id=brainstorm_id,
-                    cwd=str(workspace),
-                    prompt=BRAINSTORM_PROMPT,
-                    output_schema=BRAINSTORM_RESPONSE_SCHEMA,
-                    sandbox=CODEX_JOB_SANDBOX,
-                    effort=ReasoningEffort.high,
-                    model_role="plan",
-                    developer_instructions=BRAINSTORM_DEVELOPER_INSTRUCTIONS,
-                    thread_id=None,
-                    timeout_seconds=BRAINSTORM_TIMEOUT_SECONDS,
-                    on_progress=_ignore_progress,
-                    on_thread=_ignore_thread,
-                )
-                response = BrainstormResponse.from_json(raw)
+                try:
+                    async with asyncio.timeout(BRAINSTORM_TIMEOUT_SECONDS):
+                        response = await self._generate_response(brainstorm_id, workspace)
+                except TimeoutError as exc:
+                    raise CodexSdkError("Repository brainstorm timed out") from exc
                 ideas = tuple(
                     _with_existing_sources(workspace, idea) for idea in response.ideas
                 )
@@ -469,6 +462,38 @@ class BrainstormService:
             except Exception:
                 logging.exception("Failed to clean repository brainstorm workspace %s", brainstorm_id)
             await asyncio.to_thread(shutil.rmtree, workspace.parent, True)
+
+    async def _generate_response(
+        self, brainstorm_id: str, workspace: Path
+    ) -> BrainstormResponse:
+        prompt = BRAINSTORM_PROMPT
+        codex_thread_id: str | None = None
+        last_error: BrainstormValidationError | None = None
+        for attempt in range(MAX_BRAINSTORM_GENERATION_ATTEMPTS):
+            codex_thread_id, raw = await self.codex.run_turn(
+                job_id=brainstorm_id,
+                cwd=str(workspace),
+                prompt=prompt,
+                output_schema=BRAINSTORM_RESPONSE_SCHEMA,
+                sandbox=CODEX_JOB_SANDBOX,
+                effort=ReasoningEffort.high,
+                model_role="plan",
+                developer_instructions=BRAINSTORM_DEVELOPER_INSTRUCTIONS,
+                thread_id=codex_thread_id,
+                timeout_seconds=BRAINSTORM_TIMEOUT_SECONDS,
+                on_progress=_ignore_progress,
+                on_thread=_ignore_thread,
+            )
+            try:
+                return BrainstormResponse.from_json(raw)
+            except BrainstormValidationError as exc:
+                last_error = exc
+                if attempt + 1 < MAX_BRAINSTORM_GENERATION_ATTEMPTS:
+                    prompt = brainstorm_repair_prompt(str(exc))
+        raise BrainstormValidationError(
+            "Codex returned an invalid or incomplete repository brainstorm "
+            f"after {MAX_BRAINSTORM_GENERATION_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
 
     async def _send_failure(
         self,
