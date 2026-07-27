@@ -912,7 +912,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             self.bot.sent[1][0:3],
             (20, "✅ <b>Repository brainstorm complete.</b>", 30),
         )
-        self.assertIsNone(self.bot.sent[1][3]["reply_to_message_id"])
+        self.assertEqual(self.bot.sent[1][3]["reply_to_message_id"], 40)
         self.assertEqual(self.bot.deleted, [(20, 2)])
         self.assertEqual(len(self.bot.edited), 1)
         self.assertEqual(self.bot.edited[0][0:2], (20, 1))
@@ -963,6 +963,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             source_path="/cache/repo.git",
         )
         await wait_for_completion(self.service, brainstorm_id)
+        await wait_for_notifications(self.service)
 
         self.assertEqual(len(self.codex.calls), 2)
         self.assertIsNone(self.codex.calls[0]["thread_id"])
@@ -972,9 +973,30 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             "idea 1 has an incomplete proposal", self.codex.calls[1]["prompt"]
         )
         self.assertIn("Regenerate the entire response", self.codex.calls[1]["prompt"])
-        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.sent), 2)
+        self.assertEqual(self.bot.sent[1][3]["reply_to_message_id"], 40)
+        self.assertEqual(self.bot.deleted, [(20, 2)])
         self.assertEqual(len(self.bot.edited), 1)
         self.assertIn("3. Idea 3", self.bot.edited[0][2])
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
+
+    async def test_completion_notification_without_reply_target_is_still_deleted(self):
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=None,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+        await wait_for_notifications(self.service)
+
+        self.assertEqual(len(self.bot.sent), 2)
+        self.assertIsNone(self.bot.sent[1][3]["reply_to_message_id"])
+        self.assertEqual(self.bot.deleted, [(20, 2)])
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
 
     async def test_two_incomplete_results_fail_after_single_repair(self):
