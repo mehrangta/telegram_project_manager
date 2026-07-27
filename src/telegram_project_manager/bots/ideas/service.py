@@ -402,7 +402,11 @@ class BrainstormService:
                     {"repo": repo, "branch": branch, "trigger": trigger},
                 )
                 if trigger == "manual":
-                    await self._send_completion_notice(chat_id, thread_id)
+                    await self._send_completion_notice(
+                        chat_id,
+                        thread_id,
+                        reply_to_message_id,
+                    )
         except asyncio.CancelledError:
             status = "cancelled"
             error = "Brainstorm interrupted during service shutdown."
@@ -537,12 +541,13 @@ class BrainstormService:
         self,
         chat_id: int,
         thread_id: int | None,
+        reply_to_message_id: int | None,
     ) -> None:
         try:
             message_id = await self._send(
                 chat_id=chat_id,
                 thread_id=thread_id,
-                reply_to_message_id=None,
+                reply_to_message_id=reply_to_message_id,
                 text="✅ Repository brainstorm complete.",
             )
         except Exception:
