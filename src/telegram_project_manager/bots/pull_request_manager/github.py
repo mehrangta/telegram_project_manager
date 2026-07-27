@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from telegram_project_manager.bots.code_manager.workspace import PullRequestCheck
 from telegram_project_manager.integrations.gh.runner import GhError, GhRunner
@@ -82,6 +83,20 @@ class DeploymentGitHubService:
             merge_sha=merge_sha,
             checks=tuple(_parse_check(item) for item in raw_checks if isinstance(item, dict)),
         )
+
+    def get_branch_head_sha(self, *, repo: str, branch: str) -> str:
+        result = self.gh.run(
+            ["api", f"repos/{repo}/git/ref/heads/{quote(branch, safe='')}"]
+        )
+        try:
+            value = result.json()
+        except json.JSONDecodeError as exc:
+            raise GhError(result) from exc
+        git_object = value.get("object") if isinstance(value, dict) else None
+        sha = str(git_object.get("sha") or "") if isinstance(git_object, dict) else ""
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise GhError(result)
+        return sha
 
     def squash_merge(
         self,

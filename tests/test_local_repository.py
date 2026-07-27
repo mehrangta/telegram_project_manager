@@ -140,6 +140,82 @@ class LocalRepositoryTests(unittest.TestCase):
                 git("rev-parse", f"refs/heads/{branch}", cwd=remote),
             )
 
+    def test_codex_conflict_resolution_creates_and_pushes_merge_commit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            cache = root / "cache.git"
+            workspace = root / "jobs" / "c-test" / "repo"
+            branch = "codex/issue-53-c-test"
+            git("init", "--bare", str(remote))
+            git("init", str(seed))
+            git("config", "user.name", "Test", cwd=seed)
+            git("config", "user.email", "test@example.test", cwd=seed)
+            (seed / "README.md").write_text("initial\n", encoding="utf-8")
+            git("add", "README.md", cwd=seed)
+            git("commit", "-m", "initial", cwd=seed)
+            git("branch", "-M", "main", cwd=seed)
+            git("remote", "add", "origin", str(remote), cwd=seed)
+            git("push", "-u", "origin", "main", cwd=seed)
+
+            git("checkout", "-b", branch, cwd=seed)
+            (seed / "README.md").write_text("feature\n", encoding="utf-8")
+            git("add", "README.md", cwd=seed)
+            git("commit", "-m", "feature", cwd=seed)
+            feature_sha = git("rev-parse", "HEAD", cwd=seed)
+            git("push", "-u", "origin", branch, cwd=seed)
+
+            git("checkout", "main", cwd=seed)
+            (seed / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", "README.md", cwd=seed)
+            git("commit", "-m", "update main", cwd=seed)
+            main_sha = git("rev-parse", "HEAD", cwd=seed)
+            git("push", "origin", "main", cwd=seed)
+
+            git("clone", "--bare", str(remote), str(cache))
+            github_url = "https://github.com/owner/repo.git"
+            git("remote", "set-url", "origin", github_url, cwd=cache)
+            git("config", f"url.{remote.as_uri()}.insteadOf", github_url, cwd=cache)
+
+            workspaces = GitWorkspaceService(repositories=LocalRepositoryService())
+            checked_sha = workspaces.checkout_existing(
+                source_path=str(cache),
+                repo="owner/repo",
+                branch=branch,
+                path=workspace,
+            )
+            workspaces.sync_to_remote_head(
+                path=workspace,
+                branch=branch,
+                expected_sha=checked_sha,
+            )
+            base_sha, conflicts, merge_started = workspaces.start_conflict_aware_merge(
+                workspace, "main"
+            )
+
+            self.assertEqual(checked_sha, feature_sha)
+            self.assertEqual(base_sha, main_sha)
+            self.assertEqual(conflicts, ["README.md"])
+            self.assertTrue(merge_started)
+
+            (workspace / "README.md").write_text("base\nfeature\n", encoding="utf-8")
+            merge_sha = workspaces.finish_conflict_aware_merge(
+                workspace,
+                conflict_files=conflicts,
+                base_branch="main",
+            )
+            workspaces.push_merged_branch(workspace, expected_sha=feature_sha)
+
+            parents = git(
+                "rev-list", "--parents", "-n", "1", f"refs/heads/{branch}", cwd=remote
+            ).split()
+            self.assertEqual(parents, [merge_sha, feature_sha, main_sha])
+            self.assertEqual(
+                git("show", f"refs/heads/{branch}:README.md", cwd=remote),
+                "base\nfeature",
+            )
+
 
 class LocalRepositoryMigrationTests(unittest.TestCase):
     def test_initialize_adds_cache_columns_to_existing_tables(self):

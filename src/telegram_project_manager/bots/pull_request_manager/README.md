@@ -10,7 +10,11 @@ and watches its run. A later deploy can reuse a main-branch merge created by
 after a bot restart.
 
 When GitHub explicitly reports a conflicting pull request, the manager queues
-the guarded code-job rebase flow, reruns CI for the rebased head, and resumes
-the original merge or deploy operation. It makes at most two automatic rebase
-attempts; unsafe conflicts or failed checks leave the pull request open and
-send the admin retry controls.
+a guarded merge of the latest base branch into the pull-request branch. Codex
+resolves the listed content conflicts, while the host validates and creates the
+merge commit, pushes it without rewriting branch history, reruns CI for the new
+head, and resumes the original merge or deploy operation. A second attempt is
+only made when the base branch advances; unsafe conflicts, stale GitHub state,
+or failed checks leave the pull request open and send the admin retry controls.
+The explicit `/code rebase` command remains available as a separate manual
+history-rewriting operation.

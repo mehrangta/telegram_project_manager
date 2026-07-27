@@ -48,6 +48,7 @@ class MergeDeploymentService:
         mergeability_timeout_seconds: float = MERGEABILITY_DISCOVERY_SECONDS,
         discovery_seconds: float = WORKFLOW_DISCOVERY_SECONDS,
         deploy_timeout_seconds: float = DEPLOY_TIMEOUT_SECONDS,
+        conflict_resolver: Callable[[str], Awaitable[None]] | None = None,
         conflict_rebaser: Callable[[str], Awaitable[None]] | None = None,
         max_conflict_resolution_attempts: int = MAX_CONFLICT_RESOLUTION_ATTEMPTS,
     ) -> None:
@@ -59,7 +60,9 @@ class MergeDeploymentService:
         self.mergeability_timeout_seconds = mergeability_timeout_seconds
         self.discovery_seconds = discovery_seconds
         self.deploy_timeout_seconds = deploy_timeout_seconds
-        self.conflict_rebaser = conflict_rebaser
+        if conflict_resolver is not None and conflict_rebaser is not None:
+            raise ValueError("configure only one automatic conflict resolver")
+        self.conflict_resolver = conflict_resolver or conflict_rebaser
         self.max_conflict_resolution_attempts = max_conflict_resolution_attempts
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -271,18 +274,37 @@ class MergeDeploymentService:
         require_main: bool,
     ) -> PullRequestSnapshot:
         deadline = time.time() + self.mergeability_timeout_seconds
+        resolved_head = (
+            _conflict_resolution_head(job)
+            if int(job.get("deployment_conflict_attempts") or 0) > 0
+            else ""
+        )
         while (
             not snapshot.merged
             and snapshot.state == "OPEN"
-            and snapshot.mergeable in {"", "UNKNOWN"}
+            and (
+                snapshot.mergeable in {"", "UNKNOWN"}
+                or (
+                    snapshot.head_sha == resolved_head
+                    and _has_explicit_conflict(snapshot)
+                )
+            )
         ):
             if time.time() >= deadline:
+                if snapshot.head_sha == resolved_head and _has_explicit_conflict(snapshot):
+                    return snapshot
                 raise DeploymentError(
                     "GitHub did not determine pull request mergeability within 2 minutes."
                 )
             self.db.update_code_job(
                 job_id,
-                {"latest_activity": "Waiting for GitHub to calculate mergeability"},
+                {
+                    "latest_activity": (
+                        "Waiting for GitHub to refresh mergeability after conflict resolution"
+                        if snapshot.head_sha == resolved_head
+                        else "Waiting for GitHub to calculate mergeability"
+                    )
+                },
             )
             await self.reporter.refresh(job_id)
             await asyncio.sleep(self.poll_seconds)
@@ -300,7 +322,20 @@ class MergeDeploymentService:
                 f"{self.max_conflict_resolution_attempts} attempts because the pull request "
                 "is still conflicting."
             )
-        if self.conflict_rebaser is None:
+        previous_resolution = _conflict_resolution(job)
+        previous_base_sha = str(previous_resolution.get("base_sha") or "")
+        if attempts > 0 and previous_base_sha:
+            current_base_sha = await asyncio.to_thread(
+                self.github.get_branch_head_sha,
+                repo=str(job["repo"]),
+                branch=str(job["base_branch"]),
+            )
+            if current_base_sha == previous_base_sha:
+                raise DeploymentError(
+                    "GitHub still reports the pull request as conflicting after Codex merged "
+                    f"the latest {job['base_branch']} commit ({current_base_sha[:12]})."
+                )
+        if self.conflict_resolver is None:
             raise DeploymentError("Automatic conflict resolution is not configured.")
         attempt = attempts + 1
         self.db.update_code_job(
@@ -310,7 +345,7 @@ class MergeDeploymentService:
                 "deployment_conflict_attempts": attempt,
                 "deployment_error": None,
                 "latest_activity": (
-                    "Conflict detected; resolving automatically "
+                    "Conflict detected; Codex resolution queued "
                     f"({attempt}/{self.max_conflict_resolution_attempts})"
                 ),
             },
@@ -323,7 +358,7 @@ class MergeDeploymentService:
         )
         await self.reporter.refresh(job_id, force=True)
         try:
-            await self.conflict_rebaser(job_id)
+            await self.conflict_resolver(job_id)
         except (GhError, ValueError) as exc:
             raise DeploymentError(
                 f"Automatic conflict resolution could not start: {exc}"
@@ -576,3 +611,13 @@ def _operation_mode(job: dict[str, Any]) -> str:
 
 def _has_explicit_conflict(pr: PullRequestSnapshot) -> bool:
     return pr.mergeable == "CONFLICTING" or pr.merge_state_status == "DIRTY"
+
+def _conflict_resolution(job: dict[str, Any]) -> dict[str, Any]:
+    result = job.get("result_json")
+    if not isinstance(result, dict):
+        return {}
+    resolution = result.get("conflict_resolution")
+    return resolution if isinstance(resolution, dict) else {}
+
+def _conflict_resolution_head(job: dict[str, Any]) -> str:
+    return str(_conflict_resolution(job).get("head_sha") or "")

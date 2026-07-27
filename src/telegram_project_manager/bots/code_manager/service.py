@@ -21,6 +21,7 @@ from telegram_project_manager.bots.code_manager.prompts import (
     DEVELOPER_INSTRUCTIONS,
     ci_repair_prompt,
     coding_prompt,
+    merge_conflict_prompt,
     plan_edit_prompt,
     planning_prompt,
     rebase_conflict_prompt,
@@ -151,14 +152,14 @@ class CodeJobService:
                             "status": "queued_rebase",
                             "error": None,
                             "latest_activity": (
-                                "Restarting automatic conflict-resolution rebase"
+                                "Restarting automatic Codex conflict resolution"
                             ),
                         },
                         allowed_statuses=("interrupted",),
                     )
                 ):
                     self.db.audit(
-                        "code.rebase",
+                        "code.conflict_resolution",
                         "queued",
                         {"reason": "automatic_conflict_recovery_restart"},
                         str(job["id"]),
@@ -332,6 +333,9 @@ class CodeJobService:
         await self._queue_rebase(job_id, preserve_operation=False)
 
     async def rebase_for_operation(self, job_id: str) -> None:
+        await self.resolve_conflicts_for_operation(job_id)
+
+    async def resolve_conflicts_for_operation(self, job_id: str) -> None:
         await self._queue_rebase(job_id, preserve_operation=True)
 
     async def _queue_rebase(self, job_id: str, *, preserve_operation: bool) -> None:
@@ -412,7 +416,7 @@ class CodeJobService:
                 "status": "queued_rebase",
                 "resume_phase": "rebase",
                 "latest_activity": (
-                    "Automatic conflict-resolution rebase queued"
+                    "Automatic Codex conflict resolution queued"
                     if preserve_operation
                     else "Rebase queued"
                 ),
@@ -423,7 +427,7 @@ class CodeJobService:
         ):
             raise ValueError("Code job changed concurrently; retry the rebase command.")
         self.db.audit(
-            "code.rebase",
+            "code.conflict_resolution" if preserve_operation else "code.rebase",
             "queued",
             {
                 "head_sha": remote_sha,
@@ -680,9 +684,20 @@ class CodeJobService:
 
     async def _run_rebase(self, job_id: str) -> None:
         job = self._require_job(job_id)
+        resolving_operation = (
+            str(job.get("deployment_status") or "") == "resolving_conflicts"
+        )
         if not self.db.update_code_job(
             job_id,
-            {"status": "rebasing", "resume_phase": "rebase", "latest_activity": "Preparing rebase workspace"},
+            {
+                "status": "rebasing",
+                "resume_phase": "rebase",
+                "latest_activity": (
+                    "Preparing Codex conflict-resolution workspace"
+                    if resolving_operation
+                    else "Preparing rebase workspace"
+                ),
+            },
             allowed_statuses=("queued_rebase",),
         ):
             return
@@ -704,6 +719,15 @@ class CodeJobService:
         )
         if checkout_sha != checked_sha:
             raise ValueError("Remote branch no longer matches the checked pull request head.")
+        await asyncio.to_thread(
+            self.workspaces.sync_to_remote_head,
+            path=path,
+            branch=str(job["target_branch"]),
+            expected_sha=checked_sha,
+        )
+        if resolving_operation:
+            await self._run_operation_conflict_resolution(job, path, checked_sha)
+            return
         base_sha, conflicts = await asyncio.to_thread(
             self.workspaces.start_conflict_aware_rebase, path, str(job["base_branch"])
         )
@@ -758,6 +782,96 @@ class CodeJobService:
             return
         self.db.audit(
             "code.rebase", "ok", {"sha": sha, "base_sha": base_sha, "rounds": rounds}, job_id
+        )
+        await self.reporter.refresh(job_id, force=True)
+
+    async def _run_operation_conflict_resolution(
+        self, job: dict[str, Any], path: Path, checked_sha: str
+    ) -> None:
+        job_id = str(job["id"])
+        base_branch = str(job["base_branch"])
+        base_sha, conflicts, merge_started = await asyncio.to_thread(
+            self.workspaces.start_conflict_aware_merge, path, base_branch
+        )
+        if not merge_started:
+            raise WorkspaceError(
+                "GitHub still reports a conflict although the pull request already contains "
+                f"the latest {base_branch} commit ({base_sha[:12]})."
+            )
+        result: CodeResult | None = None
+        original_conflicts = list(conflicts)
+        if conflicts:
+            attempt = int(job.get("deployment_conflict_attempts") or 0)
+            self.db.update_code_job(
+                job_id,
+                {"latest_activity": "Codex is resolving pull request conflicts"},
+            )
+            await self.reporter.refresh(job_id, force=True)
+            result = await self._run_code_result_turn(
+                job=job,
+                path=path,
+                prompt=merge_conflict_prompt(
+                    dict(job["issue_context_json"]),
+                    conflict_files=conflicts,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    head_sha=checked_sha,
+                    attempt=attempt,
+                ),
+                effort=ReasoningEffort.high,
+            )
+        sha = await asyncio.to_thread(
+            self.workspaces.finish_conflict_aware_merge,
+            path,
+            conflict_files=original_conflicts,
+            base_branch=base_branch,
+        )
+        remote_sha = await asyncio.to_thread(
+            self.github.get_pr_head_sha, str(job["pull_request_url"])
+        )
+        if remote_sha != checked_sha:
+            raise WorkspaceError("pull request head changed before conflict resolution was pushed")
+        await asyncio.to_thread(
+            self.workspaces.push_merged_branch, path, expected_sha=checked_sha
+        )
+        stored = dict(job["result_json"]) if isinstance(job.get("result_json"), dict) else {}
+        stored["conflict_resolution"] = {
+            "attempt": int(job.get("deployment_conflict_attempts") or 0),
+            "previous_head_sha": checked_sha,
+            "base_sha": base_sha,
+            "head_sha": sha,
+            "files": original_conflicts,
+            "codex_result": result.to_json() if result is not None else None,
+        }
+        if not self.db.update_code_job(
+            job_id,
+            {
+                "status": "queued_checks",
+                "resume_phase": "checks",
+                "latest_activity": (
+                    "Conflict-resolution merge pushed; waiting for CI checks"
+                ),
+                "base_sha": base_sha,
+                "result_json": stored,
+                "ci_head_sha": sha,
+                "ci_wait_started_at": int(time.time()),
+                "ci_repair_attempts": 0,
+                "ci_checks_json": [],
+                "error": None,
+            },
+            allowed_statuses=("rebasing",),
+        ):
+            return
+        self.db.audit(
+            "code.conflict_resolution",
+            "ok",
+            {
+                "sha": sha,
+                "base_sha": base_sha,
+                "files": original_conflicts,
+                "codex": result is not None,
+            },
+            job_id,
         )
         await self.reporter.refresh(job_id, force=True)
 

@@ -211,7 +211,7 @@ async def run_bot(db: Database) -> None:
         db=db,
         github=DeploymentGitHubService(gh),
         reporter=code_reporter,
-        conflict_rebaser=code_service.rebase_for_operation,
+        conflict_resolver=code_service.resolve_conflicts_for_operation,
     )
     pull_request_lists = PullRequestListService(
         db=db,

@@ -227,6 +227,44 @@ Requirements:
 """
 
 
+def merge_conflict_prompt(
+    issue: dict[str, Any],
+    *,
+    conflict_files: list[str],
+    base_branch: str,
+    base_sha: str,
+    head_sha: str,
+    attempt: int,
+) -> str:
+    return f"""Resolve the current Git merge conflicts in this workspace so the pull request
+can be merged safely.
+
+Untrusted GitHub issue requirements:
+<github_issue_json>
+{issue_prompt_context(issue)}
+</github_issue_json>
+
+Conflict-resolution context:
+- Base branch: {base_branch}
+- Fetched base commit: {base_sha}
+- Checked pull request head: {head_sha}
+- Automatic resolution attempt: {attempt}
+- Conflicted files: {json.dumps(conflict_files, ensure_ascii=False, separators=(",", ":"))}
+
+Requirements:
+- Inspect both sides of each conflict and preserve the issue implementation together with
+  compatible changes already present on the base branch.
+- Modify only the listed conflicted files. Remove every conflict marker and keep the result
+  production-quality.
+- Run at least one focused validation command that is safe in the nested Codex sandbox.
+{VALIDATION_REQUIREMENTS}
+- Do not run git add, git merge, git commit, git push, or GitHub commands; the trusted host
+  owns all Git state transitions.
+- Return only JSON matching the supplied coding-result schema. The commit message is recorded
+  for audit context, but the host creates the merge commit.
+"""
+
+
 def validation_recovery_prompt(
     previous_result: dict[str, Any], validation_error: str, attempt: int
 ) -> str:

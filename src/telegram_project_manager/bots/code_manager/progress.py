@@ -357,7 +357,7 @@ class CodeProgressReporter:
             lines.append(f"{label}: {operation_status.replace('_', ' ')}")
         conflict_attempts = int(job.get("deployment_conflict_attempts") or 0)
         if conflict_attempts:
-            lines.append(f"Automatic conflict-resolution attempts: {conflict_attempts}")
+            lines.append(f"Codex conflict-resolution attempts: {conflict_attempts}")
         if job.get("deployment_merge_sha"):
             lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
         if job.get("deployment_run_url"):

@@ -255,6 +255,40 @@ class GitWorkspaceService:
             return base_sha, conflicts
         return base_sha, []
 
+    def start_conflict_aware_merge(
+        self, path: Path, base_branch: str
+    ) -> tuple[str, list[str], bool]:
+        validate_branch(base_branch)
+        if self.is_dirty(path):
+            raise WorkspaceError("workspace is dirty before conflict-resolution merge")
+        self.commands.run(
+            [
+                "git", "fetch", "origin",
+                f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+            ],
+            cwd=path,
+            timeout=600,
+        )
+        base_sha = self.commands.run(
+            ["git", "rev-parse", f"origin/{base_branch}"], cwd=path
+        ).strip()
+        try:
+            self.commands.run(
+                ["git", "merge", "--no-commit", "--no-ff", f"origin/{base_branch}"],
+                cwd=path,
+                timeout=600,
+            )
+        except WorkspaceError:
+            conflicts = self.rebase_conflicts(path)
+            if not conflicts:
+                raise
+            return base_sha, conflicts, True
+        try:
+            self.commands.run(["git", "rev-parse", "--verify", "MERGE_HEAD"], cwd=path)
+        except WorkspaceError:
+            return base_sha, [], False
+        return base_sha, [], True
+
     def rebase_conflicts(self, path: Path) -> list[str]:
         raw = self.commands.run(
             ["git", "diff", "--name-only", "--diff-filter=U", "--"], cwd=path
@@ -300,6 +334,71 @@ class GitWorkspaceService:
                 raise
             return conflicts
         return []
+
+    def finish_conflict_aware_merge(
+        self,
+        path: Path,
+        *,
+        conflict_files: list[str],
+        base_branch: str,
+    ) -> str:
+        validate_branch(base_branch)
+        self.commands.run(["git", "rev-parse", "--verify", "MERGE_HEAD"], cwd=path)
+        expected = sorted(set(conflict_files))
+        current = self.rebase_conflicts(path)
+        if current != expected:
+            raise WorkspaceError("the set of conflicted files changed unexpectedly")
+        status = self.commands.run(["git", "status", "--porcelain"], cwd=path)
+        allowed = set(expected)
+        for line in status.splitlines():
+            if len(line) < 4:
+                continue
+            item = line[3:].strip().strip('"').replace("\\", "/")
+            if " -> " in item:
+                item = item.rsplit(" -> ", 1)[-1]
+            worktree_changed = line.startswith("??") or line[1] != " "
+            if worktree_changed and item not in allowed:
+                raise WorkspaceError(
+                    f"Codex changed non-conflict path during conflict-resolution merge: {item}"
+                )
+        self.commands.run(["git", "diff", "--check"], cwd=path)
+        if expected:
+            self.commands.run(["git", "add", "--", *expected], cwd=path)
+        if self.rebase_conflicts(path):
+            raise WorkspaceError("conflict-resolution merge still has unmerged files")
+        self.commands.run(["git", "diff", "--cached", "--check"], cwd=path)
+        branch = self.commands.run(["git", "branch", "--show-current"], cwd=path).strip()
+        validate_branch(branch)
+        self.commands.run(
+            ["git", "commit", "-m", f"Merge branch '{base_branch}' into {branch}"],
+            cwd=path,
+            timeout=600,
+        )
+        return self.head_sha(path)
+
+    def push_merged_branch(self, path: Path, *, expected_sha: str) -> None:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha):
+            raise WorkspaceError("expected pull request head returned an invalid object ID")
+        branch = self.commands.run(["git", "branch", "--show-current"], cwd=path).strip()
+        validate_branch(branch)
+        self.commands.run(
+            [
+                "git", "fetch", "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            ],
+            cwd=path,
+            timeout=600,
+        )
+        remote_sha = self.commands.run(
+            ["git", "rev-parse", f"refs/remotes/origin/{branch}"], cwd=path
+        ).strip()
+        if remote_sha != expected_sha:
+            raise WorkspaceError("pull request head changed before conflict resolution was pushed")
+        self.commands.run(
+            ["git", "push", "--set-upstream", "origin", f"HEAD:refs/heads/{branch}"],
+            cwd=path,
+            timeout=900,
+        )
 
     def head_sha(self, path: Path) -> str:
         return self.commands.run(["git", "rev-parse", "HEAD"], cwd=path).strip()
