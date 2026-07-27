@@ -10,5 +10,5 @@ after a successful manual run, a separate completion notification replies to the
 initiating command and is removed after five seconds. Scheduled runs post the
 terminal result directly without the additional notification. Execution uses
 detached worktrees and the Codex plan model. Idea fields are generated to a bounded
-single-message format and delivered as complete text rather than shortened after
-generation.
+single-message format, with each complete idea rendered in its own copyable block,
+rather than shortened after generation.

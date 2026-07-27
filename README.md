@@ -96,10 +96,11 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
   extensions when brainstorming is enabled for the current chat or topic's
   active repository; it is not a bug finding or maintenance review. Each result
-  uses a bounded single-message format, validates that each prose field is a
-  complete sentence, and makes one automatic regeneration attempt when model
-  output is incomplete. Scheduled runs continue to use the destination saved for
-  their repository. Configure one scheduled destination per repo with
+  uses a bounded single-message format with each idea in its own copyable block,
+  validates that each prose field is a complete sentence, and makes one automatic
+  regeneration attempt when model output is incomplete. Scheduled runs continue
+  to use the destination saved for their repository. Configure one scheduled
+  destination per repo with
   `/repo brainstorm schedule owner/repository daily 09:00` and
   `/repo brainstorm enable owner/repository`; schedule times are UTC, and
   disabling preserves the cadence and destination.

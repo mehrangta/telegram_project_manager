@@ -335,7 +335,10 @@ class BrainstormRenderingTests(unittest.TestCase):
         )
 
         result = _render_result("owner/repo", "main", "a" * 40, ideas, "manual")
-        outgoing = outgoing_message(result)
+        outgoing = outgoing_message(
+            result,
+            preformatted_prefixes=("1. ", "2. ", "3. "),
+        )
 
         self.assertLessEqual(len(result), TELEGRAM_TEXT_LIMIT)
         self.assertIn("3. Idea 3", result)
@@ -343,6 +346,7 @@ class BrainstormRenderingTests(unittest.TestCase):
         self.assertIn("c" * MAX_SOURCE_LENGTH, result)
         self.assertNotIn("…", result)
         self.assertNotIn("... truncated ...", outgoing.text)
+        self.assertEqual(outgoing.text.count("<pre>"), 3)
 
     def test_rejects_result_over_telegram_limit(self):
         idea = BrainstormIdea(
@@ -920,9 +924,24 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Repository brainstorm", result)
         self.assertIn("1. Idea 1", result)
         self.assertIn("3. Idea 3", result)
-        self.assertIn("<b>Opportunity:</b> A repository-specific opportunity.", result)
-        self.assertIn("<b>Proposal:</b> Add a focused new capability.", result)
-        self.assertIn("<b>Value:</b> Expand what users can accomplish.", result)
+        self.assertEqual(result.count("<pre>"), 3)
+        self.assertIn(
+            "<pre>1. Idea 1\n"
+            "Opportunity: A repository-specific opportunity.\n"
+            "Proposal: Add a focused new capability.\n"
+            "Value: Expand what users can accomplish.\n"
+            "Sources: src/app.py</pre>",
+            result,
+        )
+        self.assertIn(
+            "<pre>3. Idea 3\n"
+            "Opportunity: A repository-specific opportunity.\n"
+            "Proposal: Add a focused new capability.\n"
+            "Value: Expand what users can accomplish.\n"
+            "Sources: src/app.py</pre>",
+            result,
+        )
+        self.assertLess(result.index("<b>Repo:</b>"), result.index("<pre>"))
         self.assertNotIn("…", result)
         self.assertNotIn("... truncated ...", result)
         self.assertNotIn("Problem:", result)
@@ -1050,6 +1069,9 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[0][0], 22)
         self.assertEqual(self.bot.sent[0][2], 33)
         self.assertIn("scheduled", self.bot.sent[0][1])
+        self.assertEqual(self.bot.sent[0][1].count("<pre>"), 3)
+        self.assertIn("<pre>1. Idea 1", self.bot.sent[0][1])
+        self.assertIn("<pre>3. Idea 3", self.bot.sent[0][1])
         self.assertEqual(self.bot.edited, [])
         self.assertEqual(len(self.codex.calls), 2)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["next_run_at"], 172850)
@@ -1129,6 +1151,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.edited[0][0:2], (20, 1))
         self.assertIn("Repository brainstorm failed", self.bot.edited[0][2])
         self.assertIn("invalid brainstorm response", self.bot.edited[0][2])
+        self.assertNotIn("<pre>", self.bot.edited[0][2])
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "failed")
 
     async def test_over_budget_result_updates_manual_message_as_failed(self):
@@ -1200,6 +1223,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bot.sent), 1)
         self.assertEqual(len(self.bot.edited), 1)
         self.assertIn("Repository brainstorm cancelled", self.bot.edited[0][2])
+        self.assertNotIn("<pre>", self.bot.edited[0][2])
         self.assertEqual(
             self.db.get_brainstorm_config("owner/repo")["last_status"], "cancelled"
         )
