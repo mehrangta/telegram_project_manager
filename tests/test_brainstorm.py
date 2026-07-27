@@ -109,6 +109,13 @@ async def wait_for_completion(service, brainstorm_id):
         await asyncio.sleep(0.01)
     raise AssertionError(f"brainstorm did not finish: {brainstorm_id}")
 
+async def wait_for_notifications(service):
+    for _ in range(200):
+        if not service._notification_tasks:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("brainstorm notification did not finish")
+
 
 class ScheduleTests(unittest.TestCase):
     def test_parses_and_formats_supported_intervals(self):
@@ -769,16 +776,27 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.deleted = []
+        self.send_errors = {}
         self.edit_error = None
+        self.delete_error = None
 
     def send_message(self, chat_id, text, thread_id=None, **options):
         self.sent.append((chat_id, text, thread_id, options))
+        error = self.send_errors.get(len(self.sent))
+        if error:
+            raise error
         return {"message_id": len(self.sent)}
 
     def edit_message_text(self, chat_id, message_id, text, **options):
         self.edited.append((chat_id, message_id, text, options))
         if self.edit_error:
             raise self.edit_error
+
+    def delete_message(self, chat_id, message_id):
+        self.deleted.append((chat_id, message_id))
+        if self.delete_error:
+            raise self.delete_error
 
 
 class FakeCodex:
@@ -867,6 +885,7 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             codex=self.codex,
             workspaces=self.workspaces,
             bot=self.bot,
+            completion_notice_seconds=0,
             clock=lambda: 100,
         )
 
@@ -885,9 +904,16 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
             source_path="/cache/repo.git",
         )
         await wait_for_completion(self.service, brainstorm_id)
-        self.assertEqual(len(self.bot.sent), 1)
+        await wait_for_notifications(self.service)
+        self.assertEqual(len(self.bot.sent), 2)
         self.assertIn("queued", self.bot.sent[0][1])
         self.assertEqual(self.bot.sent[0][3]["reply_to_message_id"], 40)
+        self.assertEqual(
+            self.bot.sent[1][0:3],
+            (20, "✅ <b>Repository brainstorm complete.</b>", 30),
+        )
+        self.assertIsNone(self.bot.sent[1][3]["reply_to_message_id"])
+        self.assertEqual(self.bot.deleted, [(20, 2)])
         self.assertEqual(len(self.bot.edited), 1)
         self.assertEqual(self.bot.edited[0][0:2], (20, 1))
         result = self.bot.edited[0][2]
@@ -1005,6 +1031,62 @@ class BrainstormServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.edited, [])
         self.assertEqual(len(self.codex.calls), 2)
         self.assertEqual(self.db.get_brainstorm_config("owner/repo")["next_run_at"], 172850)
+
+    async def test_completion_notification_send_failure_keeps_successful_result(self):
+        self.bot.send_errors[2] = TelegramBotApiError("notification unavailable")
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+
+        self.assertEqual(len(self.bot.sent), 2)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertEqual(self.bot.deleted, [])
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
+
+    async def test_completion_notification_delete_failure_keeps_successful_result(self):
+        self.bot.delete_error = TelegramBotApiError("message cannot be deleted")
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+
+        await wait_for_completion(self.service, brainstorm_id)
+        await wait_for_notifications(self.service)
+
+        self.assertEqual(self.bot.deleted, [(20, 2)])
+        self.assertEqual(self.db.get_brainstorm_config("owner/repo")["last_status"], "ok")
+
+    async def test_shutdown_deletes_pending_completion_notification(self):
+        self.service.completion_notice_seconds = 60
+        brainstorm_id = await self.service.submit(
+            chat_id=20,
+            user_id=10,
+            thread_id=30,
+            reply_to_message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+        )
+        await wait_for_completion(self.service, brainstorm_id)
+        self.assertTrue(self.service._notification_tasks)
+
+        await self.service.shutdown()
+
+        self.assertEqual(self.bot.deleted, [(20, 2)])
+        self.assertEqual(self.service._notification_tasks, set())
 
     async def test_manual_failure_updates_queued_message(self):
         self.codex.error = ValueError("invalid brainstorm response")

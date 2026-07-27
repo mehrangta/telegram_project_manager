@@ -40,6 +40,7 @@ from telegram_project_manager.platform.telegram_bot import TelegramBotApi, Teleg
 BRAINSTORM_TIMEOUT_SECONDS = 2 * 60 * 60
 BRAINSTORM_STALE_SECONDS = BRAINSTORM_TIMEOUT_SECONDS + 5 * 60
 BRAINSTORM_SCHEDULER_SECONDS = 60.0
+BRAINSTORM_COMPLETION_NOTICE_SECONDS = 5.0
 MAX_OUTSTANDING_BRAINSTORMS = 10
 MAX_CONCURRENT_BRAINSTORMS = 1
 MAX_BRAINSTORM_GENERATION_ATTEMPTS = 2
@@ -68,6 +69,7 @@ class BrainstormService:
         max_outstanding: int = MAX_OUTSTANDING_BRAINSTORMS,
         max_concurrent: int = MAX_CONCURRENT_BRAINSTORMS,
         scheduler_seconds: float = BRAINSTORM_SCHEDULER_SECONDS,
+        completion_notice_seconds: float = BRAINSTORM_COMPLETION_NOTICE_SECONDS,
         clock: Callable[[], int] | None = None,
     ) -> None:
         self.db = db
@@ -76,9 +78,11 @@ class BrainstormService:
         self.bot = bot
         self.max_outstanding = max_outstanding
         self.scheduler_seconds = scheduler_seconds
+        self.completion_notice_seconds = completion_notice_seconds
         self.clock = clock or (lambda: int(time.time()))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._notification_tasks: set[asyncio.Task[None]] = set()
         self._queue_entries: dict[str, BrainstormQueueEntry] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
         self._root = (db.path.parent / "brainstorm-jobs").resolve()
@@ -181,7 +185,13 @@ class BrainstormService:
             task.cancel()
         if active:
             await asyncio.gather(*(task for _, task in active), return_exceptions=True)
+        notifications = tuple(self._notification_tasks)
+        for task in notifications:
+            task.cancel()
+        if notifications:
+            await asyncio.gather(*notifications, return_exceptions=True)
         self._tasks.clear()
+        self._notification_tasks.clear()
         self._queue_entries.clear()
 
     def queue_snapshot(
@@ -391,6 +401,8 @@ class BrainstormService:
                     "ok",
                     {"repo": repo, "branch": branch, "trigger": trigger},
                 )
+                if trigger == "manual":
+                    await self._send_completion_notice(chat_id, thread_id)
         except asyncio.CancelledError:
             status = "cancelled"
             error = "Brainstorm interrupted during service shutdown."
@@ -521,6 +533,44 @@ class BrainstormService:
         except TelegramBotApiError:
             logging.exception("Failed to update cancelled repository brainstorm")
 
+    async def _send_completion_notice(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+    ) -> None:
+        try:
+            message_id = await self._send(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to_message_id=None,
+                text="✅ Repository brainstorm complete.",
+            )
+        except Exception:
+            logging.exception("Failed to send repository brainstorm completion notification")
+            return
+        task = asyncio.create_task(
+            self._delete_completion_notice(chat_id, message_id),
+            name=f"brainstorm-completion-notice-{message_id}",
+        )
+        self._notification_tasks.add(task)
+        task.add_done_callback(self._notification_finished)
+
+    async def _delete_completion_notice(self, chat_id: int, message_id: int) -> None:
+        try:
+            await asyncio.sleep(self.completion_notice_seconds)
+        except asyncio.CancelledError:
+            pass
+        try:
+            await asyncio.to_thread(self.bot.delete_message, chat_id, message_id)
+        except TelegramBotApiError as exc:
+            if "message to delete not found" not in str(exc).lower():
+                logging.warning(
+                    "Failed to delete repository brainstorm completion notification: %s",
+                    exc,
+                )
+        except Exception:
+            logging.exception("Failed to delete repository brainstorm completion notification")
+
     async def _send(
         self,
         *,
@@ -584,6 +634,15 @@ class BrainstormService:
             pass
         except Exception:
             logging.exception("Unhandled repository brainstorm task failure %s", brainstorm_id)
+
+    def _notification_finished(self, task: asyncio.Task[None]) -> None:
+        self._notification_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("Unhandled repository brainstorm notification failure")
 
 
 async def _ignore_progress(event: dict[str, Any]) -> None:
