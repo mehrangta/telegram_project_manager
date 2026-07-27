@@ -53,7 +53,10 @@ from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
 
 PLAN = {
-    "summary": "Implement the requested behavior safely.",
+    "summary": (
+        "The issue handler currently does not save submitted changes. "
+        "Users lose their updates when they rely on the handler."
+    ),
     "steps": [{"title": "Update handler", "details": "Change the issue handler and preserve existing behavior.", "files": ["src/handler.py"]}],
     "tests": ["pytest"],
     "risks": [],
@@ -651,6 +654,12 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.calls[0]["sandbox"], Sandbox.full_access)
         self.assertEqual(self.codex.calls[0]["effort"], ReasoningEffort.high)
         self.assertEqual(self.codex.calls[0]["model_role"], "plan")
+        created_body = self.github.created[0]["body"]
+        self.assertTrue(created_body.startswith("# Codex plan for owner/repo#12"))
+        self.assertNotIn("Draft implementation plan for", created_body)
+        self.assertLess(created_body.index(PLAN["summary"]), created_body.index("## Steps"))
+        self.assertIn("Refs #12", created_body)
+        self.assertIn(f"<!-- telegram-code-job:{job_id} -->", created_body)
 
         await self.service.approve(job_id)
         self.assertEqual(self.bot.deleted, [(10, 78)])
@@ -840,7 +849,12 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         await wait_for_send_count(self.bot, 3)
         await wait_for_plan_message(self.db, job_id, 79)
         self.assertNotIn("## Open questions", self.workspaces.plan_commits[-1]["markdown"])
-        self.assertNotIn("## Open questions", self.github.updated[-1]["body"])
+        revised_body = self.github.updated[-1]["body"]
+        self.assertNotIn("## Open questions", revised_body)
+        self.assertNotIn("Draft implementation plan for", revised_body)
+        self.assertLess(revised_body.index(PLAN["summary"]), revised_body.index("## Steps"))
+        self.assertIn("Refs #12", revised_body)
+        self.assertIn(f"<!-- telegram-code-job:{job_id} -->", revised_body)
         with self.db.session() as conn:
             feedback = conn.execute(
                 "SELECT state, applied_revision FROM code_plan_feedback WHERE source_id = '10:99'"
@@ -1496,14 +1510,30 @@ class CodeSafetyTests(unittest.TestCase):
         self.assertIn("Never ask for facts", initial)
         self.assertIn("at most three", initial)
         self.assertIn("untrusted requirements content", initial)
+        self.assertIn("exactly two complete sentences", initial)
+        self.assertIn("explain only the current", initial)
+        self.assertIn("Do not mention solutions", initial)
         self.assertIn("Apply answers directly", revised)
         self.assertIn("Do not repeat answered questions", revised)
+        self.assertIn("exactly two complete sentences", revised)
+        self.assertIn("explain only", revised)
+        self.assertIn("Do not mention solutions", revised)
 
     def test_plan_schema_constrains_step_lengths(self):
         properties = CODE_PLAN_SCHEMA["properties"]["steps"]["items"]["properties"]
 
         self.assertEqual(properties["title"]["maxLength"], PLAN_STEP_TITLE_MAX_LENGTH)
         self.assertEqual(properties["details"]["maxLength"], PLAN_STEP_DETAILS_MAX_LENGTH)
+        summary_description = CODE_PLAN_SCHEMA["properties"]["summary"]["description"]
+        self.assertIn("exactly two complete sentences", summary_description)
+        self.assertIn("solutions only afterward", summary_description)
+
+    def test_plan_markdown_places_problem_summary_before_steps(self):
+        markdown = CodePlan.from_json(PLAN).to_markdown(
+            "c-abcdef12", "owner/repo", 12, 1
+        )
+
+        self.assertLess(markdown.index(PLAN["summary"]), markdown.index("## Steps"))
 
     def test_plan_normalizes_oversized_step_from_noncompliant_provider(self):
         plan = CodePlan.from_json(

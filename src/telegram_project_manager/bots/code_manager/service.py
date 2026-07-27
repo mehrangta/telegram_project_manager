@@ -1554,8 +1554,6 @@ class CodeJobService:
 def _plan_pr_body(job: dict[str, Any], markdown: str) -> str:
     return "\n".join(
         [
-            f"Draft implementation plan for [{job['repo']}#{job['issue_number']}]({job['issue_url']}).",
-            "",
             markdown.strip(),
             "",
             f"Refs #{job['issue_number']}",

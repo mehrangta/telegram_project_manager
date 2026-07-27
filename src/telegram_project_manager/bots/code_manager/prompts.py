@@ -63,6 +63,9 @@ recommended_option; use an empty options list only when meaningful choices are i
 If no material decision remains, return an empty questions list: that means the plan is
 decision-complete. Describe concrete implementation steps, likely files, validation commands
 actually defined by the repository, and real risks. Preserve issue intent and do not invent behavior.
+The summary must begin with exactly two complete sentences that explain only the current
+problem and its impact or context. Do not mention solutions, implementation work, files,
+validation, or recommendations until after those first two sentences.
 """
 
 
@@ -88,6 +91,9 @@ Apply answers directly to the summary, steps, tests, risks, and remaining questi
 append a response transcript. Do not repeat answered questions. Ask at most three remaining
 material questions, preferably with 2-3 options and a recommended option. Use an empty
 questions list only when the revised plan is decision-complete.
+The revised summary must still begin with exactly two complete sentences that explain only
+the current problem and its impact or context. Do not mention solutions, implementation work,
+files, validation, or recommendations until after those first two sentences.
 """
 
 
