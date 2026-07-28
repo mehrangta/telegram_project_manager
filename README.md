@@ -48,37 +48,146 @@ In a private admin chat, configure the providers and models:
 Set `openai_base_url` or `codex_base_url` only for compatible custom endpoints.
 `codex_model` remains a shared fallback when a phase-specific model is unset.
 
-## Common commands
+## Command reference
 
-Commands that change configuration or start work require a registered admin.
-Use `/help` in Telegram for the complete command reference.
+### CLI commands
 
-```text
-/status                                      Show service and GitHub status
-/repo setup owner/repository                Configure and cache a repository
-/repo show                                  Show current repository settings
-/issues                                     List open issues
-/prs                                        List open pull requests
-/issue <prompt>                             Draft a GitHub issue
-/commit <request>                           Draft a direct commit plan
-/code #123                                  Plan an issue in the active repository
-/code --skip-plan #123                      Code an issue without planning first
-/code approve <c-job_id>                    Approve implementation
-/code status <c-job_id>                     Show code-job status
-/ask <question> [images]                    Inspect the active repository
-/brainstorm                                 Suggest 3 new ideas for the active repository
-/do <job> [images]                          Run a writable repository job
-/do status [d-job_id]                       Show do-job status
-/queue                                      Show current Codex work in this chat/topic
-/merge <c-job_id>                           Merge without deployment
-/deploy <c-job_id>                          Merge and deploy
-/config show                                Show redacted configuration
-/memory status                              Show chat or topic memory usage
-```
+Use `telegram-project-manager` as the canonical executable. The installed `tpm`
+alias and `python -m telegram_project_manager` run the same CLI. The global
+`--db <path>` option must precede the subcommand and defaults to `data/bot.db`.
 
-`/code` also accepts `owner/repository#123`, an issue URL, and `--skip-plan`.
-Use `/code edit`, `/code retry`, `/code rebase`, or `/code discard` to manage an
-existing job. `/do --host <job>` is restricted to private admin chats.
+| Command | Description |
+| --- | --- |
+| `telegram-project-manager [--db <path>] init-db` | Initialize or upgrade the SQLite database. |
+| `telegram-project-manager [--db <path>] run` | Start the Telegram polling service. |
+| `telegram-project-manager [--db <path>] run-do-worker` | Start the durable `/do` worker. |
+| `telegram-project-manager [--db <path>] admin add <telegram_user_id> [--username <username>]` | Register a Telegram administrator. |
+| `telegram-project-manager [--db <path>] admin remove <telegram_user_id>` | Remove a registered administrator. |
+| `telegram-project-manager [--db <path>] config show` | Show settings with secret values redacted. |
+| `telegram-project-manager [--db <path>] config set <key> <value>` | Store a supported setting or secret. |
+
+Supported configuration keys:
+
+| Key | Value and purpose |
+| --- | --- |
+| `openai_api_key` | Secret used by the OpenAI-compatible planning client. |
+| `openai_base_url` | Absolute HTTP or HTTPS endpoint for the planning client. |
+| `openai_model` | Model used for issue and direct-commit planning. |
+| `codex_api_key` | Secret used by the Codex SDK. |
+| `codex_base_url` | Absolute HTTP or HTTPS Codex-compatible endpoint. |
+| `codex_model` | Shared fallback when a phase-specific Codex model is unset. |
+| `codex_plan_model` | Model used for code-job planning. |
+| `codex_code_model` | Model used for implementation and repository jobs. |
+| `max_files_per_commit` | Maximum files allowed in a direct-commit plan; defaults to `10`. |
+| `max_bytes_per_commit` | Maximum bytes allowed in a direct-commit plan; defaults to `100000`. |
+| `require_confirmation` | Accepted compatibility setting for confirmation behavior. |
+| `issue_body_llm_enabled` | `true` or `false`; controls generated issue bodies. |
+| `llm_memory_max_messages` | Even integer of at least `2`; limits stored LLM messages. |
+
+### Telegram commands
+
+Only registered administrators are routed to the bot. Commands are scoped to
+the current chat or exact forum topic where applicable. Telegram-qualified
+forms such as `/status@BotName` are accepted. `/help` is a compact in-bot quick
+reference; the complete command surface is documented here.
+
+#### General and repository commands
+
+| Command | Description |
+| --- | --- |
+| `/start` | Show the in-bot command summary. |
+| `/help` | Show the in-bot command summary. `help` also works in a private chat. |
+| `/status` | Show GitHub authentication, repository, administrator, and model status. |
+| `/repos` | List repositories in the allow list. |
+| `/repo` or `/repo show` | Show repository, branch, cache, deployment, and brainstorming settings for the current scope. |
+| `/repo check` | Show repository settings and validate the configured local cache. |
+| `/repo allow owner/repository` | Add a repository to the allow list. |
+| `/repo disallow owner/repository` | Remove a repository from the allow list. |
+| `/repo set owner/repository` | Select an allowed repository for the current chat or topic. |
+| `/repo setup owner/repository` | Allow the repository, detect its default branch, create or refresh its managed cache, and select it. |
+| `/repo clear` | Clear the active repository for the current chat or topic. |
+| `/repo local set <absolute-path>` | Set and validate a writable normal or bare Git cache for the active repository. |
+| `/repo local clear` | Clear the local repository cache for the current chat or topic. |
+| `/branch <branch_name>` | Set the default branch for the current chat or topic. |
+
+#### Deployment and brainstorming configuration
+
+| Command | Description |
+| --- | --- |
+| `/repo deploy enable owner/repository` | Enable deployment for an allowed repository. |
+| `/repo deploy disable owner/repository` | Disable deployment for an allowed repository. |
+| `/repo deploy set owner/repository <workflow-name-or-file>` | Set the `workflow_dispatch` workflow used for deployment. |
+| `/repo deploy clear owner/repository` | Clear the configured deployment workflow. |
+| `/repo brainstorm show owner/repository` | Show brainstorming state, schedule, destination, and last run. |
+| `/repo brainstorm schedule owner/repository <daily\|weekly\|Nd> <HH:MM>` | Save a UTC cadence such as `daily`, `weekly`, or `2d`. |
+| `/repo brainstorm enable owner/repository` | Enable manual and scheduled brainstorming using the current scope as its destination. |
+| `/repo brainstorm disable owner/repository` | Disable brainstorming while preserving its schedule and destination. |
+
+Enabling brainstorming requires the same repository to be active in the
+current scope and requires a valid local cache. Deployment commands require an
+allowed repository; deployment remains unavailable until both a workflow is
+configured and deployment is enabled.
+
+#### Issues and direct commits
+
+| Command | Description |
+| --- | --- |
+| `/issues` | List open issues for the active repository. |
+| `/issue <prompt> [images]` | Create a reviewable issue draft for the active repository. |
+| `/edit i-12345678 [feedback] [images]` | Revise a pending issue draft; replying to its preview with text or images also revises it. |
+| `/confirm i-12345678` | Create the GitHub issue from a pending issue draft. |
+| `/cancel i-12345678` | Cancel a pending issue draft. |
+| `/commit <request>` | Create a direct-commit plan for the active repository. |
+| `/confirm <plan_id>` | Execute a pending direct-commit plan. |
+| `/cancel <plan_id>` | Cancel a pending direct-commit plan. |
+
+Issue draft IDs start with `i-`. Direct-commit plan IDs use the ID returned by
+`/commit`; `/confirm` and `/cancel` route to the matching workflow. Drafts and
+plans can be controlled only from their originating chat or topic.
+
+#### Codex questions, ideas, and writable jobs
+
+| Command | Description |
+| --- | --- |
+| `/ask <question> [images]` | Run a read-only Codex inspection of the active repository. |
+| `/brainstorm` | Generate three ranked ideas for the enabled active repository. |
+| `/queue` | Show running and queued `/code`, `/ask`, `/brainstorm`, and `/do` work for the current scope. |
+| `/do <job> [images]` | Queue writable Codex work in the active repository's persistent workspace. |
+| `/do --host <job> [images]` | Queue a host-wide writable job; available only in a private admin chat. |
+| `/do status [d-12345678]` | Show one `/do` job or recent jobs in the current scope. |
+
+#### Code jobs, pull requests, merges, and deployments
+
+| Command | Description |
+| --- | --- |
+| `/code [--skip-plan] <issue-reference>` | Start a code job, with planning unless `--skip-plan` is present. |
+| `/code approve c-12345678` | Approve an awaiting code-job plan. |
+| `/code edit c-12345678 <feedback>` | Revise an awaiting code-job plan. |
+| `/code discard c-12345678` | Discard a code job and its workspace. |
+| `/code retry c-12345678` | Resume an interrupted or retryable code job. |
+| `/code rebase c-12345678` | Rebase the code job onto its latest base branch. |
+| `/code status [c-12345678]` | Show one code job or recent jobs in the current scope. |
+| `/prs` | List open pull requests for the active repository. |
+| `/merge c-12345678` | Squash-merge a ready code-job pull request without deploying. |
+| `/deploy c-12345678` | Squash-merge a ready code-job pull request and start deployment. |
+
+An issue reference may be `#123`, `123`, `owner/repository#123`, or a full
+GitHub issue URL. Replying `/code` to an Issue created message uses that issue;
+`--skip-plan` may still be included. When replying to a code-job message, the
+plain text `approve`, `discard`, or `retry` runs that action, while other plain
+text is treated as plan feedback. `/merge` and `/deploy` may also be sent as
+replies without an explicit job ID.
+
+#### Bot configuration and memory
+
+| Command | Description |
+| --- | --- |
+| `/config` or `/config show` | Show configuration with API keys redacted. |
+| `/config set <key> <value>` | Set any supported configuration key listed in the CLI section. API keys require a private chat. |
+| `/memory`, `/memory status`, or `/memory show` | Show direct-commit and issue-planning memory use for the current scope. |
+| `/memory clear` | Clear direct-commit and issue-planning memory for the current scope. |
+| `/admin add <telegram_user_id>` | Register another administrator from Telegram. |
+| `/admin remove <telegram_user_id>` | Remove an administrator from Telegram. |
 
 ## Workflows
 
@@ -111,8 +220,8 @@ existing job. `/do --host <job>` is restricted to private admin chats.
   jobs paused for input, approval, CI, retry, merge, deployment, or completion.
   Counts are scoped rather than global; `/ask` and `/brainstorm` entries are in
   memory and vanish after a bot restart, while `/do` queue state is durable.
-- **Images:** `/issue`, `/ask`, and `/do` accept JPEG, PNG, and GIF attachments,
-  with up to 10 images, 10 MB each, and 20 MB total.
+- **Images:** `/issue`, `/edit`, `/ask`, and `/do` accept JPEG, PNG, and GIF
+  attachments, with up to 10 images, 10 MB each, and 20 MB total.
 - **Merge and deployment:** `/merge` squash-merges a ready pull request without
   deploying. Deployment is disabled per repository until an admin configures a
   workflow and enables it. `/deploy` requires a ready pull request targeting
