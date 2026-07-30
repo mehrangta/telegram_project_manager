@@ -398,6 +398,37 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.sent[0][1], "ℹ️ <b>Action queued</b>")
         self.assertEqual(bot.deleted, [])
 
+    async def test_issue_plan_and_code_buttons_delete_created_message_then_dispatch(self):
+        commands = [
+            "/code owner/repo#12",
+            "/code --skip-plan owner/repo#12",
+            "/code #13",
+            "/code --skip-plan #13",
+        ]
+        bot = self.Bot([
+            self.callback(
+                index,
+                f"query-{index}",
+                f"command:{command}",
+                message_id=20 + index,
+            )
+            for index, command in enumerate(commands, start=1)
+        ])
+        router = self.Router()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, commands)
+        self.assertEqual(
+            bot.answers,
+            [(f"query-{index}", "Action requested") for index in range(1, 5)],
+        )
+        self.assertEqual(
+            bot.deleted,
+            [(40, message_id) for message_id in range(21, 25)],
+        )
+
     async def test_edit_button_sends_reply_prompt_then_deletes_preview(self):
         bot = self.Bot([
             self.callback(
@@ -495,7 +526,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             [("query-1", "Action requested"), ("query-2", "Action requested")],
         )
 
-    async def test_delete_failure_does_not_block_edit_or_confirm(self):
+    async def test_delete_failure_does_not_block_edit_confirm_or_issue_code(self):
         class DeleteFailingBot(self.Bot):
             def delete_message(self, chat_id, message_id):
                 raise TelegramBotApiError("message cannot be deleted")
@@ -503,6 +534,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         bot = DeleteFailingBot([
             self.callback(1, "query-1", "edit_issue:i-abcdef12", message_id=22),
             self.callback(2, "query-2", "command:/confirm i-abcdef12", message_id=23),
+            self.callback(3, "query-3", "command:/code owner/repo#12", message_id=24),
         ])
         router = self.Router()
 
@@ -510,8 +542,11 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(PollingStopped):
                 await run_polling(bot, router)
 
-        self.assertEqual(router.commands, ["/confirm i-abcdef12"])
-        self.assertEqual(len(bot.sent), 2)
+        self.assertEqual(
+            router.commands,
+            ["/confirm i-abcdef12", "/code owner/repo#12"],
+        )
+        self.assertEqual(len(bot.sent), 3)
         self.assertTrue(
             any("callback source deletion failed" in line for line in logs.output)
         )
