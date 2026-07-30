@@ -21,6 +21,9 @@ ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
 CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
 CALLBACK_DRAFT_PATTERN = re.compile(r"^i-[0-9a-f]{8}$")
 ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel) i-[0-9a-f]{8}$")
+ISSUE_CODE_ACTION_PATTERN = re.compile(
+    r"^/code(?: --skip-plan)? (?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$"
+)
 
 
 @dataclass(frozen=True)
@@ -514,7 +517,10 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             await answer_callback(callback.query_id, "Button expired")
             return
         await answer_callback(callback.query_id, "Action requested")
-        if ISSUE_DRAFT_ACTION_PATTERN.fullmatch(command):
+        if (
+            ISSUE_DRAFT_ACTION_PATTERN.fullmatch(command)
+            or ISSUE_CODE_ACTION_PATTERN.fullmatch(command)
+        ):
             await delete_callback_source(callback)
         if command.lower().startswith(("/deploy ", "/merge ")):
             await asyncio.to_thread(
