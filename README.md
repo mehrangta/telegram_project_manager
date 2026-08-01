@@ -132,7 +132,7 @@ configured and deployment is enabled.
 
 | Command | Description |
 | --- | --- |
-| `/issues` | List open issues for the active repository. |
+| `/issues` | List open issues and their latest Codex code-job status for the active repository; the tracked message refreshes periodically. |
 | `/issue <prompt> [images]` | Create a reviewable issue draft for the active repository. |
 | `/edit i-12345678 [feedback] [images]` | Revise a pending issue draft; replying to its preview with text or images also revises it. |
 | `/confirm i-12345678` | Create the GitHub issue from a pending issue draft. |
@@ -195,8 +195,10 @@ replies without an explicit job ID.
   repository, detect its default branch, create or refresh its managed cache,
   and select it for the current chat or forum topic. Topic settings are
   independent from group-level settings.
-- **Issues and code:** `/issue` creates a reviewable issue draft. After creation,
-  choose Plan for the plan-and-approval workflow or Code to skip directly to
+- **Issues and code:** `/issues` shows the latest local Codex code-job status for
+  each listed issue when one exists and refreshes its tracked message
+  periodically. `/issue` creates a reviewable issue draft. After creation, choose
+  Plan for the plan-and-approval workflow or Code to skip directly to
   implementation. `/code` works on an existing issue in an isolated worktree
   and opens a draft pull request. Approve the plan before implementation unless
   `--skip-plan` was used. A job becomes ready only after repository validation
