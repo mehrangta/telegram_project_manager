@@ -5,7 +5,11 @@ from pathlib import Path
 
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
 from telegram_project_manager.bots.issue_manager.prompts import build_user_prompt
-from telegram_project_manager.bots.issue_manager.schemas import IssueDraft, IssueDraftValidationError
+from telegram_project_manager.bots.issue_manager.schemas import (
+    ISSUE_TITLE_RESPONSE_SCHEMA,
+    IssueDraft,
+    IssueDraftValidationError,
+)
 from telegram_project_manager.integrations.gh.repository_context import (
     MAX_CONTEXT_BYTES,
     RepositoryContext,
@@ -193,7 +197,9 @@ class IssuePlannerContextTests(unittest.TestCase):
             self.assertEqual(issue.raw_body, request)
             self.assertEqual(issue.body([], "<!-- marker -->"), request + "\n\n<!-- marker -->")
             self.assertNotIn("memory_key", llm.calls[0][2])
-            self.assertEqual(llm.calls[0][2]["response_schema"]["required"], ["title"])
+            self.assertEqual(llm.calls[0][2]["response_schema"], ISSUE_TITLE_RESPONSE_SCHEMA)
+            self.assertIn("exactly one JSON object", llm.calls[0][1])
+            self.assertIn('field named "title"', llm.calls[0][1])
             stored = db.get_issue_draft(draft_id)
             assert stored is not None
             self.assertEqual(stored["issue_json"]["raw_body"], request)
@@ -230,6 +236,9 @@ class IssuePlannerContextTests(unittest.TestCase):
             self.assertEqual(issue.raw_body, "button broken")
             self.assertEqual(context.calls, [])
             self.assertIn("make it shorter", llm.calls[0][1])
+            self.assertIn("exactly one JSON object", llm.calls[0][1])
+            self.assertIn('field named "title"', llm.calls[0][1])
+            self.assertEqual(llm.calls[0][2]["response_schema"], ISSUE_TITLE_RESPONSE_SCHEMA)
 
     def test_persists_pinned_context_and_scopes_memory_by_repo(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -164,8 +164,8 @@ class LlmClientTests(unittest.TestCase):
             chat_openai.return_value.invoke.assert_called_once()
             repair_input = chat_openai.return_value.invoke.call_args.args[0]
             self.assertEqual(
-                [(message.type, message.content) for message in repair_input[:2]],
-                [("system", "system"), ("human", "user")],
+                [(message.type, message.content) for message in repair_input[:3]],
+                [("system", "system"), ("human", "user"), ("ai", "null")],
             )
             repair_prompt = repair_input[-1].content
             self.assertIn("exactly one non-null JSON object", repair_prompt)
@@ -209,7 +209,32 @@ class LlmClientTests(unittest.TestCase):
             structured.invoke.assert_called_once()
             chat_openai.return_value.invoke.assert_called_once()
 
-    def test_structured_parsing_error_is_not_retried(self):
+    def test_repairs_structured_parsing_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, client = self.configured_client(Path(temp_dir))
+            title = "Add economic news execution guard to trade preflight"
+            with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
+                structured = chat_openai.return_value.with_structured_output.return_value
+                structured.invoke.return_value = {
+                    "raw": AIMessage(content=title),
+                    "parsed": None,
+                    "parsing_error": ValueError("invalid JSON"),
+                }
+                chat_openai.return_value.invoke.return_value = AIMessage(
+                    content=json.dumps({"title": title})
+                )
+                self.assertEqual(client.chat_json("system", "user"), {"title": title})
+            structured.invoke.assert_called_once()
+            chat_openai.return_value.invoke.assert_called_once()
+            repair_input = chat_openai.return_value.invoke.call_args.args[0]
+            self.assertEqual(
+                [(message.type, message.content) for message in repair_input[:3]],
+                [("system", "system"), ("human", "user"), ("ai", title)],
+            )
+            self.assertIn("JSON Schema", repair_input[-1].content)
+            self.assertIn("Do not include markdown", repair_input[-1].content)
+
+    def test_structured_parsing_error_fails_after_one_repair(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             _, client = self.configured_client(Path(temp_dir))
             with patch("telegram_project_manager.platform.llm.client.ChatOpenAI") as chat_openai:
@@ -219,10 +244,11 @@ class LlmClientTests(unittest.TestCase):
                     "parsed": None,
                     "parsing_error": ValueError("invalid JSON"),
                 }
-                with self.assertRaisesRegex(LlmError, "invalid structured output"):
+                chat_openai.return_value.invoke.return_value = AIMessage(content="still-not-json")
+                with self.assertRaisesRegex(LlmError, "invalid structured output after repair"):
                     client.chat_json("system", "user")
             structured.invoke.assert_called_once()
-            chat_openai.return_value.invoke.assert_not_called()
+            chat_openai.return_value.invoke.assert_called_once()
 
     def test_invalid_structured_response_is_not_retried(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -311,8 +337,8 @@ class LlmClientTests(unittest.TestCase):
             chat_openai.return_value.invoke.assert_called_once()
             repair_input = chat_openai.return_value.invoke.call_args.args[0]
             self.assertEqual(
-                [(message.type, message.content) for message in repair_input[:2]],
-                [("system", "system"), ("human", "first")],
+                [(message.type, message.content) for message in repair_input[:3]],
+                [("system", "system"), ("human", "first"), ("ai", "null")],
             )
             self.assertIn("previous response", repair_input[-1].content.lower())
             self.assertEqual(
