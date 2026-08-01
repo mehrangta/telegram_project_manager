@@ -68,6 +68,48 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.shutdown()
         self.temp.cleanup()
 
+    def create_code_job(
+        self,
+        job_id,
+        issue_number,
+        status,
+        *,
+        repo="owner/repo",
+        created_at=None,
+        updated_at=None,
+    ):
+        self.db.create_code_job(
+            {
+                "id": job_id,
+                "telegram_chat_id": 20,
+                "telegram_user_id": 10,
+                "telegram_thread_id": None,
+                "repo": repo,
+                "issue_number": issue_number,
+                "issue_title": "Issue",
+                "issue_url": f"https://github.com/{repo}/issues/{issue_number}",
+                "issue_context_json": {},
+                "base_branch": "main",
+                "target_branch": f"codex/issue-{issue_number}-{job_id}",
+                "workspace_path": f"/tmp/{job_id}",
+                "source_repo_path": "/tmp/repo",
+                "status": status,
+                "resume_phase": "plan",
+                "skip_plan": False,
+            }
+        )
+        if created_at is not None or updated_at is not None:
+            with self.db.session() as conn:
+                conn.execute(
+                    """
+                    UPDATE code_jobs
+                    SET created_at = COALESCE(?, created_at),
+                        updated_at = COALESCE(?, updated_at)
+                    WHERE id = ?
+                    """,
+                    (created_at, updated_at, job_id),
+                )
+
     async def test_publish_renders_safe_links_and_copyable_qualified_commands(self):
         self.reader.issues["owner/repo"] = [
             issue(9, "Fix <unsafe & title>"),
@@ -85,6 +127,49 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buttons[0][0]["copy_text"]["text"], "/code owner/repo#9")
         self.assertEqual(buttons[1][0]["copy_text"]["text"], "/code owner/repo#4")
         self.assertTrue(sent[4]["disable_link_preview"])
+
+    async def test_publish_shows_codex_status_only_for_issues_with_jobs(self):
+        self.reader.issues["owner/repo"] = [issue(9), issue(4)]
+        self.create_code_job("c-00000001", 9, "awaiting_approval")
+
+        await self.service.publish(chat_id=20, thread_id=None, repo="owner/repo")
+
+        text = self.bot.sent[0][2]
+        self.assertIn("#9</a> — Issue — Codex: awaiting approval", text)
+        self.assertIn("#4</a> — Issue\n", text)
+        self.assertEqual(text.count("Codex:"), 1)
+
+    def test_render_escapes_and_normalizes_codex_status(self):
+        outgoing = self.service.render(
+            "owner/repo",
+            [issue(7)],
+            {7: "waiting_<unsafe&>"},
+        )
+
+        self.assertIn("Codex: waiting &lt;unsafe&amp;&gt;", outgoing.text)
+
+    def test_latest_status_lookup_is_deterministic_and_repo_scoped(self):
+        self.create_code_job(
+            "c-00000001", 1, "ready", created_at=100, updated_at=300
+        )
+        self.create_code_job(
+            "c-00000002", 1, "coding", created_at=200, updated_at=200
+        )
+        self.create_code_job("c-00000003", 2, "discarded")
+        self.create_code_job("c-00000004", 1, "failed", repo="owner/other")
+
+        statuses = self.db.get_latest_code_job_statuses("owner/repo", [1, 2, 3])
+
+        self.assertEqual(statuses, {1: "coding", 2: "discarded"})
+        self.assertEqual(self.db.get_latest_code_job_statuses("owner/repo", []), {})
+
+    def test_full_issue_list_with_statuses_stays_within_telegram_limit(self):
+        issues = [issue(number) for number in range(1, 21)]
+        statuses = {number: "awaiting_approval" for number in range(1, 21)}
+
+        outgoing = self.service.render("owner/repo", issues, statuses)
+
+        self.assertLessEqual(len(outgoing.text), 4096)
 
     def test_render_falls_back_when_qualified_command_exceeds_copy_limit(self):
         repo = "o/" + "r" * COPY_TEXT_LIMIT
@@ -144,6 +229,18 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.refresh()
 
         self.assertEqual(self.bot.edited, [])
+
+    async def test_status_only_transition_updates_tracked_message_once(self):
+        self.reader.issues["owner/repo"] = [issue(1)]
+        self.create_code_job("c-00000001", 1, "planning")
+        await self.service.publish(chat_id=20, thread_id=None, repo="owner/repo")
+        self.db.update_code_job("c-00000001", {"status": "coding"})
+
+        await self.service.refresh()
+        await self.service.refresh()
+
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertIn("Codex: coding", self.bot.edited[0][2])
 
     async def test_stale_refresh_snapshot_cannot_edit_replaced_message(self):
         self.reader.issues["owner/repo"] = [issue(1)]

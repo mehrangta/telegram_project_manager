@@ -5,7 +5,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 
@@ -1678,6 +1678,28 @@ class Database:
                 (repo, issue_number),
             ).fetchone()
         return self._decode_code_job(row)
+
+    def get_latest_code_job_statuses(
+        self, repo: str, issue_numbers: Iterable[int]
+    ) -> dict[int, str]:
+        numbers = tuple(sorted(set(issue_numbers)))
+        if not numbers:
+            return {}
+        placeholders = ",".join("?" for _ in numbers)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT issue_number, status
+                FROM code_jobs
+                WHERE repo = ? AND issue_number IN ({placeholders})
+                ORDER BY issue_number ASC, created_at DESC, updated_at DESC, id DESC
+                """,
+                (repo, *numbers),
+            ).fetchall()
+        statuses: dict[int, str] = {}
+        for row in rows:
+            statuses.setdefault(int(row["issue_number"]), str(row["status"]))
+        return statuses
 
     def list_code_jobs(
         self,

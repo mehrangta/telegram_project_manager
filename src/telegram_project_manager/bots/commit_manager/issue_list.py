@@ -6,6 +6,7 @@ import html
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 
 from telegram_project_manager.integrations.gh.issues import GhIssueReader, IssueSummary
@@ -44,7 +45,10 @@ class IssueListService:
         async with self._locks[(chat_id, thread_id)]:
             try:
                 issues = await asyncio.to_thread(self.reader.list_open_issues, repo)
-                outgoing = self.render(repo, issues)
+                codex_statuses = self.db.get_latest_code_job_statuses(
+                    repo, (issue.number for issue in issues)
+                )
+                outgoing = self.render(repo, issues, codex_statuses)
                 render_hash = self.render_hash(outgoing)
                 result = await asyncio.to_thread(
                     self.bot.send_message,
@@ -111,7 +115,10 @@ class IssueListService:
         for repo, repo_targets in grouped.items():
             try:
                 issues = await asyncio.to_thread(self.reader.list_open_issues, repo)
-                outgoing = self.render(repo, issues)
+                codex_statuses = self.db.get_latest_code_job_statuses(
+                    repo, (issue.number for issue in issues)
+                )
+                outgoing = self.render(repo, issues, codex_statuses)
                 render_hash = self.render_hash(outgoing)
             except asyncio.CancelledError:
                 raise
@@ -191,20 +198,29 @@ class IssueListService:
         self.db.audit("issues.refresh", "failed", details)
 
     @staticmethod
-    def render(repo: str, issues: list[IssueSummary]) -> OutgoingMessage:
+    def render(
+        repo: str,
+        issues: list[IssueSummary],
+        codex_statuses: Mapping[int, str] | None = None,
+    ) -> OutgoingMessage:
         escaped_repo = html.escape(repo)
         if not issues:
             return OutgoingMessage(text=f"No open issues for {escaped_repo}.")
 
         lines = [f"Open issues for {escaped_repo}:"]
         keyboard = []
+        statuses = codex_statuses or {}
         for issue in issues:
             command = f"/code {repo}#{issue.number}"
             if len(command) > COPY_TEXT_LIMIT:
                 command = f"/code #{issue.number}"
+            raw_status = str(statuses.get(issue.number) or "")
+            status = " ".join(raw_status.replace("_", " ").split())
+            status_suffix = f" — Codex: {html.escape(status)}" if status else ""
             lines.append(
                 f'- <a href="{html.escape(issue.url, quote=True)}">#{issue.number}</a> — '
-                f"{html.escape(issue.title)}\n  <code>{html.escape(command)}</code>"
+                f"{html.escape(issue.title)}{status_suffix}\n"
+                f"  <code>{html.escape(command)}</code>"
             )
             keyboard.append((copy_button(f"📋 Code #{issue.number}", command),))
         return OutgoingMessage(text="\n".join(lines), keyboard=tuple(keyboard))
