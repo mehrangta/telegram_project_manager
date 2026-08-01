@@ -350,6 +350,59 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_do_job_events_job_id_id
                 ON do_job_events (job_id, id);
+
+                CREATE TABLE IF NOT EXISTS goals (
+                    id TEXT PRIMARY KEY,
+                    telegram_chat_id INTEGER NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    telegram_thread_id INTEGER,
+                    telegram_message_id INTEGER,
+                    repo TEXT NOT NULL,
+                    default_branch TEXT NOT NULL,
+                    source_repo_path TEXT NOT NULL,
+                    workspace_path TEXT NOT NULL,
+                    objective TEXT NOT NULL,
+                    objective_revision INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL,
+                    control_action TEXT,
+                    codex_thread_id TEXT,
+                    latest_activity TEXT NOT NULL DEFAULT '',
+                    latest_summary TEXT NOT NULL DEFAULT '',
+                    next_step TEXT NOT NULL DEFAULT '',
+                    error TEXT,
+                    next_run_at INTEGER,
+                    last_run_at INTEGER,
+                    run_count INTEGER NOT NULL DEFAULT 0,
+                    completed_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_goals_chat_scope
+                ON goals (telegram_chat_id)
+                WHERE telegram_thread_id IS NULL;
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_goals_topic_scope
+                ON goals (telegram_chat_id, telegram_thread_id)
+                WHERE telegram_thread_id IS NOT NULL;
+
+                CREATE INDEX IF NOT EXISTS idx_goals_due
+                ON goals (status, next_run_at, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_goals_control
+                ON goals (control_action, status);
+
+                CREATE TABLE IF NOT EXISTS goal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    goal_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_goal_events_goal_id_id
+                ON goal_events (goal_id, id);
                 """
             )
             self._ensure_column(conn, "chat_settings", "local_repo_path", "TEXT")
@@ -1614,6 +1667,250 @@ class Database:
                 (now,),
             )
         return [str(row["id"]) for row in rows]
+
+    def create_goal(self, goal: dict[str, Any]) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO goals (
+                    id, telegram_chat_id, telegram_user_id, telegram_thread_id,
+                    repo, default_branch, source_repo_path, workspace_path,
+                    objective, status, next_run_at, latest_activity,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    goal["id"], goal["telegram_chat_id"], goal["telegram_user_id"],
+                    goal.get("telegram_thread_id"), goal["repo"], goal["default_branch"],
+                    goal["source_repo_path"], goal["workspace_path"], goal["objective"],
+                    goal.get("status", "active"), goal.get("next_run_at", now),
+                    goal.get("latest_activity", "Waiting for goal worker"), now, now,
+                ),
+            )
+
+    def get_goal(self, goal_id: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_scope_goal(self, chat_id: int, thread_id: int | None) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM goals
+                WHERE telegram_chat_id = ? AND telegram_thread_id IS ?
+                """,
+                (chat_id, thread_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_goals(
+        self,
+        *,
+        chat_id: int | None = None,
+        thread_id: int | None = None,
+        exact_thread: bool = False,
+        statuses: tuple[str, ...] | None = None,
+        due_at: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if chat_id is not None:
+            conditions.append("telegram_chat_id = ?")
+            params.append(chat_id)
+        if exact_thread:
+            conditions.append("telegram_thread_id IS ?")
+            params.append(thread_id)
+        if statuses:
+            conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        if due_at is not None:
+            conditions.append("next_run_at IS NOT NULL AND next_run_at <= ?")
+            params.append(due_at)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM goals {where}
+                ORDER BY COALESCE(next_run_at, updated_at), updated_at, rowid LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_goal(
+        self,
+        goal_id: str,
+        values: dict[str, Any],
+        *,
+        allowed_statuses: tuple[str, ...] | None = None,
+    ) -> bool:
+        allowed = {
+            "telegram_message_id", "workspace_path", "objective", "objective_revision",
+            "status", "control_action", "codex_thread_id", "latest_activity",
+            "latest_summary", "next_step", "error", "next_run_at", "last_run_at",
+            "run_count", "completed_at",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unsupported goal columns: {sorted(unknown)}")
+        if not values:
+            return False
+        encoded = {**values, "updated_at": int(time.time())}
+        query = f"UPDATE goals SET {', '.join(f'{key} = ?' for key in encoded)} WHERE id = ?"
+        params: list[Any] = [*encoded.values(), goal_id]
+        if allowed_statuses:
+            query += f" AND status IN ({','.join('?' for _ in allowed_statuses)})"
+            params.extend(allowed_statuses)
+        with self.session() as conn:
+            cursor = conn.execute(query, params)
+        return cursor.rowcount == 1
+
+    def claim_goal(self, goal_id: str, now: int) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE goals SET status = 'running', control_action = NULL,
+                    latest_activity = 'Goal worker started', error = NULL,
+                    last_run_at = ?, run_count = run_count + 1, updated_at = ?
+                WHERE id = ? AND status = 'active'
+                    AND next_run_at IS NOT NULL AND next_run_at <= ?
+                """,
+                (now, now, goal_id, now),
+            )
+        return cursor.rowcount == 1
+
+    def edit_goal(self, goal_id: str, objective: str) -> bool:
+        now = int(time.time())
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE goals SET objective = ?, objective_revision = objective_revision + 1,
+                    control_action = CASE WHEN status = 'running' THEN 'restart' ELSE control_action END,
+                    next_run_at = CASE WHEN status = 'active' THEN ? ELSE next_run_at END,
+                    latest_activity = CASE WHEN status = 'running'
+                        THEN 'Restart requested with updated objective'
+                        ELSE 'Objective updated' END,
+                    updated_at = ?
+                WHERE id = ? AND status IN ('active','running','paused','blocked')
+                """,
+                (objective, now, now, goal_id),
+            )
+        return cursor.rowcount == 1
+
+    def request_goal_pause(self, goal_id: str) -> bool:
+        now = int(time.time())
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE goals SET
+                    status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
+                    control_action = CASE WHEN status = 'running' THEN 'pause' ELSE NULL END,
+                    next_run_at = CASE WHEN status = 'active' THEN NULL ELSE next_run_at END,
+                    latest_activity = CASE WHEN status = 'running'
+                        THEN 'Pause requested' ELSE 'Goal paused' END,
+                    updated_at = ?
+                WHERE id = ? AND status IN ('active','running','paused')
+                """,
+                (now, goal_id),
+            )
+        return cursor.rowcount == 1
+
+    def resume_goal(self, goal_id: str) -> bool:
+        now = int(time.time())
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE goals SET status = 'active', control_action = NULL,
+                    next_run_at = ?, error = NULL, latest_activity = 'Goal resumed',
+                    completed_at = NULL, updated_at = ?
+                WHERE id = ? AND status IN ('paused','blocked')
+                """,
+                (now, now, goal_id),
+            )
+        return cursor.rowcount == 1
+
+    def request_goal_clear(self, goal_id: str) -> str:
+        now = int(time.time())
+        with self.session() as conn:
+            row = conn.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if not row:
+                return "missing"
+            if row["status"] == "running":
+                conn.execute(
+                    """
+                    UPDATE goals SET status = 'clearing', control_action = 'clear',
+                        latest_activity = 'Clear requested', updated_at = ? WHERE id = ?
+                    """,
+                    (now, goal_id),
+                )
+                return "requested"
+            conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+        return "cleared"
+
+    def delete_goal(self, goal_id: str) -> None:
+        with self.session() as conn:
+            conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+
+    def add_goal_event(self, goal_id: str, event_type: str, summary: dict[str, Any]) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO goal_events (goal_id, event_type, summary_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (goal_id, event_type, json.dumps(summary, separators=(",", ":")), int(time.time())),
+            )
+
+    def list_goal_events(self, goal_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, summary_json, created_at FROM goal_events
+                WHERE goal_id = ? ORDER BY id DESC LIMIT ?
+                """,
+                (goal_id, limit),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            try:
+                summary = json.loads(str(row["summary_json"]))
+            except (TypeError, json.JSONDecodeError):
+                summary = {}
+            events.append(
+                {
+                    "event_type": row["event_type"],
+                    "summary": summary if isinstance(summary, dict) else {},
+                    "created_at": row["created_at"],
+                }
+            )
+        return events
+
+    def recover_goals(self) -> tuple[list[str], list[str]]:
+        now = int(time.time())
+        with self.session() as conn:
+            clearing = [
+                str(row["id"])
+                for row in conn.execute("SELECT id FROM goals WHERE status = 'clearing'")
+            ]
+            conn.execute("DELETE FROM goals WHERE status = 'clearing'")
+            running = [
+                str(row["id"])
+                for row in conn.execute("SELECT id FROM goals WHERE status = 'running'")
+            ]
+            conn.execute(
+                """
+                UPDATE goals SET status = 'blocked', control_action = NULL,
+                    error = 'Goal worker restarted during an active Codex turn.',
+                    latest_activity = 'Blocked after worker restart', next_run_at = NULL,
+                    updated_at = ? WHERE status = 'running'
+                """,
+                (now,),
+            )
+        return running, clearing
 
     def audit(self, action: str, status: str, details: dict[str, Any], plan_id: str | None = None) -> None:
         now = int(time.time())

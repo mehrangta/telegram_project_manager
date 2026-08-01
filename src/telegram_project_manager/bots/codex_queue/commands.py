@@ -7,6 +7,7 @@ from telegram_project_manager.bots.ask_manager.service import AskService
 from telegram_project_manager.bots.code_manager.service import CodeJobService
 from telegram_project_manager.bots.do_manager.service import DoService
 from telegram_project_manager.bots.ideas.service import BrainstormService
+from telegram_project_manager.bots.goal_manager.service import GoalService
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import OutgoingMessage, outgoing_message
 from telegram_project_manager.platform.router import IncomingMessage
@@ -25,12 +26,14 @@ class CodexQueueManager:
         ask_service: AskService,
         do_service: DoService,
         brainstorm_service: BrainstormService | None = None,
+        goal_service: GoalService | None = None,
     ) -> None:
         self.permissions = PermissionService(db)
         self.code_service = code_service
         self.ask_service = ask_service
         self.do_service = do_service
         self.brainstorm_service = brainstorm_service
+        self.goal_service = goal_service
 
     async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         command, _, rest = message.text.strip().partition(" ")
@@ -58,6 +61,13 @@ class CodexQueueManager:
             if self.brainstorm_service is not None
             else {"running": (), "queued": ()}
         )
+        goals = (
+            self.goal_service.queue_snapshot(
+                chat_id=message.chat_id, thread_id=message.thread_id
+            )
+            if self.goal_service is not None
+            else {"running": (), "queued": ()}
+        )
         if not any(
             (
                 *code["running"],
@@ -68,11 +78,13 @@ class CodexQueueManager:
                 *do["queued"],
                 *brainstorms["running"],
                 *brainstorms["queued"],
+                *goals["running"],
+                *goals["queued"],
             )
         ):
             scope = "topic" if message.thread_id is not None else "chat"
             return f"No Codex work is running or queued for this {scope}."
-        return outgoing_message(_render_queue(code, asks, do, brainstorms))
+        return outgoing_message(_render_queue(code, asks, do, brainstorms, goals))
 
 
 def _render_queue(
@@ -80,12 +92,15 @@ def _render_queue(
     asks: QueueSnapshot,
     do: QueueSnapshot,
     brainstorms: QueueSnapshot | None = None,
+    goals: QueueSnapshot | None = None,
 ) -> str:
     lines = ["Codex queue"]
     _append_section(lines, "Code jobs", code, _render_code_item)
     _append_section(lines, "Repository questions", asks, _render_ask_item)
     if brainstorms is not None:
         _append_section(lines, "Repository brainstorms", brainstorms, _render_brainstorm_item)
+    if goals is not None:
+        _append_section(lines, "Persistent goals", goals, _render_goal_item)
     _append_section(lines, "Full-access jobs", do, _render_do_item)
     return "\n".join(lines)
 
@@ -133,6 +148,13 @@ def _render_brainstorm_item(item: dict[str, Any]) -> str:
     return (
         f"{item['id']} {item['repo']}@{item['branch']} — "
         f"{item['trigger']}: {item['status']}"
+    )
+
+def _render_goal_item(item: dict[str, Any]) -> str:
+    status = str(item["status"]).replace("_", " ")
+    return (
+        f"{item['id']} {item['repo']}@{item['branch']} — "
+        f"{status}: {item['objective']}"
     )
 
 

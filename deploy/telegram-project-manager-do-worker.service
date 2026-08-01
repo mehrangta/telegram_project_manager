@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram Project Manager Do Worker
+Description=Telegram Project Manager Full-Access Do and Goal Worker
 After=network-online.target
 Wants=network-online.target
 

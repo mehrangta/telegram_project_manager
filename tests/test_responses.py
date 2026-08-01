@@ -161,6 +161,11 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertEqual(copied, ["d-12345678"])
         self.assertEqual(callbacks, ["command:/do status d-12345678"])
 
+    def test_goal_id_gets_copy_control(self):
+        outgoing = outgoing_message("Codex goal\nGoal ID: g-12345678")
+        copied = [button.copy_text for row in outgoing.keyboard for button in row if button.copy_text]
+        self.assertEqual(copied, ["g-12345678"])
+
     def test_copy_button_rejects_telegram_limit_violation(self):
         with self.assertRaises(ValueError):
             InlineButton("Copy", copy_text="x" * 257)

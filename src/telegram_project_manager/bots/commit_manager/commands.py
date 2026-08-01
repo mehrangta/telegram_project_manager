@@ -101,6 +101,8 @@ Commands:
 /do <job> [images] (active repository; admin)
 /do --host <job> [images] (private admin; full host access)
 /do status [d-job_id]
+/goal set <description>
+/goal view|edit|pause|resume|clear
 /queue
 /brainstorm
 /code #123 [--skip-plan]

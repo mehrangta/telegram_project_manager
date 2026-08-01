@@ -56,8 +56,6 @@ class DoService:
         self.payload_root = payload_root.resolve()
         self.max_outstanding = max_outstanding
         self.max_concurrent = max_concurrent
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._active_lanes: set[str] = set()
 
     def validate_repo(self, *, source_path: str, repo: str) -> str:
         return self.workspaces.validate_source(source_path=source_path, repo=repo)
@@ -222,58 +220,35 @@ class DoService:
         return normalized[: DO_QUEUE_REQUEST_MAX_LENGTH - 1].rstrip() + "…"
 
     async def run_worker(self) -> None:
+        from telegram_project_manager.bots.do_manager.worker import FullAccessWorker
+
+        await FullAccessWorker(do_service=self).run()
+
+    async def recover(self) -> None:
         for job_id in self.db.mark_running_do_jobs_interrupted():
             await self.reporter.refresh(job_id, force=True)
-        try:
-            while True:
-                self._reap_finished()
-                available = self.max_concurrent - len(self._tasks)
-                if available > 0:
-                    queued = list(reversed(self.db.list_do_jobs(statuses=("queued",), limit=100)))
-                    for job in queued:
-                        lane = str(job["lane"])
-                        if available <= 0:
-                            break
-                        if lane in self._active_lanes or not self.db.claim_do_job(str(job["id"])):
-                            continue
-                        job_id = str(job["id"])
-                        self._active_lanes.add(lane)
-                        task = asyncio.create_task(self._execute(job_id), name=f"do-worker-{job_id}")
-                        self._tasks[job_id] = task
-                        available -= 1
-                await asyncio.sleep(0.5)
-        finally:
-            active = tuple(self._tasks.items())
-            for job_id, _ in active:
-                await self.codex.interrupt(job_id)
-                self.db.update_do_job(
-                    job_id,
-                    {"status": "interrupted", "error": "Do worker stopped during execution."},
-                    allowed_statuses=("running",),
-                )
-            for _, task in active:
-                task.cancel()
-            if active:
-                await asyncio.gather(*(task for _, task in active), return_exceptions=True)
-            self._tasks.clear()
-            self._active_lanes.clear()
 
-    def _reap_finished(self) -> None:
-        for job_id, task in tuple(self._tasks.items()):
-            if not task.done():
-                continue
-            job = self.db.get_do_job(job_id)
-            if job:
-                self._active_lanes.discard(str(job["lane"]))
-            self._tasks.pop(job_id, None)
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logging.exception("Unhandled do worker task failure %s", job_id)
+    def queued_jobs(self) -> list[dict[str, Any]]:
+        return list(reversed(self.db.list_do_jobs(statuses=("queued",), limit=100)))
 
-    async def _execute(self, do_id: str) -> None:
+    def claim(self, job_id: str) -> bool:
+        return self.db.claim_do_job(job_id)
+
+    @staticmethod
+    def lane(job: dict[str, Any]) -> str:
+        return str(job["lane"])
+
+    async def interrupt(self, job_id: str) -> None:
+        await self.codex.interrupt(job_id)
+
+    def mark_stopped(self, job_id: str) -> None:
+        self.db.update_do_job(
+            job_id,
+            {"status": "interrupted", "error": "Do worker stopped during execution."},
+            allowed_statuses=("running",),
+        )
+
+    async def execute(self, do_id: str) -> None:
         job = self.db.get_do_job(do_id)
         if not job:
             return
