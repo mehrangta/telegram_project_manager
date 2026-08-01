@@ -19,7 +19,11 @@ from telegram_project_manager.bots.codex_queue.commands import CodexQueueManager
 from telegram_project_manager.bots.do_manager.commands import DoManager
 from telegram_project_manager.bots.do_manager.progress import DoProgressReporter
 from telegram_project_manager.bots.do_manager.service import DoService
+from telegram_project_manager.bots.do_manager.worker import FullAccessWorker
 from telegram_project_manager.bots.do_manager.workspace import DoWorkspaceService
+from telegram_project_manager.bots.goal_manager.commands import GoalManager
+from telegram_project_manager.bots.goal_manager.progress import GoalProgressReporter
+from telegram_project_manager.bots.goal_manager.service import GoalService
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
@@ -194,12 +198,21 @@ async def run_bot(db: Database) -> None:
         payload_root=db.path.parent / "do-payloads",
     )
     do_manager = DoManager(db=db, service=do_service)
+    goal_reporter = GoalProgressReporter(db, bot)
+    goal_service = GoalService(
+        db=db,
+        codex=codex,
+        reporter=goal_reporter,
+        workspaces=do_workspaces,
+    )
+    goal_manager = GoalManager(db=db, service=goal_service)
     codex_queue_manager = CodexQueueManager(
         db=db,
         code_service=code_service,
         ask_service=ask_service,
         do_service=do_service,
         brainstorm_service=brainstorm_service,
+        goal_service=goal_service,
     )
     code_manager = CodeManager(
         db=db,
@@ -227,6 +240,7 @@ async def run_bot(db: Database) -> None:
         db=db,
         handlers=[
             codex_queue_manager,
+            goal_manager,
             do_manager,
             ask_manager,
             brainstorm_manager,
@@ -262,20 +276,30 @@ async def run_do_worker(db: Database) -> None:
         lambda: db.get_setting("codex_base_url", ""),
         lambda role: resolve_codex_model(db.get_setting, role),
     )
-    reporter = DoProgressReporter(db, bot)
-    service = DoService(
+    do_reporter = DoProgressReporter(db, bot)
+    workspaces = DoWorkspaceService(
+        repositories=repositories,
+        root=db.path.parent / "do-workspaces",
+    )
+    do_service = DoService(
         db=db,
         codex=codex,
         bot=bot,
-        reporter=reporter,
-        workspaces=DoWorkspaceService(
-            repositories=repositories,
-            root=db.path.parent / "do-workspaces",
-        ),
+        reporter=do_reporter,
+        workspaces=workspaces,
         host_working_directory=Path.cwd().resolve(),
         payload_root=db.path.parent / "do-payloads",
     )
+    goal_service = GoalService(
+        db=db,
+        codex=codex,
+        reporter=GoalProgressReporter(db, bot),
+        workspaces=workspaces,
+    )
     try:
-        await service.run_worker()
+        await FullAccessWorker(
+            do_service=do_service,
+            goal_service=goal_service,
+        ).run()
     finally:
         await codex.close()

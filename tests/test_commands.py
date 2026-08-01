@@ -21,6 +21,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("active repository", help_text)
         self.assertIn("/do --host <job>", help_text)
         self.assertIn("/do status", help_text)
+        self.assertIn("/goal set", help_text)
         self.assertIn("/queue", help_text)
         self.assertIn("/brainstorm", help_text)
         self.assertIn("/repo brainstorm schedule", help_text)
@@ -101,6 +102,12 @@ class CommandTests(unittest.TestCase):
                 brainstorm_table = upgraded.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'brainstorm_configs'"
                 ).fetchone()
+                goal_table = upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'goals'"
+                ).fetchone()
+                goal_event_table = upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'goal_events'"
+                ).fetchone()
             self.assertIn("telegram_thread_id", plan_columns)
             self.assertIn("telegram_thread_id", draft_columns)
             self.assertIn("local_repo_path", draft_columns)
@@ -117,6 +124,8 @@ class CommandTests(unittest.TestCase):
             self.assertIsNotNone(issue_list_table)
             self.assertIsNotNone(pull_request_list_table)
             self.assertIsNotNone(brainstorm_table)
+            self.assertIsNotNone(goal_table)
+            self.assertIsNotNone(goal_event_table)
             self.assertIsNone(db.get_brainstorm_config("owner/repo"))
 
     def test_database_upgrade_marks_existing_delivery_operations_as_deploy(self):

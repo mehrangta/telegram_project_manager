@@ -60,7 +60,7 @@ alias and `python -m telegram_project_manager` run the same CLI. The global
 | --- | --- |
 | `telegram-project-manager [--db <path>] init-db` | Initialize or upgrade the SQLite database. |
 | `telegram-project-manager [--db <path>] run` | Start the Telegram polling service. |
-| `telegram-project-manager [--db <path>] run-do-worker` | Start the durable `/do` worker. |
+| `telegram-project-manager [--db <path>] run-do-worker` | Start the durable full-access `/do` and `/goal` worker. |
 | `telegram-project-manager [--db <path>] admin add <telegram_user_id> [--username <username>]` | Register a Telegram administrator. |
 | `telegram-project-manager [--db <path>] admin remove <telegram_user_id>` | Remove a registered administrator. |
 | `telegram-project-manager [--db <path>] config show` | Show settings with secret values redacted. |
@@ -155,6 +155,12 @@ plans can be controlled only from their originating chat or topic.
 | `/do <job> [images]` | Queue writable Codex work in the active repository's persistent workspace. |
 | `/do --host <job> [images]` | Queue a host-wide writable job; available only in a private admin chat. |
 | `/do status [d-12345678]` | Show one `/do` job or recent jobs in the current scope. |
+| `/goal` or `/goal view` | Show the persistent goal for the current chat or topic. |
+| `/goal set <description>` | Set one persistent repository goal for the current chat or topic and begin work. |
+| `/goal edit <updated goal>` | Replace the objective; an active turn restarts with the new revision. |
+| `/goal pause` | Pause future work and interrupt an active goal turn. |
+| `/goal resume` | Resume a paused or blocked goal. |
+| `/goal clear` | Stop and remove the current goal. |
 
 #### Code jobs, pull requests, merges, and deployments
 
@@ -215,13 +221,18 @@ replies without an explicit job ID.
   `/repo brainstorm schedule owner/repository daily 09:00` and
   `/repo brainstorm enable owner/repository`; schedule times are UTC, and
   disabling preserves the cadence and destination.
-  `/do` runs writable Codex work in a persistent repository workspace; its
-  separate worker keeps queued jobs independent from Telegram polling.
-- **Codex queue:** `/queue` shows `/code`, `/ask`, `/brainstorm`, and `/do` work currently
+  `/do` runs writable Codex work in a persistent repository workspace. `/goal`
+  pins the current repository and keeps making bounded progress toward one
+  durable objective per exact chat or forum topic until it completes, is
+  blocked, is paused, or is cleared. Goal edits are revisioned, and failed or
+  interrupted turns block instead of replaying potentially non-idempotent work.
+  The separate full-access worker keeps both workflows independent from
+  Telegram polling and serializes writes to the same repository workspace.
+- **Codex queue:** `/queue` shows `/code`, `/ask`, `/brainstorm`, `/goal`, and `/do` work currently
   running or queued for the current chat or exact forum topic. It excludes code
   jobs paused for input, approval, CI, retry, merge, deployment, or completion.
   Counts are scoped rather than global; `/ask` and `/brainstorm` entries are in
-  memory and vanish after a bot restart, while `/do` queue state is durable.
+  memory and vanish after a bot restart, while `/do` and `/goal` state is durable.
 - **Images:** `/issue`, `/edit`, `/ask`, and `/do` accept JPEG, PNG, and GIF
   attachments, with up to 10 images, 10 MB each, and 20 MB total.
 - **Merge and deployment:** `/merge` squash-merges a ready pull request without
@@ -237,7 +248,7 @@ replies without an explicit job ID.
 
 ## Safety
 
-> **Warning:** `/ask`, `/brainstorm`, `/code`, and `/do` run Codex with full host filesystem
+> **Warning:** `/ask`, `/brainstorm`, `/code`, `/do`, and `/goal` run Codex with full host filesystem
 > access and unrestricted outbound network access. Prompt restrictions are not
 > sandbox-enforced. Use only trusted repositories and monitor the environment.
 
@@ -267,7 +278,7 @@ an absolute path to a writable normal or bare Git repository:
 The cache's literal `origin` must match `owner/repository`. Managed caches created
 by `/repo setup` live under the database directory's `repos` folder.
 
-Durable `/do` jobs require a separate worker:
+Durable `/do` jobs and persistent `/goal` work require a separate worker:
 
 ```bash
 uv run telegram-project-manager run-do-worker
