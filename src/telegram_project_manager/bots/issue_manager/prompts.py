@@ -28,7 +28,8 @@ def build_title_prompt(request_text: str, repo: str) -> str:
 Issue body:
 {request_text}
 
-Return the title only.
+Return exactly one JSON object with a non-empty string field named "title".
+Do not include markdown or commentary.
 """
 
 
@@ -55,7 +56,8 @@ Previous title feedback:
 New title feedback:
 {new_feedback}
 
-Return the revised title only. Do not rewrite the issue body.
+Return exactly one JSON object with a non-empty string field named "title".
+Do not include markdown or commentary. Do not rewrite the issue body.
 """
 
 

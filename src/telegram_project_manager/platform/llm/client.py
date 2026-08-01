@@ -142,22 +142,22 @@ class OpenAICompatibleClient:
         if not isinstance(response, dict):
             raise LlmError("LLM structured response is invalid")
         parsing_error = response.get("parsing_error")
-        if parsing_error:
-            raise LlmError(f"LLM returned invalid structured output: {parsing_error}")
-
-        parsed = _structured_response_object(response)
-        successful_raw = response.get("raw")
+        raw = response.get("raw")
+        parsed = None if parsing_error else _structured_response_object(response)
+        successful_raw = raw
         if parsed is None:
-            repair_input = [
-                *invocation_messages,
-                HumanMessage(content=_structured_output_repair_prompt(schema)),
-            ]
+            repair_input = list(invocation_messages)
+            if isinstance(raw, AIMessage):
+                repair_input.append(raw)
+            repair_input.append(HumanMessage(content=_structured_output_repair_prompt(schema)))
             try:
                 successful_raw = chat_model.invoke(repair_input)
             except Exception as exc:
                 raise LlmError(f"LLM request failed: {exc}") from exc
             parsed = _raw_message_object(successful_raw)
         if parsed is None:
+            if parsing_error:
+                raise LlmError("LLM returned invalid structured output after repair")
             raise LlmError("LLM structured response missing parsed object")
         if history is not None:
             content = _raw_message_text(successful_raw) or json.dumps(parsed)
