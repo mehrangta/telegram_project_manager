@@ -260,6 +260,7 @@ class FakeBot:
         self.edited_options = []
         self.send_calls = 0
         self.fail_send_at = None
+        self.edit_error = None
         self.deleted = []
         self.fail_delete = False
 
@@ -277,6 +278,8 @@ class FakeBot:
         self.deleted.append((chat_id, message_id))
 
     def edit_message_text(self, chat_id, message_id, text, **options):
+        if self.edit_error:
+            raise self.edit_error
         self.edited.append((chat_id, message_id, text))
         self.edited_options.append(options)
         return {"message_id": message_id}
@@ -583,6 +586,7 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
                     url=f"https://github.com/owner/repo/issues/{issue_number}",
                     comments=(),
                 )
+
                 job_ids.append(
                     await self.service.create_job(
                         chat_id=10,
@@ -632,6 +636,50 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
             for release in blocking_codex.releases:
                 release.set()
             await self.service.shutdown()
+
+    async def test_progress_update_failure_is_logged_without_interrupting_activity(self):
+        job_id = "c-progress1"
+        self.db.create_code_job(
+            {
+                "id": job_id,
+                "telegram_chat_id": 10,
+                "telegram_user_id": 20,
+                "telegram_thread_id": None,
+                "repo": "owner/repo",
+                "issue_number": 12,
+                "issue_title": "Broken handler",
+                "issue_url": "https://github.com/owner/repo/issues/12",
+                "issue_context_json": {},
+                "base_branch": "main",
+                "target_branch": "codex/issue-12",
+                "workspace_path": "/tmp/job",
+                "source_repo_path": "/tmp/repo",
+                "status": "coding",
+                "resume_phase": "code",
+                "skip_plan": False,
+            }
+        )
+        self.db.update_code_job(job_id, {"telegram_message_id": 77})
+        self.bot.edit_error = TelegramBotApiError("Temporary failure in name resolution")
+
+        with self.assertLogs(level="WARNING") as logs:
+            await self.service.reporter.activity(
+                job_id,
+                {"kind": "phase", "text": "Implementing issue"},
+                force=True,
+            )
+
+        job = self.db.get_code_job(job_id)
+        self.assertEqual(job["latest_activity"], "Implementing issue")
+        self.assertIn("Failed to refresh code job", "\n".join(logs.output))
+        with self.db.session() as conn:
+            audit = conn.execute(
+                "SELECT action,status,details_json FROM audit_events WHERE plan_id = ?",
+                (job_id,),
+            ).fetchone()
+        self.assertEqual(audit["action"], "code.progress")
+        self.assertEqual(audit["status"], "failed")
+        self.assertNotIn("sk-", audit["details_json"])
 
     async def test_plan_approval_runs_code_and_marks_draft_pr_ready(self):
         job_id = await self.service.create_job(chat_id=10, user_id=20, thread_id=30, issue=self.issue, base_branch="main", source_path="/cache/owner-repo.git", skip_plan=False)

@@ -43,7 +43,11 @@ class CodeProgressReporter:
         if activity:
             self.db.update_code_job(job_id, {"latest_activity": activity})
             self.db.add_code_job_event(job_id, str(event.get("kind") or "progress"), {"text": activity})
-        await self.refresh(job_id, force=force)
+        try:
+            await self.refresh(job_id, force=force)
+        except TelegramBotApiError as exc:
+            logging.warning("Failed to refresh code job %s: %s", job_id, exc)
+            self.db.audit("code.progress", "failed", {"error": _safe_error(exc)}, job_id)
 
     async def refresh(self, job_id: str, *, force: bool = False) -> None:
         async with self._locks[job_id]:
@@ -466,6 +470,10 @@ def _event_summary(event: dict[str, Any]) -> str:
         )
         return active[:500]
     return ""
+
+
+def _safe_error(exc: BaseException) -> str:
+    return " ".join(str(exc).split())[:1000] or exc.__class__.__name__
 
 
 def _recent_activity(events: list[dict[str, Any]], created_at: int) -> list[str]:
