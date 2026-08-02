@@ -1816,13 +1816,17 @@ class CodeSafetyTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(event["text"], "stream failed (upstream_reset, 502)")
 
-    def test_codex_config_sets_environment_and_runtime_base_url(self):
+    def test_codex_config_uses_custom_responses_provider_for_local_compaction(self):
         config = _codex_config("secret", "http://codex.example.test")
         self.assertEqual(config.env["OPENAI_BASE_URL"], "http://codex.example.test")
         self.assertEqual(
             config.config_overrides,
             (
-                'openai_base_url="http://codex.example.test"',
+                'model_provider="telegram_project_manager"',
+                'model_providers.telegram_project_manager.name="Telegram Project Manager"',
+                'model_providers.telegram_project_manager.base_url="http://codex.example.test"',
+                'model_providers.telegram_project_manager.env_key="OPENAI_API_KEY"',
+                'model_providers.telegram_project_manager.wire_api="responses"',
                 "sandbox_workspace_write.network_access=true",
             ),
         )

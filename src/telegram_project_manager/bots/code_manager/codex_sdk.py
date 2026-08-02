@@ -336,13 +336,18 @@ def _sanitize_text(value: str) -> str:
 
 
 def _codex_config(api_key: str, base_url: str) -> CodexConfig:
+    provider = "telegram_project_manager"
     return CodexConfig(
         env={
             "OPENAI_API_KEY": api_key,
             "OPENAI_BASE_URL": base_url,
         },
         config_overrides=(
-            f"openai_base_url={json.dumps(base_url)}",
+            f"model_provider={json.dumps(provider)}",
+            f"model_providers.{provider}.name={json.dumps('Telegram Project Manager')}",
+            f"model_providers.{provider}.base_url={json.dumps(base_url)}",
+            f"model_providers.{provider}.env_key={json.dumps('OPENAI_API_KEY')}",
+            f"model_providers.{provider}.wire_api={json.dumps('responses')}",
             "sandbox_workspace_write.network_access=true",
         ),
     )
