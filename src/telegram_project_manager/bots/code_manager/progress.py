@@ -105,7 +105,14 @@ class CodeProgressReporter:
                     f"Status: /code status {job['id']}",
                 ]
             )
-        outgoing = outgoing_message("\n".join(lines), expandable_prefixes=("Error:",))
+        reply_to_message_id = (
+            job.get("telegram_message_id") if job["status"] == "ready" else None
+        )
+        outgoing = outgoing_message(
+            "\n".join(lines),
+            expandable_prefixes=("Error:",),
+            reply_to_message_id=reply_to_message_id,
+        )
         await asyncio.to_thread(
             self.bot.send_message,
             int(job["telegram_chat_id"]),
@@ -114,6 +121,7 @@ class CodeProgressReporter:
             parse_mode=outgoing.parse_mode,
             reply_markup=outgoing.reply_markup(),
             disable_link_preview=outgoing.disable_link_preview,
+            reply_to_message_id=outgoing.reply_to_message_id,
         )
 
     async def notify_plan_ready(self, job_id: str) -> None:
