@@ -1392,6 +1392,57 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_configuration_change_restarts_cached_client(self):
+        state = {
+            "api_key": "first-key",
+            "base_url": "https://first.example.test",
+        }
+
+        class Client:
+            instances = []
+
+            def __init__(self, config):
+                self.config = config
+                self.closed = False
+                self.instances.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def login_api_key(self, api_key):
+                self.api_key = api_key
+
+            async def account(self, *, refresh_token):
+                return SimpleNamespace(account=None, requires_openai_auth=False)
+
+            async def close(self):
+                self.closed = True
+
+        adapter = CodexSdkAdapter(
+            lambda: state["api_key"],
+            lambda: state["base_url"],
+            lambda role: "coding-model",
+        )
+
+        with patch(
+            "telegram_project_manager.bots.code_manager.codex_sdk.AsyncCodex",
+            Client,
+        ):
+            first = await adapter.ensure_started()
+            state["api_key"] = "second-key"
+            state["base_url"] = "https://second.example.test/"
+            second = await adapter.ensure_started()
+
+        self.assertIsNot(first, second)
+        self.assertTrue(first.closed)
+        self.assertEqual(second.api_key, "second-key")
+        self.assertIn(
+            'model_providers.telegram_project_manager.base_url="https://second.example.test"',
+            second.config.config_overrides,
+        )
+        await adapter.close()
+        self.assertTrue(second.closed)
+
     async def test_custom_provider_authentication_does_not_require_account_object(self):
         class Client:
             def __init__(self, config):
@@ -1499,6 +1550,7 @@ class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         client = Client()
         adapter._client = client
+        adapter._client_credentials = ("secret", "https://codex.example.test")
 
         async def callback(*args):
             return None
@@ -1566,6 +1618,7 @@ class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         client = Client()
         adapter._client = client
+        adapter._client_credentials = ("secret", "https://codex.example.test")
 
         async def callback(*args):
             return None

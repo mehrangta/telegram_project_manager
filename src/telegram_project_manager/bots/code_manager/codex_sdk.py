@@ -35,26 +35,28 @@ class CodexSdkAdapter:
         self.base_url_provider = base_url_provider
         self.model_provider = model_provider
         self._client: AsyncCodex | None = None
+        self._client_credentials: tuple[str, str] | None = None
         self._start_lock = asyncio.Lock()
         self._active_turns: dict[str, Any] = {}
 
     async def ensure_started(self) -> AsyncCodex:
-        if self._client is not None:
+        credentials = self._credentials()
+        if self._client is not None and self._client_credentials == credentials:
             return self._client
         async with self._start_lock:
-            if self._client is not None:
+            credentials = self._credentials()
+            if self._client is not None and self._client_credentials == credentials:
                 return self._client
-            api_key = self.api_key_provider().strip()
-            base_url = self.base_url_provider().strip().rstrip("/")
-            if not api_key:
-                raise CodexSdkError(
-                    "Codex API key is not configured. Admin private chat: "
-                    "/config set codex_api_key <key>"
-                )
-            if not base_url:
-                raise CodexSdkError(
-                    "Codex provider is incomplete. Configure codex_base_url."
-                )
+            if self._client is not None:
+                if self._active_turns:
+                    raise CodexSdkError(
+                        "Codex provider configuration changed while jobs are running; "
+                        "retry after the active jobs finish"
+                    )
+                await self._client.close()
+                self._client = None
+                self._client_credentials = None
+            api_key, base_url = credentials
             client = AsyncCodex(_codex_config(api_key, base_url))
             try:
                 await client.__aenter__()
@@ -68,12 +70,28 @@ class CodexSdkAdapter:
                     raise
                 raise CodexSdkError(f"Codex authentication failed: {exc}") from exc
             self._client = client
+            self._client_credentials = credentials
             return client
 
     async def close(self) -> None:
         client, self._client = self._client, None
+        self._client_credentials = None
         if client is not None:
             await client.close()
+
+    def _credentials(self) -> tuple[str, str]:
+        api_key = self.api_key_provider().strip()
+        base_url = self.base_url_provider().strip().rstrip("/")
+        if not api_key:
+            raise CodexSdkError(
+                "Codex API key is not configured. Admin private chat: "
+                "/config set codex_api_key <key>"
+            )
+        if not base_url:
+            raise CodexSdkError(
+                "Codex provider is incomplete. Configure codex_base_url."
+            )
+        return api_key, base_url
 
     async def interrupt(self, job_id: str) -> None:
         handle = self._active_turns.get(job_id)
