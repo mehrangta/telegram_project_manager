@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from openai_codex import LocalImageInput, Sandbox, TextInput
 from openai_codex.types import ReasoningEffort
@@ -1390,6 +1392,73 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexSdkAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_custom_provider_authentication_does_not_require_account_object(self):
+        class Client:
+            def __init__(self, config):
+                self.config = config
+                self.closed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def login_api_key(self, api_key):
+                self.api_key = api_key
+
+            async def account(self, *, refresh_token):
+                return SimpleNamespace(account=None, requires_openai_auth=False)
+
+            async def close(self):
+                self.closed = True
+
+        adapter = CodexSdkAdapter(
+            lambda: "secret",
+            lambda: "https://codex.example.test",
+            lambda role: "coding-model",
+        )
+
+        with patch(
+            "telegram_project_manager.bots.code_manager.codex_sdk.AsyncCodex",
+            Client,
+        ):
+            client = await adapter.ensure_started()
+
+        self.assertIs(client, adapter._client)
+        self.assertEqual(client.api_key, "secret")
+        self.assertFalse(client.closed)
+        await adapter.close()
+        self.assertTrue(client.closed)
+
+    async def test_authentication_still_fails_when_provider_requires_login(self):
+        class Client:
+            def __init__(self, config):
+                self.closed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def login_api_key(self, api_key):
+                return None
+
+            async def account(self, *, refresh_token):
+                return SimpleNamespace(account=None, requires_openai_auth=True)
+
+            async def close(self):
+                self.closed = True
+
+        adapter = CodexSdkAdapter(
+            lambda: "secret",
+            lambda: "https://codex.example.test",
+            lambda role: "coding-model",
+        )
+
+        with patch(
+            "telegram_project_manager.bots.code_manager.codex_sdk.AsyncCodex",
+            Client,
+        ), self.assertRaisesRegex(CodexSdkError, "active account"):
+            await adapter.ensure_started()
+
+        self.assertTrue(adapter._client is None)
+
     async def test_plain_text_turn_omits_output_schema(self):
         class Notification:
             def __init__(self, method, payload):

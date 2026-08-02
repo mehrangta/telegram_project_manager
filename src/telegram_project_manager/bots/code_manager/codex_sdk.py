@@ -60,7 +60,7 @@ class CodexSdkAdapter:
                 await client.__aenter__()
                 await client.login_api_key(api_key)
                 account = await client.account(refresh_token=False)
-                if not getattr(account, "account", None):
+                if getattr(account, "requires_openai_auth", True):
                     raise CodexSdkError("Codex authentication did not return an active account")
             except Exception as exc:
                 await client.close()
