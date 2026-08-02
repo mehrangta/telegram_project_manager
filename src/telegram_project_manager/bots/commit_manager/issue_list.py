@@ -15,10 +15,12 @@ from telegram_project_manager.platform.responses import (
     OutgoingMessage,
     copy_button,
 )
-from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.storage.db import Database, LatestCodeJobStatus
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
 
 ISSUE_LIST_REFRESH_SECONDS = 60.0
+TELEGRAM_CHANNEL_CHAT_ID_MIN = -1_997_852_516_352
+TELEGRAM_CHANNEL_CHAT_ID_MAX = -1_000_000_000_001
 
 
 class IssueListError(RuntimeError):
@@ -45,10 +47,10 @@ class IssueListService:
         async with self._locks[(chat_id, thread_id)]:
             try:
                 issues = await asyncio.to_thread(self.reader.list_open_issues, repo)
-                codex_statuses = self.db.get_latest_code_job_statuses(
+                codex_jobs = self.db.get_latest_code_job_statuses(
                     repo, (issue.number for issue in issues)
                 )
-                outgoing = self.render(repo, issues, codex_statuses)
+                outgoing = self.render(repo, issues, codex_jobs)
                 render_hash = self.render_hash(outgoing)
                 result = await asyncio.to_thread(
                     self.bot.send_message,
@@ -115,10 +117,10 @@ class IssueListService:
         for repo, repo_targets in grouped.items():
             try:
                 issues = await asyncio.to_thread(self.reader.list_open_issues, repo)
-                codex_statuses = self.db.get_latest_code_job_statuses(
+                codex_jobs = self.db.get_latest_code_job_statuses(
                     repo, (issue.number for issue in issues)
                 )
-                outgoing = self.render(repo, issues, codex_statuses)
+                outgoing = self.render(repo, issues, codex_jobs)
                 render_hash = self.render_hash(outgoing)
             except asyncio.CancelledError:
                 raise
@@ -201,7 +203,7 @@ class IssueListService:
     def render(
         repo: str,
         issues: list[IssueSummary],
-        codex_statuses: Mapping[int, str] | None = None,
+        codex_jobs: Mapping[int, LatestCodeJobStatus] | None = None,
     ) -> OutgoingMessage:
         escaped_repo = html.escape(repo)
         if not issues:
@@ -209,14 +211,15 @@ class IssueListService:
 
         lines = [f"Open issues for {escaped_repo}:"]
         keyboard = []
-        statuses = codex_statuses or {}
+        statuses = codex_jobs or {}
         for issue in issues:
             command = f"/code {repo}#{issue.number}"
             if len(command) > COPY_TEXT_LIMIT:
                 command = f"/code #{issue.number}"
-            raw_status = str(statuses.get(issue.number) or "")
+            codex_job = statuses.get(issue.number)
+            raw_status = str(codex_job.get("status") or "") if codex_job else ""
             status = " ".join(raw_status.replace("_", " ").split())
-            status_suffix = f" — Codex: {html.escape(status)}" if status else ""
+            status_suffix = _codex_status_suffix(status, codex_job)
             lines.append(
                 f'- <a href="{html.escape(issue.url, quote=True)}">#{issue.number}</a> — '
                 f"{html.escape(issue.title)}{status_suffix}\n"
@@ -235,6 +238,36 @@ class IssueListService:
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+def _codex_status_suffix(
+    status: str, codex_job: LatestCodeJobStatus | None
+) -> str:
+    if not status:
+        return ""
+    escaped_label = html.escape(f"Codex: {status}")
+    message_url = _telegram_message_url(codex_job) if status == "ready" else None
+    if not message_url:
+        return f" — {escaped_label}"
+    return f' — <a href="{html.escape(message_url, quote=True)}">{escaped_label}</a>'
+
+
+def _telegram_message_url(codex_job: LatestCodeJobStatus | None) -> str | None:
+    if not codex_job:
+        return None
+    chat_id = codex_job["telegram_chat_id"]
+    message_id = codex_job.get("telegram_message_id")
+    if (
+        not TELEGRAM_CHANNEL_CHAT_ID_MIN <= chat_id <= TELEGRAM_CHANNEL_CHAT_ID_MAX
+        or message_id is None
+        or message_id <= 0
+    ):
+        return None
+    channel_id = -chat_id - 1_000_000_000_000
+    thread_id = codex_job.get("telegram_thread_id")
+    if thread_id is not None and thread_id > 0:
+        return f"https://t.me/c/{channel_id}/{thread_id}/{message_id}"
+    return f"https://t.me/c/{channel_id}/{message_id}"
 
 
 def _same_target(target: dict[str, Any] | None, message_id: int, repo: str) -> bool:
