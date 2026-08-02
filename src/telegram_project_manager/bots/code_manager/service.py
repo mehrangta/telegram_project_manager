@@ -185,6 +185,11 @@ class CodeJobService:
                     await self.reporter.refresh(str(job["id"]), force=True)
                 except Exception:
                     logging.exception("Failed to refresh interrupted code job %s", job["id"])
+            elif (
+                job["status"] in {"awaiting_clarification", "awaiting_approval"}
+                and job.get("plan_and_code")
+            ):
+                await self._continue_plan_and_code(str(job["id"]))
         if not self._feedback_task or self._feedback_task.done():
             self._feedback_task = asyncio.create_task(
                 self._monitor_plan_feedback(), name="github-plan-feedback"
@@ -211,7 +216,10 @@ class CodeJobService:
         base_branch: str,
         source_path: str,
         skip_plan: bool,
+        plan_and_code: bool = False,
     ) -> str:
+        if skip_plan and plan_and_code:
+            raise ValueError("Choose either skip plan or Plan & Code, not both.")
         resolved_source = await asyncio.to_thread(
             self.workspaces.validate_source,
             source_path=source_path,
@@ -245,12 +253,18 @@ class CodeJobService:
                 "status": status,
                 "resume_phase": phase,
                 "skip_plan": skip_plan,
+                "plan_and_code": plan_and_code,
             }
         )
         self.db.audit(
             "code.job",
             "queued",
-            {"repo": issue.repo, "issue": issue.number, "skip_plan": skip_plan},
+            {
+                "repo": issue.repo,
+                "issue": issue.number,
+                "skip_plan": skip_plan,
+                "plan_and_code": plan_and_code,
+            },
             job_id,
         )
         await self.reporter.create(job_id)
@@ -997,10 +1011,64 @@ class CodeJobService:
         self.db.mark_code_plan_feedback_applied(job_id, pending_feedback_ids, revision)
         self.db.audit("code.plan", "ok", {"revision": revision}, job_id)
         await self._publish_plan_questions(job_id)
+        if self.db.queue_pending_code_plan_feedback(job_id):
+            await self.reporter.dismiss_plan_ready(job_id)
+            await self.reporter.refresh(job_id, force=True)
+            self._schedule(job_id, "plan")
+            return
+        if await self._continue_plan_and_code(job_id):
+            return
         await self._report_plan_ready(job_id)
         await self.reporter.refresh(job_id, force=True)
-        if self.db.queue_pending_code_plan_feedback(job_id):
-            self._schedule(job_id, "plan")
+
+    async def _continue_plan_and_code(self, job_id: str) -> bool:
+        job = self.db.get_code_job(job_id)
+        if not job or not job.get("plan_and_code"):
+            return False
+        status = str(job["status"])
+        if status == "awaiting_approval":
+            if not self.db.queue_plan_and_code(job_id):
+                return False
+            self.db.audit(
+                "code.approve",
+                "ok",
+                {"source": "plan_and_code"},
+                job_id,
+            )
+            await self.reporter.dismiss_plan_ready(job_id)
+            await self.reporter.refresh(job_id, force=True)
+            self._schedule(job_id, "code")
+            return True
+        if status != "awaiting_clarification" or job.get("auto_answered_questions"):
+            return False
+        plan_raw = job.get("plan_json")
+        if not isinstance(plan_raw, dict):
+            return False
+        plan = CodePlan.from_json(dict(plan_raw))
+        feedback = _recommended_plan_feedback(plan)
+        if feedback is None:
+            return False
+        revision = int(job.get("plan_revision") or 0)
+        if not self.db.queue_automatic_plan_feedback(
+            job_id,
+            source_id=f"plan-and-code:{job_id}:{revision}",
+            body=feedback,
+        ):
+            return False
+        self.db.audit(
+            "code.plan.feedback",
+            "queued",
+            {
+                "source": "automatic",
+                "revision": revision,
+                "answers": len(plan.questions),
+            },
+            job_id,
+        )
+        await self.reporter.dismiss_plan_ready(job_id)
+        await self.reporter.refresh(job_id, force=True)
+        self._schedule(job_id, "plan")
+        return True
 
     async def _run_code(self, job_id: str) -> None:
         job = self._require_job(job_id)
@@ -1589,6 +1657,20 @@ def _plan_questions_comment(job: dict[str, Any]) -> str:
     lines.extend(["", f"{PLAN_QUESTION_MARKER}{job['id']}:{revision} -->"])
     return "\n".join(lines)
 
+
+def _recommended_plan_feedback(plan: CodePlan) -> str | None:
+    if not plan.questions:
+        return None
+    answers: list[tuple[str, str]] = []
+    for question in plan.questions:
+        recommended = question.recommended_option.strip()
+        if not recommended or not question.options or recommended not in question.options:
+            return None
+        answers.append((question.prompt, recommended))
+    lines = ["Use the recommended option for every open plan question:"]
+    for index, (prompt, recommended) in enumerate(answers, 1):
+        lines.extend([f"{index}. {prompt}", f"Answer: {recommended}"])
+    return "\n".join(lines)
 
 def _ready_pr_body(job: dict[str, Any], result: CodeResult, files: list[str], sha: str) -> str:
     lines = [

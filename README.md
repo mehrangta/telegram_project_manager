@@ -166,7 +166,7 @@ plans can be controlled only from their originating chat or topic.
 
 | Command | Description |
 | --- | --- |
-| `/code [--skip-plan] <issue-reference>` | Start a code job, with planning unless `--skip-plan` is present. |
+| `/code [--skip-plan\|--plan-and-code] <issue-reference>` | Start a code job, with manual plan approval by default, immediate coding with `--skip-plan`, or automatic planning followed by coding with `--plan-and-code`. |
 | `/code approve c-12345678` | Approve an awaiting code-job plan. |
 | `/code edit c-12345678 <feedback>` | Revise an awaiting code-job plan. |
 | `/code discard c-12345678` | Discard a code job and its workspace. |
@@ -179,7 +179,10 @@ plans can be controlled only from their originating chat or topic.
 
 An issue reference may be `#123`, `123`, `owner/repository#123`, or a full
 GitHub issue URL. Replying `/code` to an Issue created message uses that issue;
-`--skip-plan` may still be included. When replying to a code-job message, the
+`--skip-plan` or `--plan-and-code` may still be included, but the two flags are
+mutually exclusive. Plan & Code automatically applies one batch of recommended
+answers when every open plan question provides a valid recommendation; otherwise
+it pauses for clarification. When replying to a code-job message, the
 plain text `approve`, `discard`, or `retry` runs that action, while other plain
 text is treated as plan feedback. `/merge` and `/deploy` may also be sent as
 replies without an explicit job ID.
