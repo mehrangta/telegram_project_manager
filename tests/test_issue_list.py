@@ -75,15 +75,18 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
         status,
         *,
         repo="owner/repo",
+        chat_id=20,
+        thread_id=None,
+        message_id=None,
         created_at=None,
         updated_at=None,
     ):
         self.db.create_code_job(
             {
                 "id": job_id,
-                "telegram_chat_id": 20,
+                "telegram_chat_id": chat_id,
                 "telegram_user_id": 10,
-                "telegram_thread_id": None,
+                "telegram_thread_id": thread_id,
                 "repo": repo,
                 "issue_number": issue_number,
                 "issue_title": "Issue",
@@ -98,6 +101,8 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
                 "skip_plan": False,
             }
         )
+        if message_id is not None:
+            self.db.update_code_job(job_id, {"telegram_message_id": message_id})
         if created_at is not None or updated_at is not None:
             with self.db.session() as conn:
                 conn.execute(
@@ -143,29 +148,154 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
         outgoing = self.service.render(
             "owner/repo",
             [issue(7)],
-            {7: "waiting_<unsafe&>"},
+            {
+                7: {
+                    "status": "waiting_<unsafe&>",
+                    "telegram_chat_id": 20,
+                    "telegram_thread_id": None,
+                    "telegram_message_id": None,
+                }
+            },
         )
 
         self.assertIn("Codex: waiting &lt;unsafe&amp;&gt;", outgoing.text)
 
+    def test_ready_status_links_to_supergroup_message(self):
+        outgoing = self.service.render(
+            "owner/repo",
+            [issue(7)],
+            {
+                7: {
+                    "status": "ready",
+                    "telegram_chat_id": -1001234567890,
+                    "telegram_thread_id": None,
+                    "telegram_message_id": 77,
+                }
+            },
+        )
+
+        self.assertIn(
+            '<a href="https://t.me/c/1234567890/77">Codex: ready</a>',
+            outgoing.text,
+        )
+
+    def test_ready_status_links_to_forum_topic_message(self):
+        outgoing = self.service.render(
+            "owner/repo",
+            [issue(7)],
+            {
+                7: {
+                    "status": "ready",
+                    "telegram_chat_id": -1001234567890,
+                    "telegram_thread_id": 42,
+                    "telegram_message_id": 77,
+                }
+            },
+        )
+
+        self.assertIn(
+            '<a href="https://t.me/c/1234567890/42/77">Codex: ready</a>',
+            outgoing.text,
+        )
+
+    def test_ready_status_falls_back_for_unsupported_message_targets(self):
+        cases = (
+            (20, None),
+            (-20, 77),
+            (-1001234567890, None),
+            (-1001234567890, 0),
+        )
+        for chat_id, message_id in cases:
+            with self.subTest(chat_id=chat_id, message_id=message_id):
+                outgoing = self.service.render(
+                    "owner/repo",
+                    [issue(7)],
+                    {
+                        7: {
+                            "status": "ready",
+                            "telegram_chat_id": chat_id,
+                            "telegram_thread_id": None,
+                            "telegram_message_id": message_id,
+                        }
+                    },
+                )
+
+                self.assertIn(" — Codex: ready\n", outgoing.text)
+                self.assertNotIn("t.me/c/", outgoing.text)
+
+    def test_non_ready_status_does_not_link_to_message(self):
+        outgoing = self.service.render(
+            "owner/repo",
+            [issue(7)],
+            {
+                7: {
+                    "status": "coding",
+                    "telegram_chat_id": -1001234567890,
+                    "telegram_thread_id": 42,
+                    "telegram_message_id": 77,
+                }
+            },
+        )
+
+        self.assertIn(" — Codex: coding\n", outgoing.text)
+        self.assertNotIn("t.me/c/", outgoing.text)
+
     def test_latest_status_lookup_is_deterministic_and_repo_scoped(self):
         self.create_code_job(
-            "c-00000001", 1, "ready", created_at=100, updated_at=300
+            "c-00000001",
+            1,
+            "ready",
+            chat_id=-1001111111111,
+            thread_id=7,
+            message_id=71,
+            created_at=100,
+            updated_at=300,
         )
         self.create_code_job(
-            "c-00000002", 1, "coding", created_at=200, updated_at=200
+            "c-00000002",
+            1,
+            "coding",
+            chat_id=-1002222222222,
+            thread_id=8,
+            message_id=72,
+            created_at=200,
+            updated_at=200,
         )
         self.create_code_job("c-00000003", 2, "discarded")
         self.create_code_job("c-00000004", 1, "failed", repo="owner/other")
 
         statuses = self.db.get_latest_code_job_statuses("owner/repo", [1, 2, 3])
 
-        self.assertEqual(statuses, {1: "coding", 2: "discarded"})
+        self.assertEqual(
+            statuses,
+            {
+                1: {
+                    "status": "coding",
+                    "telegram_chat_id": -1002222222222,
+                    "telegram_thread_id": 8,
+                    "telegram_message_id": 72,
+                },
+                2: {
+                    "status": "discarded",
+                    "telegram_chat_id": 20,
+                    "telegram_thread_id": None,
+                    "telegram_message_id": None,
+                },
+            },
+        )
         self.assertEqual(self.db.get_latest_code_job_statuses("owner/repo", []), {})
 
     def test_full_issue_list_with_statuses_stays_within_telegram_limit(self):
         issues = [issue(number) for number in range(1, 21)]
-        statuses = {number: "awaiting_approval" for number in range(1, 21)}
+        statuses = {
+            number: {
+                "status": "ready",
+                "telegram_chat_id": -1001234567890,
+                "telegram_thread_id": 42,
+                "telegram_message_id": number,
+            }
+            for number in range(1, 21)
+        }
 
         outgoing = self.service.render("owner/repo", issues, statuses)
 
@@ -232,15 +362,25 @@ class IssueListServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_only_transition_updates_tracked_message_once(self):
         self.reader.issues["owner/repo"] = [issue(1)]
-        self.create_code_job("c-00000001", 1, "planning")
+        self.create_code_job(
+            "c-00000001",
+            1,
+            "planning",
+            chat_id=-1001234567890,
+            thread_id=42,
+            message_id=77,
+        )
         await self.service.publish(chat_id=20, thread_id=None, repo="owner/repo")
-        self.db.update_code_job("c-00000001", {"status": "coding"})
+        self.db.update_code_job("c-00000001", {"status": "ready"})
 
         await self.service.refresh()
         await self.service.refresh()
 
         self.assertEqual(len(self.bot.edited), 1)
-        self.assertIn("Codex: coding", self.bot.edited[0][2])
+        self.assertIn(
+            '<a href="https://t.me/c/1234567890/42/77">Codex: ready</a>',
+            self.bot.edited[0][2],
+        )
 
     async def test_stale_refresh_snapshot_cannot_edit_replaced_message(self):
         self.reader.issues["owner/repo"] = [issue(1)]

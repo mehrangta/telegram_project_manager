@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, TypedDict
 
 
 CODE_JOB_QUEUED_STATUSES = (
@@ -16,6 +16,13 @@ CODE_JOB_QUEUED_STATUSES = (
     "queued_checks",
     "queued_rebase",
 )
+
+
+class LatestCodeJobStatus(TypedDict):
+    status: str
+    telegram_chat_id: int
+    telegram_thread_id: int | None
+    telegram_message_id: int | None
 
 
 class Database:
@@ -1978,7 +1985,7 @@ class Database:
 
     def get_latest_code_job_statuses(
         self, repo: str, issue_numbers: Iterable[int]
-    ) -> dict[int, str]:
+    ) -> dict[int, LatestCodeJobStatus]:
         numbers = tuple(sorted(set(issue_numbers)))
         if not numbers:
             return {}
@@ -1986,16 +1993,33 @@ class Database:
         with self.session() as conn:
             rows = conn.execute(
                 f"""
-                SELECT issue_number, status
+                SELECT issue_number, status, telegram_chat_id,
+                       telegram_thread_id, telegram_message_id
                 FROM code_jobs
                 WHERE repo = ? AND issue_number IN ({placeholders})
                 ORDER BY issue_number ASC, created_at DESC, updated_at DESC, id DESC
                 """,
                 (repo, *numbers),
             ).fetchall()
-        statuses: dict[int, str] = {}
+        statuses: dict[int, LatestCodeJobStatus] = {}
         for row in rows:
-            statuses.setdefault(int(row["issue_number"]), str(row["status"]))
+            statuses.setdefault(
+                int(row["issue_number"]),
+                {
+                    "status": str(row["status"]),
+                    "telegram_chat_id": int(row["telegram_chat_id"]),
+                    "telegram_thread_id": (
+                        int(row["telegram_thread_id"])
+                        if row["telegram_thread_id"] is not None
+                        else None
+                    ),
+                    "telegram_message_id": (
+                        int(row["telegram_message_id"])
+                        if row["telegram_message_id"] is not None
+                        else None
+                    ),
+                },
+            )
         return statuses
 
     def list_code_jobs(
