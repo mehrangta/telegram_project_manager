@@ -506,6 +506,7 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
                     callback_button("🔀 Confirm merge", f"command:/merge {job_id}"),
                     callback_button("✖️ Cancel", "cancel_merge"),
                 ),),
+                reply_to_message_id=callback.source_message_id,
             )
             await send_response(incoming, confirmation)
             return
@@ -522,7 +523,9 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             or ISSUE_CODE_ACTION_PATTERN.fullmatch(command)
         ):
             await delete_callback_source(callback)
-        if command.lower().startswith(("/deploy ", "/merge ")):
+        if command.lower().startswith("/merge "):
+            await delete_callback_source(callback)
+        elif command.lower().startswith("/deploy "):
             await asyncio.to_thread(
                 bot.edit_message_reply_markup,
                 incoming.chat_id,

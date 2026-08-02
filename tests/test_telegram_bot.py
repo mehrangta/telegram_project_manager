@@ -590,8 +590,38 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             confirmation_markup["inline_keyboard"][0][0]["callback_data"],
             "command:/merge c-abcdef12",
         )
-        self.assertEqual(bot.markup_edits, [(40, 21, {"inline_keyboard": []})])
-        self.assertEqual(bot.deleted, [])
+        self.assertEqual(bot.sent[0][3]["reply_to_message_id"], 20)
+        self.assertEqual(bot.markup_edits, [])
+        self.assertEqual(bot.deleted, [(40, 21)])
+
+    async def test_merge_delete_failure_does_not_block_dispatch(self):
+        class DeleteFailingBot(self.Bot):
+            def delete_message(self, chat_id, message_id):
+                raise TelegramBotApiError("message cannot be deleted")
+
+        bot = DeleteFailingBot([
+            self.callback(1, "query-1", "confirm_merge:c-abcdef12"),
+            self.callback(2, "query-2", "command:/merge c-abcdef12", message_id=21),
+        ])
+        router = self.Router()
+
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaises(PollingStopped):
+                await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/merge c-abcdef12"])
+        self.assertEqual(
+            bot.answers,
+            [
+                ("query-1", "Confirmation required"),
+                ("query-2", "Action requested"),
+            ],
+        )
+        self.assertEqual(len(bot.sent), 2)
+        self.assertEqual(bot.markup_edits, [])
+        self.assertTrue(
+            any("callback source deletion failed" in line for line in logs.output)
+        )
 
     async def test_non_admin_callback_is_silently_ignored(self):
         bot = self.Bot([
