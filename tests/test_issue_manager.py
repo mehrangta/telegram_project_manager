@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
+from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.schemas import IssueDraft
 from telegram_project_manager.bots.issue_manager.schemas import PossibleCause, RelevantFile
 from telegram_project_manager.integrations.gh.issues import IssueResult
@@ -238,7 +239,89 @@ class IssueManagerTests(unittest.TestCase):
             )
             self.assertEqual(buttons[2]["text"], "↗ Issue")
             self.assertEqual(buttons[2]["url"], "https://github.com/owner/repo/issues/12")
+            close_button = response.reply_markup()["inline_keyboard"][1][0]
+            self.assertEqual(close_button["text"], "✖️ Close")
+            self.assertEqual(close_button["callback_data"], "command:/close i-abcdef12")
             self.assertEqual(response.reply_to_message_id, 41)
+
+    def test_close_created_issue(self):
+        class SuccessfulExecution:
+            def __init__(self):
+                self.calls = []
+
+            def close(self, draft_id, chat_id, thread_id):
+                self.calls.append((draft_id, chat_id, thread_id))
+                return IssueResult(
+                    repo="owner/repo",
+                    number=12,
+                    url="https://github.com/owner/repo/issues/12",
+                    title="Broken button",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            execution = SuccessfulExecution()
+            manager = IssueManager(db, FakePlanner(), execution)
+
+            response = manager.close(
+                IncomingMessage(20, 10, "admin", "/close i-abcdef12", thread_id=4),
+                "i-abcdef12",
+            )
+
+            self.assertIn("Issue closed.", response)
+            self.assertIn("Issue: #12", response)
+            self.assertEqual(execution.calls, [("i-abcdef12", 20, 4)])
+
+    def test_close_service_persists_status_and_is_idempotent(self):
+        class Executor:
+            def __init__(self):
+                self.calls = []
+
+            def close_issue(self, repo, number):
+                self.calls.append((repo, number))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            self.create_pending_draft(db, thread_id=4)
+            db.update_issue_draft_status(
+                "i-abcdef12",
+                "created",
+                12,
+                "https://github.com/owner/repo/issues/12",
+            )
+            executor = Executor()
+            service = IssueExecutionService(db, executor)
+
+            first = service.close("i-abcdef12", 20, 4)
+            second = service.close("i-abcdef12", 20, 4)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first.number, 12)
+            self.assertEqual(executor.calls, [("owner/repo", 12)])
+            self.assertEqual(db.get_issue_draft("i-abcdef12")["status"], "closed")
+
+    def test_close_service_rejects_different_topic(self):
+        class Executor:
+            @staticmethod
+            def close_issue(repo, number):
+                raise AssertionError("must not close")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            self.create_pending_draft(db, thread_id=4)
+            db.update_issue_draft_status(
+                "i-abcdef12",
+                "created",
+                12,
+                "https://github.com/owner/repo/issues/12",
+            )
+
+            with self.assertRaisesRegex(ValueError, "different chat or topic"):
+                IssueExecutionService(db, Executor()).close("i-abcdef12", 20, 5)
 
     def test_created_issue_actions_fall_back_to_short_callbacks(self):
         class SuccessfulExecution:

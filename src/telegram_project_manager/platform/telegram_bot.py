@@ -20,7 +20,7 @@ ISSUE_REPO_PATTERN = re.compile(r"(?m)^Repo:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)
 ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
 CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
 CALLBACK_DRAFT_PATTERN = re.compile(r"^i-[0-9a-f]{8}$")
-ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel) i-[0-9a-f]{8}$")
+ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel|close) i-[0-9a-f]{8}$")
 ISSUE_CODE_ACTION_PATTERN = re.compile(
     r"^/code(?: --skip-plan)? (?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$"
 )
