@@ -68,7 +68,18 @@ class MergeDeploymentService:
 
     async def recover(self) -> None:
         for job in self.db.list_active_deployments():
-            self._schedule(str(job["id"]))
+            job_id = str(job["id"])
+            if _operation_mode(job) == DEPLOY_MODE:
+                try:
+                    await self.reporter.ensure_deployment_message(job_id)
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to recover deployment message for %s: %s", job_id, exc
+                    )
+                    self.db.audit(
+                        "deploy.progress", "failed", {"error": str(exc)}, job_id
+                    )
+            self._schedule(job_id)
 
     async def shutdown(self) -> None:
         for task in self._tasks.values():
@@ -83,10 +94,28 @@ class MergeDeploymentService:
     async def start_merge(self, job_id: str) -> str:
         return await self._start(job_id, MERGE_MODE)
 
-    async def start_deploy(self, job_id: str) -> str:
-        return await self._start(job_id, DEPLOY_MODE)
+    async def start_deploy(
+        self,
+        job_id: str,
+        *,
+        status_message_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> str | None:
+        return await self._start(
+            job_id,
+            DEPLOY_MODE,
+            status_message_id=status_message_id,
+            reply_to_message_id=reply_to_message_id,
+        )
 
-    async def _start(self, job_id: str, mode: str) -> str:
+    async def _start(
+        self,
+        job_id: str,
+        mode: str,
+        *,
+        status_message_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> str | None:
         job = self._require_job(job_id)
         if job["status"] != "ready":
             raise DeploymentError("Code job is not ready. All pull request checks must pass first.")
@@ -108,7 +137,12 @@ class MergeDeploymentService:
         deployment_status = str(job.get("deployment_status") or "")
         operation_mode = _operation_mode(job)
         if mode == DEPLOY_MODE and deployment_status == "succeeded":
-            return self._status_message(job, "Deployment already succeeded.")
+            return await self._deployment_response(
+                job,
+                "Deployment already succeeded.",
+                status_message_id=status_message_id,
+                reply_to_message_id=reply_to_message_id,
+            )
         if mode == MERGE_MODE and job.get("deployment_merge_sha"):
             return self._status_message(job, "Pull request already merged.")
         if deployment_status in ACTIVE_DEPLOYMENT_STATUSES:
@@ -123,6 +157,13 @@ class MergeDeploymentService:
                 if mode == MERGE_MODE
                 else "Merge and deployment already in progress."
             )
+            if mode == DEPLOY_MODE:
+                return await self._deployment_response(
+                    job,
+                    heading,
+                    status_message_id=status_message_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
             return self._status_message(job, heading)
         outcome = self.db.start_code_job_operation(job_id, mode)
         if outcome == "merged":
@@ -133,18 +174,70 @@ class MergeDeploymentService:
                 raise DeploymentError("Code job is not ready. All pull request checks must pass first.")
             active_mode = _operation_mode(current)
             active = "merge" if active_mode == MERGE_MODE else "merge and deployment"
+            if mode == DEPLOY_MODE and active_mode == DEPLOY_MODE:
+                return await self._deployment_response(
+                    current,
+                    f"{active.title()} already in progress.",
+                    status_message_id=status_message_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
             return self._status_message(current, f"{active.title()} already in progress.")
         audit = {"repo": job["repo"]}
         if workflow:
             audit["workflow"] = workflow
         self.db.audit(f"{mode}.queue", "ok", audit, job_id)
+        heading = "Merge queued." if mode == MERGE_MODE else "Merge and deployment queued."
+        self.db.update_code_job(job_id, {"latest_activity": heading.rstrip(".")})
+        live_message = False
+        if mode == DEPLOY_MODE and (
+            status_message_id is not None or reply_to_message_id is not None
+        ):
+            try:
+                live_message = await self.reporter.ensure_deployment_message(
+                    job_id,
+                    message_id=status_message_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except Exception as exc:
+                logging.warning(
+                    "Failed to create deployment message for %s: %s", job_id, exc
+                )
+                self.db.audit(
+                    "deploy.progress", "failed", {"error": str(exc)}, job_id
+                )
         self._schedule(job_id)
         try:
             await self.reporter.refresh(job_id, force=True)
         except Exception:
             logging.exception("Failed to refresh queued %s operation %s", mode, job_id)
-        heading = "Merge queued." if mode == MERGE_MODE else "Merge and deployment queued."
+        if live_message:
+            return None
         return f"{heading}\nCode Job ID: {job_id}\nRepo: {job['repo']}"
+
+    async def _deployment_response(
+        self,
+        job: dict[str, Any],
+        heading: str,
+        *,
+        status_message_id: int | None,
+        reply_to_message_id: int | None,
+    ) -> str | None:
+        if status_message_id is not None or reply_to_message_id is not None:
+            try:
+                if await self.reporter.ensure_deployment_message(
+                    str(job["id"]),
+                    message_id=status_message_id,
+                    reply_to_message_id=reply_to_message_id,
+                ):
+                    return None
+            except Exception as exc:
+                logging.warning(
+                    "Failed to refresh deployment message for %s: %s", job["id"], exc
+                )
+                self.db.audit(
+                    "deploy.progress", "failed", {"error": str(exc)}, str(job["id"])
+                )
+        return self._status_message(job, heading)
 
     def _schedule(self, job_id: str) -> None:
         existing = self._tasks.get(job_id)

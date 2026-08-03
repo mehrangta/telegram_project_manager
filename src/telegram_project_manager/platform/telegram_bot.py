@@ -552,6 +552,7 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             message_id=incoming.message_id,
             reply_target_message_id=incoming.reply_target_message_id,
             thread_id=incoming.thread_id,
+            callback_source_message_id=callback.source_message_id,
         )
         update_id = update.get("update_id")
         await dispatch(incoming, update_id if isinstance(update_id, int) else None)
