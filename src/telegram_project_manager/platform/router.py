@@ -25,11 +25,13 @@ class IncomingMessage:
     is_private: bool = False
     attachments: tuple[IncomingAttachment, ...] = ()
     message_id: int | None = None
+    reply_target_message_id: int | None = None
     media_group_id: str | None = None
     thread_id: int | None = None
     reply_to_draft_id: str | None = None
     reply_to_issue_ref: str | None = None
     reply_to_code_job_id: str | None = None
+    callback_source_message_id: int | None = None
 
 
 class BotHandler(Protocol):
@@ -64,11 +66,13 @@ class TelegramRouter:
             is_private=message.is_private,
             attachments=message.attachments,
             message_id=message.message_id,
+            reply_target_message_id=message.reply_target_message_id,
             media_group_id=message.media_group_id,
             thread_id=message.thread_id,
             reply_to_draft_id=message.reply_to_draft_id,
             reply_to_issue_ref=message.reply_to_issue_ref,
             reply_to_code_job_id=message.reply_to_code_job_id,
+            callback_source_message_id=message.callback_source_message_id,
         )
         for handler in self.handlers:
             response = await handler.handle(message)

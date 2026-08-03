@@ -126,6 +126,7 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
                     20,
                     "admin",
                     "/code --skip-plan owner/repo#12",
+                    message_id=41,
                     thread_id=30,
                 )
             )
@@ -143,6 +144,7 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["source_path"], "/cache/owner-repo.git")
             self.assertTrue(call["skip_plan"])
             self.assertFalse(call["plan_and_code"])
+            self.assertEqual(call["reply_to_message_id"], 41)
 
     async def test_plan_and_code_command_starts_automatic_plan_in_current_topic(self):
         class Service:
@@ -637,6 +639,39 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.shutdown()
         self.temp.cleanup()
 
+    async def test_tracked_message_replies_to_original_request(self):
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=True,
+            reply_to_message_id=41,
+        )
+
+        job = self.db.get_code_job(job_id)
+        assert job is not None
+        self.assertEqual(job["telegram_reply_to_message_id"], 41)
+        self.assertEqual(job["telegram_message_id"], 77)
+        self.assertEqual(self.bot.sent[0][0], 10)
+        self.assertEqual(self.bot.sent[0][2], 30)
+        self.assertEqual(self.bot.sent_options[0]["reply_to_message_id"], 41)
+
+    async def test_tracked_message_without_request_target_is_standalone(self):
+        await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=None,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=True,
+        )
+
+        self.assertIsNone(self.bot.sent_options[0]["reply_to_message_id"])
+
     async def test_default_allows_four_concurrent_code_jobs(self):
         class BlockingCodex(FakeCodex):
             def __init__(self):
@@ -816,6 +851,10 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[-1][2], 30)
         self.assertIn("✅ <b>Code job ready</b>", self.bot.sent[-1][1])
         self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
+        self.assertEqual(
+            self.bot.sent_options[-1]["reply_to_message_id"],
+            ready["telegram_message_id"],
+        )
         self.assertIn(
             f"confirm_deploy:{job_id}",
             str(self.bot.sent_options[-1]["reply_markup"]),
@@ -1478,9 +1517,38 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"<code>{job_id}</code>", self.bot.sent[-1][1])
         self.assertIn("<b>Failure phase:</b> code", self.bot.sent[-1][1])
         self.assertIn("invalid changes", self.bot.sent[-1][1])
+        self.assertIsNone(self.bot.sent_options[-1]["reply_to_message_id"])
         events = self.db.list_code_job_events(job_id)
         self.assertEqual(events[-1]["event_type"], "failure")
         self.assertIn("invalid changes", events[-1]["summary"]["text"])
+
+    async def test_ready_alert_without_tracked_message_is_standalone(self):
+        job_id = "c-ready-no-message"
+        self.db.create_code_job(
+            {
+                "id": job_id,
+                "telegram_chat_id": 10,
+                "telegram_user_id": 20,
+                "telegram_thread_id": 30,
+                "repo": "owner/repo",
+                "issue_number": 12,
+                "issue_title": "Broken handler",
+                "issue_url": "https://github.com/owner/repo/issues/12",
+                "issue_context_json": {},
+                "base_branch": "main",
+                "target_branch": "codex/issue-12",
+                "workspace_path": "/tmp/job",
+                "source_repo_path": "/tmp/repo",
+                "status": "ready",
+                "resume_phase": "checks",
+                "skip_plan": True,
+            }
+        )
+
+        await self.service.reporter.notify_terminal(job_id)
+
+        self.assertIn("✅ <b>Code job ready</b>", self.bot.sent[-1][1])
+        self.assertIsNone(self.bot.sent_options[-1]["reply_to_message_id"])
 
     async def test_terminal_alert_failure_does_not_change_ready_state_or_block_cleanup(self):
         self.bot.fail_send_at = 2

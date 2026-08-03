@@ -57,7 +57,15 @@ class PullRequestManager:
         try:
             if command == "/merge":
                 return await self.service.start_merge(job_id)
-            return await self.service.start_deploy(job_id)
+            return await self.service.start_deploy(
+                job_id,
+                status_message_id=message.callback_source_message_id,
+                reply_to_message_id=(
+                    None
+                    if message.callback_source_message_id is not None
+                    else message.message_id
+                ),
+            )
         except DeploymentError as exc:
             action = command.lstrip("/")
             self.db.audit(f"{action}.queue", "failed", {"error": str(exc)}, job_id)

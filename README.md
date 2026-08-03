@@ -132,7 +132,7 @@ configured and deployment is enabled.
 
 | Command | Description |
 | --- | --- |
-| `/issues` | List open issues and their latest Codex code-job status for the active repository; the tracked message refreshes periodically. |
+| `/issues` | List open issues and their latest Codex code-job status for the active repository; ready jobs link to their tracked Telegram message when supported, and the list refreshes periodically. |
 | `/issue <prompt> [images]` | Create a reviewable issue draft for the active repository. |
 | `/edit i-12345678 [feedback] [images]` | Revise a pending issue draft; replying to its preview with text or images also revises it. |
 | `/confirm i-12345678` | Create the GitHub issue from a pending issue draft. |
@@ -206,12 +206,16 @@ replies without an explicit job ID.
   independent from group-level settings.
 - **Issues and code:** `/issues` shows the latest local Codex code-job status for
   each listed issue when one exists and refreshes its tracked message
-  periodically. `/issue` creates a reviewable issue draft. After creation, choose
-  Plan for the plan-and-approval workflow or Code to skip directly to
-  implementation. `/code` works on an existing issue in an isolated worktree
-  and opens a draft pull request. Approve the plan before implementation unless
-  `--skip-plan` was used. A job becomes ready only after repository validation
-  and GitHub checks pass.
+  periodically. Ready statuses link to the code job's tracked Telegram message
+  in channels and supergroups; unsupported chats retain the plain status text.
+  `/issue` creates a reviewable issue draft. After creation, choose Plan for the
+  plan-and-approval workflow or Code to skip directly to implementation. The
+  tracked code-job message replies to the original `/issue` request; jobs started
+  directly with `/code` reply to that command instead. `/code` works on an
+  existing issue in an isolated worktree and opens a draft pull request. Approve
+  the plan before implementation unless `--skip-plan` was used. A job becomes
+  ready only after repository validation and GitHub checks pass; its ready
+  notification replies to the tracked code-job message.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
   extensions when brainstorming is enabled for the current chat or topic's
@@ -242,7 +246,10 @@ replies without an explicit job ID.
   deploying. Deployment is disabled per repository until an admin configures a
   workflow and enables it. `/deploy` requires a ready pull request targeting
   `main` and dispatches the configured `workflow_dispatch` workflow at the
-  accepted merge SHA. If GitHub reports conflicts, the bot merges the latest
+  accepted merge SHA. After deployment is confirmed, the bot updates that
+  Telegram message in place with the current merge, conflict-resolution,
+  workflow, success, or failure status; typed deployment commands receive an
+  equivalent live reply. If GitHub reports conflicts, the bot merges the latest
   base into the pull-request branch, asks Codex to resolve guarded content
   conflicts, reruns CI, and then resumes the requested merge or deployment.
 - **Recovery:** Interrupted code jobs require `/code retry` or `/code discard`.

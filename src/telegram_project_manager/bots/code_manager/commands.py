@@ -82,6 +82,9 @@ class CodeManager:
                 source_path=str(chat.get("local_repo_path") or ""),
                 skip_plan=skip_plan,
                 plan_and_code=plan_and_code,
+                reply_to_message_id=(
+                    message.reply_target_message_id or message.message_id
+                ),
             )
         except (ValueError, WorkspaceError, GhError) as exc:
             return f"Code job not started.\nReason: {exc}"

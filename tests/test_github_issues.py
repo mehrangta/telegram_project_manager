@@ -26,6 +26,8 @@ class FakeGh:
 
     def api_json(self, endpoint, method="GET", body=None):
         self.calls.append((endpoint, method, body))
+        if method == "PATCH" and endpoint.endswith("/issues/42"):
+            return {"number": 42, "state": "closed"}
         if endpoint.endswith("/git/ref/heads/issue-assets"):
             return {"object": {"sha": "base-sha"}}
         if endpoint.endswith("/git/commits/base-sha"):
@@ -188,6 +190,16 @@ class GitHubIssueTests(unittest.TestCase):
         result, _ = GhIssueExecutor(gh, FakeTelegram()).create_issue(record(False))
         self.assertEqual(result.number, 7)
         self.assertFalse(any(call[1] == "POST" for call in gh.calls))
+
+    def test_closes_issue(self):
+        gh = FakeGh()
+
+        GhIssueExecutor(gh, FakeTelegram()).close_issue("owner/repo", 42)
+
+        self.assertEqual(
+            gh.calls,
+            [("repos/owner/repo/issues/42", "PATCH", {"state": "closed"})],
+        )
 
     def test_rejects_mime_signature_mismatch(self):
         with self.assertRaisesRegex(ValueError, "not valid"):

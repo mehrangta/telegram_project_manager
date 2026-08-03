@@ -246,6 +246,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(action.message.chat_id, 40)
         self.assertEqual(action.message.user_id, 30)
         self.assertEqual(action.message.thread_id, 7)
+        self.assertEqual(action.message.reply_target_message_id, 20)
 
     def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
         class Handler:
@@ -341,6 +342,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
     class Router:
         def __init__(self, admin_ids=None):
             self.commands = []
+            self.messages = []
             self.bot_username = ""
             self.admin_ids = {30} if admin_ids is None else set(admin_ids)
 
@@ -352,16 +354,27 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
 
         async def handle_message(self, message):
             self.commands.append(message.text)
+            self.messages.append(message)
             return "Action queued"
 
     @staticmethod
-    def callback(update_id, query_id, data, message_id=20, user_id=30, thread_id=None):
+    def callback(
+        update_id,
+        query_id,
+        data,
+        message_id=20,
+        user_id=30,
+        thread_id=None,
+        reply_to_message_id=None,
+    ):
         message = {
             "message_id": message_id,
             "chat": {"id": 40, "type": "supergroup"},
         }
         if thread_id is not None:
             message["message_thread_id"] = thread_id
+        if reply_to_message_id is not None:
+            message["reply_to_message"] = {"message_id": reply_to_message_id}
         return {
             "update_id": update_id,
             "callback_query": {
@@ -413,6 +426,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
                 f"query-{index}",
                 f"command:{command}",
                 message_id=20 + index,
+                reply_to_message_id=11,
             )
             for index, command in enumerate(commands, start=1)
         ])
@@ -422,6 +436,10 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, commands)
+        self.assertEqual(
+            [message.reply_target_message_id for message in router.messages],
+            [11, 11, 11, 11],
+        )
         self.assertEqual(
             bot.answers,
             [(f"query-{index}", "Action requested") for index in range(1, 7)],
@@ -574,6 +592,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/deploy c-abcdef12"])
+        self.assertEqual(router.messages[0].callback_source_message_id, 21)
         confirmation_markup = bot.sent[0][3]["reply_markup"]
         self.assertEqual(
             confirmation_markup["inline_keyboard"][0][0]["callback_data"],
@@ -602,8 +621,38 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             confirmation_markup["inline_keyboard"][0][0]["callback_data"],
             "command:/merge c-abcdef12",
         )
-        self.assertEqual(bot.markup_edits, [(40, 21, {"inline_keyboard": []})])
-        self.assertEqual(bot.deleted, [])
+        self.assertEqual(bot.sent[0][3]["reply_to_message_id"], 20)
+        self.assertEqual(bot.markup_edits, [])
+        self.assertEqual(bot.deleted, [(40, 21)])
+
+    async def test_merge_delete_failure_does_not_block_dispatch(self):
+        class DeleteFailingBot(self.Bot):
+            def delete_message(self, chat_id, message_id):
+                raise TelegramBotApiError("message cannot be deleted")
+
+        bot = DeleteFailingBot([
+            self.callback(1, "query-1", "confirm_merge:c-abcdef12"),
+            self.callback(2, "query-2", "command:/merge c-abcdef12", message_id=21),
+        ])
+        router = self.Router()
+
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaises(PollingStopped):
+                await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/merge c-abcdef12"])
+        self.assertEqual(
+            bot.answers,
+            [
+                ("query-1", "Confirmation required"),
+                ("query-2", "Action requested"),
+            ],
+        )
+        self.assertEqual(len(bot.sent), 2)
+        self.assertEqual(bot.markup_edits, [])
+        self.assertTrue(
+            any("callback source deletion failed" in line for line in logs.output)
+        )
 
     async def test_non_admin_callback_is_silently_ignored(self):
         bot = self.Bot([

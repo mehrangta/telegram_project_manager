@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, TypedDict
 
 
 CODE_JOB_QUEUED_STATUSES = (
@@ -16,6 +16,13 @@ CODE_JOB_QUEUED_STATUSES = (
     "queued_checks",
     "queued_rebase",
 )
+
+
+class LatestCodeJobStatus(TypedDict):
+    status: str
+    telegram_chat_id: int
+    telegram_thread_id: int | None
+    telegram_message_id: int | None
 
 
 class Database:
@@ -166,6 +173,7 @@ class Database:
                     id TEXT PRIMARY KEY,
                     telegram_chat_id INTEGER NOT NULL,
                     telegram_thread_id INTEGER,
+                    telegram_reply_to_message_id INTEGER,
                     telegram_user_id INTEGER NOT NULL,
                     repo TEXT NOT NULL,
                     default_branch TEXT NOT NULL,
@@ -233,8 +241,10 @@ class Database:
                     telegram_chat_id INTEGER NOT NULL,
                     telegram_user_id INTEGER NOT NULL,
                     telegram_thread_id INTEGER,
+                    telegram_reply_to_message_id INTEGER,
                     telegram_message_id INTEGER,
                     telegram_plan_message_id INTEGER,
+                    telegram_deployment_message_id INTEGER,
                     repo TEXT NOT NULL,
                     issue_number INTEGER NOT NULL,
                     issue_title TEXT NOT NULL,
@@ -411,6 +421,9 @@ class Database:
             self._ensure_column(conn, "plans", "telegram_thread_id", "INTEGER")
             self._ensure_column(conn, "issue_drafts", "telegram_thread_id", "INTEGER")
             self._ensure_column(
+                conn, "issue_drafts", "telegram_reply_to_message_id", "INTEGER"
+            )
+            self._ensure_column(
                 conn, "issue_drafts", "local_repo_path", "TEXT NOT NULL DEFAULT ''"
             )
             self._ensure_column(conn, "allowed_repos", "deploy_workflow", "TEXT")
@@ -418,6 +431,9 @@ class Database:
                 conn, "allowed_repos", "deploy_enabled", "INTEGER NOT NULL DEFAULT 0"
             )
             self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
+            self._ensure_column(
+                conn, "code_jobs", "telegram_reply_to_message_id", "INTEGER"
+            )
             self._ensure_column(conn, "code_jobs", "telegram_plan_message_id", "INTEGER")
             self._ensure_column(
                 conn, "code_jobs", "plan_and_code", "INTEGER NOT NULL DEFAULT 0"
@@ -427,6 +443,9 @@ class Database:
                 "code_jobs",
                 "auto_answered_questions",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                conn, "code_jobs", "telegram_deployment_message_id", "INTEGER"
             )
             self._ensure_column(conn, "code_jobs", "ci_head_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "ci_wait_started_at", "INTEGER")
@@ -1318,15 +1337,17 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO issue_drafts (
-                    id, telegram_chat_id, telegram_thread_id, telegram_user_id,
+                    id, telegram_chat_id, telegram_thread_id,
+                    telegram_reply_to_message_id, telegram_user_id,
                     repo, default_branch, local_repo_path, request_text,
                     issue_json, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft["id"],
                     draft["telegram_chat_id"],
                     draft.get("telegram_thread_id"),
+                    draft.get("telegram_reply_to_message_id"),
                     draft["telegram_user_id"],
                     draft["repo"],
                     draft["default_branch"],
@@ -1941,17 +1962,19 @@ class Database:
                 """
                 INSERT INTO code_jobs (
                     id, telegram_chat_id, telegram_user_id, telegram_thread_id,
+                    telegram_reply_to_message_id,
                     repo, issue_number, issue_title, issue_url, issue_context_json,
                     base_branch, target_branch, workspace_path, source_repo_path, status, resume_phase,
                     skip_plan, plan_and_code, auto_answered_questions,
                     feedback_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
                 """,
                 (
                     job["id"],
                     job["telegram_chat_id"],
                     job["telegram_user_id"],
                     job.get("telegram_thread_id"),
+                    job.get("telegram_reply_to_message_id"),
                     job["repo"],
                     job["issue_number"],
                     job["issue_title"],
@@ -1992,7 +2015,7 @@ class Database:
 
     def get_latest_code_job_statuses(
         self, repo: str, issue_numbers: Iterable[int]
-    ) -> dict[int, str]:
+    ) -> dict[int, LatestCodeJobStatus]:
         numbers = tuple(sorted(set(issue_numbers)))
         if not numbers:
             return {}
@@ -2000,16 +2023,33 @@ class Database:
         with self.session() as conn:
             rows = conn.execute(
                 f"""
-                SELECT issue_number, status
+                SELECT issue_number, status, telegram_chat_id,
+                       telegram_thread_id, telegram_message_id
                 FROM code_jobs
                 WHERE repo = ? AND issue_number IN ({placeholders})
                 ORDER BY issue_number ASC, created_at DESC, updated_at DESC, id DESC
                 """,
                 (repo, *numbers),
             ).fetchall()
-        statuses: dict[int, str] = {}
+        statuses: dict[int, LatestCodeJobStatus] = {}
         for row in rows:
-            statuses.setdefault(int(row["issue_number"]), str(row["status"]))
+            statuses.setdefault(
+                int(row["issue_number"]),
+                {
+                    "status": str(row["status"]),
+                    "telegram_chat_id": int(row["telegram_chat_id"]),
+                    "telegram_thread_id": (
+                        int(row["telegram_thread_id"])
+                        if row["telegram_thread_id"] is not None
+                        else None
+                    ),
+                    "telegram_message_id": (
+                        int(row["telegram_message_id"])
+                        if row["telegram_message_id"] is not None
+                        else None
+                    ),
+                },
+            )
         return statuses
 
     def list_code_jobs(
@@ -2092,6 +2132,7 @@ class Database:
         allowed_columns = {
             "telegram_message_id",
             "telegram_plan_message_id",
+            "telegram_deployment_message_id",
             "base_sha",
             "source_repo_path",
             "status",

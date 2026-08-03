@@ -63,13 +63,15 @@ class IssueManager:
             return self.confirm(message, rest.strip())
         if command == "/cancel" and rest.strip().startswith("i-"):
             return self.cancel(message, rest.strip())
+        if command == "/close" and rest.strip().startswith("i-"):
+            return self.close(message, rest.strip())
         if command.startswith("/"):
             return None
         if message.reply_to_draft_id:
             return self.revise(message, message.reply_to_draft_id, message.text.strip())
         return None
 
-    def create(self, message: IncomingMessage, request_text: str) -> str:
+    def create(self, message: IncomingMessage, request_text: str) -> str | OutgoingMessage:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -96,6 +98,7 @@ class IssueManager:
                 default_branch=default_branch,
                 local_repo_path=str(chat.get("local_repo_path") or ""),
                 attachments=message.attachments,
+                telegram_reply_to_message_id=message.message_id,
             )
         except RepositoryContextError as exc:
             self.db.audit("issue.context", "failed", {"repo": repo, "error": str(exc)})
@@ -103,13 +106,16 @@ class IssueManager:
         except (LlmError, IssueDraftValidationError, ValueError) as exc:
             self.db.audit("issue.plan", "failed", {"repo": repo, "error": str(exc)})
             return f"Issue draft not created.\nReason: {exc}"
-        return self._format_preview(
-            heading="Issue draft created.",
-            draft_id=draft_id,
-            repo=repo,
-            issue=issue,
-            revision=1,
-            image_count=len(message.attachments),
+        return outgoing_message(
+            self._format_preview(
+                heading="Issue draft created.",
+                draft_id=draft_id,
+                repo=repo,
+                issue=issue,
+                revision=1,
+                image_count=len(message.attachments),
+            ),
+            reply_to_message_id=message.message_id,
         )
 
     def revise(self, message: IncomingMessage, draft_id: str, feedback_text: str) -> str:
@@ -206,6 +212,7 @@ class IssueManager:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
+        draft = self.db.get_issue_draft(draft_id)
         try:
             result = self.execution.execute(
                 draft_id, message.user_id, message.chat_id, message.thread_id
@@ -229,12 +236,39 @@ class IssueManager:
         )
         return outgoing_message(
             text,
-            keyboard=((
-                callback_button("📝 Plan", plan_callback),
-                callback_button("💻 Code", code_callback),
-                callback_button("📝💻 Plan & Code", plan_and_code_callback),
-                url_button("↗ Issue", result.url),
-            ),),
+            keyboard=(
+                (
+                    callback_button("📝 Plan", plan_callback),
+                    callback_button("💻 Code", code_callback),
+                    callback_button("📝💻 Plan & Code", plan_and_code_callback),
+                    url_button("↗ Issue", result.url),
+                ),
+                (callback_button("✖️ Close", f"command:/close {draft_id}"),),
+            ),
+            reply_to_message_id=(
+                draft.get("telegram_reply_to_message_id") if draft else None
+            ),
+        )
+
+    def close(self, message: IncomingMessage, draft_id: str) -> str:
+        admin_error = self.permissions.require_admin(message.user_id)
+        if admin_error:
+            return admin_error
+        try:
+            result = self.execution.close(
+                draft_id, message.chat_id, message.thread_id
+            )
+        except (ValueError, GhError) as exc:
+            self.db.audit("issue.close", "failed", {"error": str(exc)}, draft_id)
+            return f"Issue not closed.\nReason: {exc}"
+        return "\n".join(
+            [
+                "Issue closed.",
+                f"Repo: {result.repo}",
+                f"Issue: #{result.number}",
+                f"Title: {result.title}",
+                f"Link: {result.url}",
+            ]
         )
 
     def cancel(self, message: IncomingMessage, draft_id: str) -> str:
