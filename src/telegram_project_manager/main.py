@@ -27,6 +27,7 @@ from telegram_project_manager.bots.goal_manager.service import GoalService
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
+from telegram_project_manager.bots.issue_manager.progress import IssueConfirmationService
 from telegram_project_manager.bots.ideas.commands import BrainstormManager
 from telegram_project_manager.bots.ideas.service import BrainstormService
 from telegram_project_manager.bots.pull_request_manager.commands import PullRequestManager
@@ -141,7 +142,8 @@ async def run_bot(db: Database) -> None:
         repositories=repositories,
         bot=bot,
     )
-    issue_lists = IssueListService(db=db, bot=bot, reader=GhIssueReader(gh))
+    issue_reader = GhIssueReader(gh)
+    issue_lists = IssueListService(db=db, bot=bot, reader=issue_reader)
     commit_manager = CommitManager(
         db=db,
         llm=llm,
@@ -153,7 +155,17 @@ async def run_bot(db: Database) -> None:
     )
     issue_planner = IssuePlanner(db, llm, RepositoryContextService(repositories))
     issue_execution = IssueExecutionService(db, GhIssueExecutor(gh, bot))
-    issue_manager = IssueManager(db, issue_planner, issue_execution)
+    issue_confirmations = IssueConfirmationService(
+        db=db,
+        bot=bot,
+        reader=issue_reader,
+    )
+    issue_manager = IssueManager(
+        db,
+        issue_planner,
+        issue_execution,
+        issue_confirmations,
+    )
     code_github = CodeGitHubService(gh)
     code_reporter = CodeProgressReporter(db, bot)
     codex = CodexSdkAdapter(
@@ -251,6 +263,7 @@ async def run_bot(db: Database) -> None:
         ],
     )
     await issue_lists.recover()
+    await issue_confirmations.recover()
     await pull_request_lists.recover()
     await brainstorm_service.recover()
     await code_service.recover()
@@ -259,6 +272,7 @@ async def run_bot(db: Database) -> None:
         await run_polling(bot, router)
     finally:
         await issue_lists.shutdown()
+        await issue_confirmations.shutdown()
         await pull_request_lists.shutdown()
         await repository_setup.shutdown()
         await brainstorm_service.shutdown()

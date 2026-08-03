@@ -64,6 +64,16 @@ class FakeIssueListGh:
         return GhResult(["gh", *args], 0, stdout, "", 1)
 
 
+class FakeIssueStateGh:
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def api_json(self, endpoint, method="GET", body=None):
+        self.calls.append((endpoint, method, body))
+        return self.value
+
+
 def record(with_image=True):
     return {
         "id": "i-12345678",
@@ -91,6 +101,37 @@ def record(with_image=True):
 
 
 class GitHubIssueTests(unittest.TestCase):
+    def test_get_issue_state_normalizes_supported_states(self):
+        for raw, expected in (("OPEN", "open"), ("closed", "closed")):
+            with self.subTest(state=raw):
+                gh = FakeIssueStateGh({"state": raw})
+
+                state = GhIssueReader(gh).get_issue_state("owner/repo", 12)
+
+                self.assertEqual(state, expected)
+                self.assertEqual(
+                    gh.calls,
+                    [("repos/owner/repo/issues/12", "GET", None)],
+                )
+
+    def test_get_issue_state_rejects_invalid_payloads(self):
+        invalid = (
+            ({}, "valid state"),
+            ({"state": "merged"}, "valid state"),
+            ({"state": "open", "pull_request": {}}, "pull request"),
+        )
+        for payload, message in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, message):
+                    GhIssueReader(FakeIssueStateGh(payload)).get_issue_state(
+                        "owner/repo", 12
+                    )
+
+        with self.assertRaisesRegex(ValueError, "positive"):
+            GhIssueReader(FakeIssueStateGh({"state": "open"})).get_issue_state(
+                "owner/repo", 0
+            )
+
     def test_lists_open_issues_in_cli_order(self):
         gh = FakeIssueListGh(
             [

@@ -6,6 +6,11 @@ from typing import Any
 
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
 from telegram_project_manager.bots.issue_manager.planner import IssuePlanner
+from telegram_project_manager.bots.issue_manager.progress import (
+    IssueConfirmationError,
+    IssueConfirmationService,
+    issue_confirmation_message,
+)
 from telegram_project_manager.bots.issue_manager.schemas import (
     BODY_MODE_ORIGINAL,
     IssueDraft,
@@ -16,12 +21,10 @@ from telegram_project_manager.integrations.gh.repository_context import Reposito
 from telegram_project_manager.platform.llm.client import LlmError
 from telegram_project_manager.platform.permissions import PermissionService
 from telegram_project_manager.platform.responses import (
-    CALLBACK_DATA_LIMIT,
     OutgoingMessage,
     callback_button,
     outgoing_message,
     truncate,
-    url_button,
 )
 from telegram_project_manager.platform.router import IncomingAttachment, IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
@@ -34,20 +37,19 @@ MAX_IMAGE_BYTES = 10_000_000
 MAX_TOTAL_IMAGE_BYTES = 20_000_000
 
 
-def _code_callback(repo: str, number: int, *, flag: str = "") -> str:
-    command = f"/code {flag}".rstrip()
-    callback = f"command:{command} {repo}#{number}"
-    if len(callback.encode("utf-8")) > CALLBACK_DATA_LIMIT:
-        callback = f"command:{command} #{number}"
-    return callback
-
-
 class IssueManager:
-    def __init__(self, db: Database, planner: IssuePlanner, execution: IssueExecutionService) -> None:
+    def __init__(
+        self,
+        db: Database,
+        planner: IssuePlanner,
+        execution: IssueExecutionService,
+        confirmations: IssueConfirmationService | None = None,
+    ) -> None:
         self.db = db
         self.permissions = PermissionService(db)
         self.planner = planner
         self.execution = execution
+        self.confirmations = confirmations
 
     async def handle(self, message: IncomingMessage) -> str | OutgoingMessage | None:
         command, _, rest = message.text.strip().partition(" ")
@@ -60,11 +62,11 @@ class IssueManager:
                 return "Usage: /edit i-12345678 <feedback> (images optional)"
             return self.revise(message, draft_id, feedback.strip())
         if command == "/confirm" and rest.strip().startswith("i-"):
-            return self.confirm(message, rest.strip())
+            return await self.confirm(message, rest.strip())
         if command == "/cancel" and rest.strip().startswith("i-"):
             return self.cancel(message, rest.strip())
         if command == "/close" and rest.strip().startswith("i-"):
-            return self.close(message, rest.strip())
+            return await self.close(message, rest.strip())
         if command.startswith("/"):
             return None
         if message.reply_to_draft_id:
@@ -208,7 +210,9 @@ class IssueManager:
             image_count=image_count,
         )
 
-    def confirm(self, message: IncomingMessage, draft_id: str) -> str | OutgoingMessage:
+    async def confirm(
+        self, message: IncomingMessage, draft_id: str
+    ) -> str | OutgoingMessage | None:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -220,37 +224,33 @@ class IssueManager:
         except (ValueError, GhError, TelegramBotApiError) as exc:
             self.db.audit("issue.create", "failed", {"error": str(exc)}, draft_id)
             return f"Issue not created.\nReason: {exc}"
-        text = "\n".join(
-            [
-                "Issue created.",
-                f"Repo: {result.repo}",
-                f"Issue: #{result.number}",
-                f"Title: {result.title}",
-                f"Link: {result.url}",
-            ]
+        reply_to_message_id = (
+            draft.get("telegram_reply_to_message_id") if draft else None
         )
-        plan_callback = _code_callback(result.repo, result.number)
-        code_callback = _code_callback(result.repo, result.number, flag="--skip-plan")
-        plan_and_code_callback = _code_callback(
-            result.repo, result.number, flag="--plan-and-code"
-        )
-        return outgoing_message(
-            text,
-            keyboard=(
-                (
-                    callback_button("📝 Plan", plan_callback),
-                    callback_button("💻 Code", code_callback),
-                    callback_button("📝💻 Plan & Code", plan_and_code_callback),
-                    url_button("↗ Issue", result.url),
-                ),
-                (callback_button("✖️ Close", f"command:/close {draft_id}"),),
-            ),
-            reply_to_message_id=(
-                draft.get("telegram_reply_to_message_id") if draft else None
-            ),
-        )
+        try:
+            if self.confirmations is None:
+                raise IssueConfirmationError("Live issue confirmations are unavailable")
+            await self.confirmations.publish(
+                draft_id=draft_id,
+                result=result,
+                reply_to_message_id=reply_to_message_id,
+            )
+        except IssueConfirmationError as exc:
+            self.db.audit(
+                "issue.confirmation.publish",
+                "failed",
+                {"error": str(exc)},
+                draft_id,
+            )
+            return issue_confirmation_message(
+                draft_id,
+                result,
+                reply_to_message_id=reply_to_message_id,
+                actions=False,
+            )
+        return None
 
-    def close(self, message: IncomingMessage, draft_id: str) -> str:
+    async def close(self, message: IncomingMessage, draft_id: str) -> str:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -261,6 +261,8 @@ class IssueManager:
         except (ValueError, GhError) as exc:
             self.db.audit("issue.close", "failed", {"error": str(exc)}, draft_id)
             return f"Issue not closed.\nReason: {exc}"
+        if self.confirmations is not None:
+            await self.confirmations.retire(draft_id)
         return "\n".join(
             [
                 "Issue closed.",

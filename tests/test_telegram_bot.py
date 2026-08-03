@@ -438,7 +438,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.commands, commands)
         self.assertEqual(
             [message.reply_target_message_id for message in router.messages],
-            [11, 11, 11, 11],
+            [11, 11, 11, 11, 11, 11],
         )
         self.assertEqual(
             bot.answers,
@@ -448,6 +448,51 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             bot.deleted,
             [(40, message_id) for message_id in range(21, 27)],
         )
+
+    async def test_deleted_issue_action_clears_live_confirmation_tracker(self):
+        class TrackingDb:
+            def __init__(self):
+                self.cleared = []
+
+            def clear_issue_confirmation_message_by_target(self, chat_id, message_id):
+                self.cleared.append((chat_id, message_id))
+                return True
+
+        bot = self.Bot([
+            self.callback(1, "query-1", "command:/code owner/repo#12", message_id=24)
+        ])
+        router = self.Router()
+        router.db = TrackingDb()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.db.cleared, [(40, 24)])
+
+    async def test_delete_failure_preserves_live_confirmation_tracker(self):
+        class DeleteFailingBot(self.Bot):
+            def delete_message(self, chat_id, message_id):
+                raise TelegramBotApiError("message cannot be deleted")
+
+        class TrackingDb:
+            def __init__(self):
+                self.cleared = []
+
+            def clear_issue_confirmation_message_by_target(self, chat_id, message_id):
+                self.cleared.append((chat_id, message_id))
+                return True
+
+        bot = DeleteFailingBot([
+            self.callback(1, "query-1", "command:/code owner/repo#12", message_id=24)
+        ])
+        router = self.Router()
+        router.db = TrackingDb()
+
+        with self.assertLogs(level="WARNING"):
+            with self.assertRaises(PollingStopped):
+                await run_polling(bot, router)
+
+        self.assertEqual(router.db.cleared, [])
 
     async def test_edit_button_sends_reply_prompt_then_deletes_preview(self):
         bot = self.Bot([

@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import time
 import unittest
@@ -5,6 +6,10 @@ from pathlib import Path
 
 from telegram_project_manager.bots.issue_manager.commands import IssueManager
 from telegram_project_manager.bots.issue_manager.executor import IssueExecutionService
+from telegram_project_manager.bots.issue_manager.progress import (
+    IssueConfirmationError,
+    issue_confirmation_message,
+)
 from telegram_project_manager.bots.issue_manager.schemas import IssueDraft
 from telegram_project_manager.bots.issue_manager.schemas import PossibleCause, RelevantFile
 from telegram_project_manager.integrations.gh.issues import IssueResult
@@ -54,6 +59,21 @@ class FakePlanner:
 class FakeExecution:
     def execute(self, draft_id, user_id):
         raise AssertionError("not used")
+
+
+class FakeConfirmations:
+    def __init__(self, error=None):
+        self.error = error
+        self.published = []
+        self.retired = []
+
+    async def publish(self, **kwargs):
+        if self.error:
+            raise self.error
+        self.published.append(kwargs)
+
+    async def retire(self, draft_id):
+        self.retired.append(draft_id)
 
 
 class IssueManagerTests(unittest.TestCase):
@@ -220,16 +240,29 @@ class IssueManagerTests(unittest.TestCase):
             db.initialize()
             db.upsert_user(10, "admin", "admin")
             self.create_pending_draft(db, reply_to_message_id=41)
-            manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
-
-            response = manager.confirm(
-                IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
-                "i-abcdef12",
+            confirmations = FakeConfirmations()
+            manager = IssueManager(
+                db,
+                FakePlanner(),
+                SuccessfulExecution(),
+                confirmations,
             )
 
-            self.assertIsInstance(response, OutgoingMessage)
-            assert isinstance(response, OutgoingMessage)
-            buttons = response.reply_markup()["inline_keyboard"][0]
+            response = asyncio.run(
+                manager.confirm(
+                    IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
+                    "i-abcdef12",
+                )
+            )
+
+            self.assertIsNone(response)
+            self.assertEqual(confirmations.published[0]["reply_to_message_id"], 41)
+            outgoing = issue_confirmation_message(
+                "i-abcdef12",
+                confirmations.published[0]["result"],
+                reply_to_message_id=41,
+            )
+            buttons = outgoing.reply_markup()["inline_keyboard"][0]
             self.assertEqual(buttons[0]["text"], "📝 Plan")
             self.assertEqual(buttons[0]["callback_data"], "command:/code owner/repo#12")
             self.assertEqual(buttons[1]["text"], "💻 Code")
@@ -244,10 +277,10 @@ class IssueManagerTests(unittest.TestCase):
             )
             self.assertEqual(buttons[3]["text"], "↗ Issue")
             self.assertEqual(buttons[3]["url"], "https://github.com/owner/repo/issues/12")
-            close_button = response.reply_markup()["inline_keyboard"][1][0]
+            close_button = outgoing.reply_markup()["inline_keyboard"][1][0]
             self.assertEqual(close_button["text"], "✖️ Close")
             self.assertEqual(close_button["callback_data"], "command:/close i-abcdef12")
-            self.assertEqual(response.reply_to_message_id, 41)
+            self.assertEqual(outgoing.reply_to_message_id, 41)
 
     def test_close_created_issue(self):
         class SuccessfulExecution:
@@ -268,16 +301,67 @@ class IssueManagerTests(unittest.TestCase):
             db.initialize()
             db.upsert_user(10, "admin", "admin")
             execution = SuccessfulExecution()
-            manager = IssueManager(db, FakePlanner(), execution)
+            confirmations = FakeConfirmations()
+            manager = IssueManager(db, FakePlanner(), execution, confirmations)
 
-            response = manager.close(
-                IncomingMessage(20, 10, "admin", "/close i-abcdef12", thread_id=4),
-                "i-abcdef12",
+            response = asyncio.run(
+                manager.close(
+                    IncomingMessage(
+                        20,
+                        10,
+                        "admin",
+                        "/close i-abcdef12",
+                        thread_id=4,
+                    ),
+                    "i-abcdef12",
+                )
             )
 
             self.assertIn("Issue closed.", response)
             self.assertIn("Issue: #12", response)
             self.assertEqual(execution.calls, [("i-abcdef12", 20, 4)])
+            self.assertEqual(confirmations.retired, ["i-abcdef12"])
+
+    def test_live_confirmation_failure_falls_back_without_action_buttons(self):
+        class SuccessfulExecution:
+            @staticmethod
+            def execute(draft_id, user_id, chat_id, thread_id):
+                return IssueResult(
+                    repo="owner/repo",
+                    number=12,
+                    url="https://github.com/owner/repo/issues/12",
+                    title="Broken button",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(db, reply_to_message_id=41)
+            confirmations = FakeConfirmations(
+                IssueConfirmationError("telegram unavailable")
+            )
+            manager = IssueManager(
+                db,
+                FakePlanner(),
+                SuccessfulExecution(),
+                confirmations,
+            )
+
+            response = asyncio.run(
+                manager.confirm(
+                    IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
+                    "i-abcdef12",
+                )
+            )
+
+            self.assertIsInstance(response, OutgoingMessage)
+            buttons = response.reply_markup()["inline_keyboard"]
+            self.assertEqual(buttons, [[{
+                "text": "↗ Issue",
+                "url": "https://github.com/owner/repo/issues/12",
+            }]])
+            self.assertEqual(response.reply_to_message_id, 41)
 
     def test_close_service_persists_status_and_is_idempotent(self):
         class Executor:
@@ -344,16 +428,27 @@ class IssueManagerTests(unittest.TestCase):
             db = Database(Path(temp_dir) / "bot.db")
             db.initialize()
             db.upsert_user(10, "admin", "admin")
-            manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
-
-            response = manager.confirm(
-                IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
-                "i-abcdef12",
+            confirmations = FakeConfirmations()
+            manager = IssueManager(
+                db,
+                FakePlanner(),
+                SuccessfulExecution(),
+                confirmations,
             )
 
-            self.assertIsInstance(response, OutgoingMessage)
-            assert isinstance(response, OutgoingMessage)
-            buttons = response.reply_markup()["inline_keyboard"][0]
+            response = asyncio.run(
+                manager.confirm(
+                    IncomingMessage(20, 10, "admin", "/confirm i-abcdef12"),
+                    "i-abcdef12",
+                )
+            )
+
+            self.assertIsNone(response)
+            outgoing = issue_confirmation_message(
+                "i-abcdef12",
+                confirmations.published[0]["result"],
+            )
+            buttons = outgoing.reply_markup()["inline_keyboard"][0]
             self.assertEqual(buttons[0]["callback_data"], "command:/code #12")
             self.assertEqual(
                 buttons[1]["callback_data"],

@@ -183,6 +183,7 @@ class Database:
                     status TEXT NOT NULL,
                     github_issue_number INTEGER,
                     github_issue_url TEXT,
+                    telegram_confirmation_message_id INTEGER,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL
                 );
@@ -425,6 +426,9 @@ class Database:
             )
             self._ensure_column(
                 conn, "issue_drafts", "local_repo_path", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "issue_drafts", "telegram_confirmation_message_id", "INTEGER"
             )
             self._ensure_column(conn, "allowed_repos", "deploy_workflow", "TEXT")
             self._ensure_column(
@@ -1549,6 +1553,79 @@ class Database:
                 """,
                 (status, issue_number, issue_url, draft_id),
             )
+
+    def set_issue_confirmation_message(self, draft_id: str, message_id: int) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE issue_drafts
+                SET telegram_confirmation_message_id = ?
+                WHERE id = ? AND status = 'created'
+                  AND github_issue_number IS NOT NULL
+                  AND github_issue_url IS NOT NULL
+                """,
+                (message_id, draft_id),
+            )
+        return cursor.rowcount == 1
+
+    def list_issue_confirmation_messages(self) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM issue_drafts
+                WHERE status = 'created'
+                  AND telegram_confirmation_message_id IS NOT NULL
+                  AND github_issue_number IS NOT NULL
+                  AND github_issue_url IS NOT NULL
+                ORDER BY id
+                """
+            ).fetchall()
+        records = [dict(row) for row in rows]
+        for record in records:
+            record["issue_json"] = json.loads(str(record["issue_json"]))
+        return records
+
+    def clear_issue_confirmation_message(
+        self, draft_id: str, message_id: int
+    ) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE issue_drafts
+                SET telegram_confirmation_message_id = NULL
+                WHERE id = ? AND telegram_confirmation_message_id = ?
+                """,
+                (draft_id, message_id),
+            )
+        return cursor.rowcount == 1
+
+    def clear_issue_confirmation_message_by_target(
+        self, chat_id: int, message_id: int
+    ) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE issue_drafts
+                SET telegram_confirmation_message_id = NULL
+                WHERE telegram_chat_id = ?
+                  AND telegram_confirmation_message_id = ?
+                """,
+                (chat_id, message_id),
+            )
+        return cursor.rowcount == 1
+
+    def close_issue_confirmation(self, draft_id: str, message_id: int) -> bool:
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE issue_drafts
+                SET status = 'closed', telegram_confirmation_message_id = NULL
+                WHERE id = ? AND status = 'created'
+                  AND telegram_confirmation_message_id = ?
+                """,
+                (draft_id, message_id),
+            )
+        return cursor.rowcount == 1
 
     def set_issue_attachment_paths(self, draft_id: str, paths: list[str]) -> None:
         with self.session() as conn:

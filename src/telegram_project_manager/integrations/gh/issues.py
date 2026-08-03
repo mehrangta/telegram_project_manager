@@ -29,6 +29,17 @@ class GhIssueReader:
     def __init__(self, gh: GhRunner) -> None:
         self.gh = gh
 
+    def get_issue_state(self, repo: str, number: int) -> str:
+        if number < 1:
+            raise ValueError("GitHub issue number must be positive")
+        value = self.gh.api_json(f"repos/{repo}/issues/{number}")
+        if "pull_request" in value:
+            raise ValueError("GitHub issue state lookup returned a pull request")
+        state = str(value.get("state") or "").lower()
+        if state not in {"open", "closed"}:
+            raise ValueError("GitHub issue has no valid state")
+        return state
+
     def list_open_issues(self, repo: str, limit: int = 20) -> list[IssueSummary]:
         if limit < 1:
             raise ValueError("Issue list limit must be positive")

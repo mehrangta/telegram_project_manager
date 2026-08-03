@@ -423,16 +423,32 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         except TelegramBotApiError as exc:
             logging.warning("Telegram callback acknowledgement failed: %s", exc)
 
-    async def delete_callback_source(callback: CallbackAction) -> None:
+    async def delete_callback_source(callback: CallbackAction) -> bool:
         try:
             await asyncio.to_thread(
                 bot.delete_message,
                 callback.message.chat_id,
                 callback.source_message_id,
             )
+            return True
         except TelegramBotApiError:
             logging.warning(
                 "Telegram callback source deletion failed: chat_id=%s message_id=%s",
+                callback.message.chat_id,
+                callback.source_message_id,
+            )
+            return False
+
+    def clear_issue_confirmation_target(callback: CallbackAction) -> None:
+        db = getattr(router, "db", None)
+        clear = getattr(db, "clear_issue_confirmation_message_by_target", None)
+        if not callable(clear):
+            return
+        try:
+            clear(callback.message.chat_id, callback.source_message_id)
+        except Exception:
+            logging.exception(
+                "Failed to clear issue confirmation tracker: chat_id=%s message_id=%s",
                 callback.message.chat_id,
                 callback.source_message_id,
             )
@@ -534,7 +550,8 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             ISSUE_DRAFT_ACTION_PATTERN.fullmatch(command)
             or ISSUE_CODE_ACTION_PATTERN.fullmatch(command)
         ):
-            await delete_callback_source(callback)
+            if await delete_callback_source(callback):
+                clear_issue_confirmation_target(callback)
         if command.lower().startswith("/merge "):
             await delete_callback_source(callback)
         elif command.lower().startswith("/deploy "):
