@@ -376,7 +376,7 @@ def _render_answer(
         f"Branch: {branch}",
         f"Commit: {commit[:12]}",
         "",
-        answer,
+        answer.replace("—", "-"),
     ]
     if sources:
         lines.extend(["", "Sources:", *(f"- {source}" for source in sources)])

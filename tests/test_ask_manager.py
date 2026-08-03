@@ -339,12 +339,35 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["sandbox"], Sandbox.full_access)
         self.assertEqual(call["effort"], ReasoningEffort.high)
         self.assertEqual(call["model_role"], "plan")
+        self.assertIn("Do not use em dashes", call["developer_instructions"])
         self.assertIsNone(call["thread_id"])
         for _ in range(200):
             if self.workspaces.cleaned:
                 break
             await asyncio.sleep(0.01)
         self.assertEqual(len(self.workspaces.cleaned), 1)
+
+    async def test_answer_replaces_em_dashes_before_sending(self):
+        self.codex.result = {
+            "answer": "The startup path is clear — use src/app.py.",
+            "sources": ["src/app.py"],
+        }
+
+        ask_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="Where is startup?",
+        )
+        await wait_for_messages(self.bot, 2)
+        await wait_for_completion(self.service, ask_id)
+
+        self.assertIn("clear - use", self.bot.sent[1][1])
+        self.assertNotIn("—", self.bot.sent[1][1])
 
     async def test_images_are_attached_to_codex_filtered_from_sources_and_cleaned(self):
         png = bytes.fromhex("89504e470d0a1a0a") + b"png"
