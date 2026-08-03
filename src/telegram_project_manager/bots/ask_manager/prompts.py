@@ -11,6 +11,8 @@ Do not modify files, use the network, or read or expose secrets, credentials, pr
 Use repository-relative file paths in sources. Do not cite staged files under .codex/ask-images.
 Do not expose absolute host paths.
 Do not use em dashes in the answer. Use commas, colons, parentheses, or hyphens instead.
+Format the answer for Telegram HTML. Use only <b>, <i>, <u>, <s>, <code>, <pre>, and
+<blockquote> tags. Do not use Markdown formatting such as **bold** or `code`.
 Return only JSON matching the supplied schema.
 """
 
