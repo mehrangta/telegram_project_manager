@@ -37,6 +37,7 @@ class CodeProgressReporter:
             parse_mode=outgoing.parse_mode,
             reply_markup=outgoing.reply_markup(),
             disable_link_preview=outgoing.disable_link_preview,
+            reply_to_message_id=job.get("telegram_reply_to_message_id"),
         )
         self.db.update_code_job(job_id, {"telegram_message_id": int(result["message_id"])})
 

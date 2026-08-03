@@ -65,6 +65,7 @@ class IssueManagerTests(unittest.TestCase):
         chat_id=20,
         thread_id=None,
         local_repo_path="",
+        reply_to_message_id=None,
     ):
         now = int(time.time())
         db.create_issue_draft(
@@ -72,6 +73,7 @@ class IssueManagerTests(unittest.TestCase):
                 "id": draft_id,
                 "telegram_chat_id": chat_id,
                 "telegram_thread_id": thread_id,
+                "telegram_reply_to_message_id": reply_to_message_id,
                 "telegram_user_id": user_id,
                 "repo": "owner/repo",
                 "default_branch": "main",
@@ -119,6 +121,7 @@ class IssueManagerTests(unittest.TestCase):
                 "admin",
                 "/issue button broken",
                 attachments=(IncomingAttachment("file", "unique", "image/png", 100),),
+                message_id=41,
             )
             response = manager.create(message, "button broken")
             self.assertIn("Draft ID: i-12345678", response)
@@ -129,6 +132,10 @@ class IssueManagerTests(unittest.TestCase):
             self.assertIn("Possible causes: 1", response)
             self.assertIn("Context commit: abcdef123456", response)
             self.assertIn("Images: 1", response)
+            self.assertEqual(
+                manager.planner.create_calls[0]["telegram_reply_to_message_id"],
+                41,
+            )
 
     def test_non_admin_cannot_create_issue_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -206,6 +213,7 @@ class IssueManagerTests(unittest.TestCase):
             db = Database(Path(temp_dir) / "bot.db")
             db.initialize()
             db.upsert_user(10, "admin", "admin")
+            self.create_pending_draft(db, reply_to_message_id=41)
             manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
 
             response = manager.confirm(
@@ -225,6 +233,7 @@ class IssueManagerTests(unittest.TestCase):
             )
             self.assertEqual(buttons[2]["text"], "↗ Issue")
             self.assertEqual(buttons[2]["url"], "https://github.com/owner/repo/issues/12")
+            self.assertEqual(response.reply_to_message_id, 41)
 
     def test_created_issue_actions_fall_back_to_short_callbacks(self):
         class SuccessfulExecution:

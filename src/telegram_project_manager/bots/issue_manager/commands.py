@@ -96,6 +96,7 @@ class IssueManager:
                 default_branch=default_branch,
                 local_repo_path=str(chat.get("local_repo_path") or ""),
                 attachments=message.attachments,
+                telegram_reply_to_message_id=message.message_id,
             )
         except RepositoryContextError as exc:
             self.db.audit("issue.context", "failed", {"repo": repo, "error": str(exc)})
@@ -206,6 +207,7 @@ class IssueManager:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
+        draft = self.db.get_issue_draft(draft_id)
         try:
             result = self.execution.execute(
                 draft_id, message.user_id, message.chat_id, message.thread_id
@@ -231,6 +233,9 @@ class IssueManager:
                 callback_button("💻 Code", code_callback),
                 url_button("↗ Issue", result.url),
             ),),
+            reply_to_message_id=(
+                draft.get("telegram_reply_to_message_id") if draft else None
+            ),
         )
 
     def cancel(self, message: IncomingMessage, draft_id: str) -> str:
