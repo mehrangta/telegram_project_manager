@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 import shutil
@@ -9,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ from telegram_project_manager.bots.code_manager.codex_sdk import (
     CodexSdkError,
 )
 from telegram_project_manager.bots.code_manager.workspace import GitWorkspaceService, WorkspaceError
-from telegram_project_manager.platform.responses import outgoing_message
+from telegram_project_manager.platform.responses import OutgoingMessage, outgoing_message
 from telegram_project_manager.platform.router import IncomingAttachment
 from telegram_project_manager.platform.storage.db import Database
 from telegram_project_manager.platform.telegram_bot import TelegramBotApi, TelegramBotApiError
@@ -39,6 +41,9 @@ ASK_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_OUTSTANDING_ASKS = 10
 MAX_CONCURRENT_ASKS = 2
 ASK_QUEUE_QUESTION_MAX_LENGTH = 120
+TELEGRAM_ASK_TAGS = frozenset({"b", "i", "u", "s", "code", "pre", "blockquote"})
+ASK_FENCED_CODE_RE = re.compile(r"```(?:[A-Za-z0-9_+.-]+)?\s*\n?(.*?)(?:```|\Z)", re.DOTALL)
+ASK_INLINE_MARKUP_RE = re.compile(r"\*\*(.+?)\*\*|`([^`\n]+)`")
 
 
 @dataclass
@@ -239,6 +244,7 @@ class AskService:
                     thread_id=thread_id,
                     reply_to_message_id=message_id,
                     text=_render_answer(repo, branch, commit, response.answer, sources),
+                    telegram_html=True,
                 )
                 self.db.audit(
                     "ask.answer",
@@ -304,8 +310,13 @@ class AskService:
         thread_id: int | None,
         reply_to_message_id: int | None,
         text: str,
+        telegram_html: bool = False,
     ) -> None:
-        outgoing = outgoing_message(text, reply_to_message_id=reply_to_message_id)
+        outgoing = (
+            OutgoingMessage(text=text, reply_to_message_id=reply_to_message_id)
+            if telegram_html
+            else outgoing_message(text, reply_to_message_id=reply_to_message_id)
+        )
         await asyncio.to_thread(
             self.bot.send_message,
             chat_id,
@@ -371,16 +382,85 @@ def _render_answer(
     sources: tuple[str, ...],
 ) -> str:
     lines = [
-        "Repository answer.",
-        f"Repo: {repo}",
-        f"Branch: {branch}",
-        f"Commit: {commit[:12]}",
+        "ℹ️ <b>Repository answer.</b>",
+        f"<b>Repo:</b> {html.escape(repo)}",
+        f"<b>Branch:</b> {html.escape(branch)}",
+        f"<b>Commit:</b> <code>{html.escape(commit[:12])}</code>",
         "",
-        answer.replace("—", "-"),
+        _render_telegram_answer(answer.replace("—", "-")),
     ]
     if sources:
-        lines.extend(["", "Sources:", *(f"- {source}" for source in sources)])
+        lines.extend(
+            [
+                "",
+                "<b>Sources:</b>",
+                *(f"• <code>{html.escape(source)}</code>" for source in sources),
+            ]
+        )
     return "\n".join(lines)
+
+
+def _render_telegram_answer(answer: str) -> str:
+    rendered: list[str] = []
+    position = 0
+    for match in ASK_FENCED_CODE_RE.finditer(answer):
+        rendered.append(_sanitize_telegram_html(answer[position : match.start()]))
+        rendered.append(f"<pre>{html.escape(match.group(1).strip())}</pre>")
+        position = match.end()
+    rendered.append(_sanitize_telegram_html(answer[position:]))
+    return "".join(rendered).strip()
+
+
+def _sanitize_telegram_html(value: str) -> str:
+    parser = _TelegramAskHtmlParser()
+    parser.feed(value)
+    parser.close()
+    return parser.rendered()
+
+
+class _TelegramAskHtmlParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._open_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag not in TELEGRAM_ASK_TAGS:
+            self._parts.append(html.escape(self.get_starttag_text()))
+            return
+        self._parts.append(f"<{tag}>")
+        self._open_tags.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in TELEGRAM_ASK_TAGS or tag not in self._open_tags:
+            self._parts.append(html.escape(f"</{tag}>"))
+            return
+        while self._open_tags:
+            open_tag = self._open_tags.pop()
+            self._parts.append(f"</{open_tag}>")
+            if open_tag == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self._open_tags and self._open_tags[-1] in {"code", "pre"}:
+            self._parts.append(html.escape(data))
+            return
+        position = 0
+        for match in ASK_INLINE_MARKUP_RE.finditer(data):
+            self._parts.append(html.escape(data[position : match.start()]))
+            bold, code = match.groups()
+            if bold is not None:
+                self._parts.append(f"<b>{html.escape(bold)}</b>")
+            else:
+                self._parts.append(f"<code>{html.escape(code or '')}</code>")
+            position = match.end()
+        self._parts.append(html.escape(data[position:]))
+
+    def rendered(self) -> str:
+        while self._open_tags:
+            self._parts.append(f"</{self._open_tags.pop()}>")
+        return "".join(self._parts)
 
 
 def _safe_error(exc: Exception) -> str:

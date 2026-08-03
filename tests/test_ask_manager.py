@@ -369,6 +369,37 @@ class AskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("clear - use", self.bot.sent[1][1])
         self.assertNotIn("—", self.bot.sent[1][1])
 
+    async def test_answer_uses_safe_telegram_html_instead_of_markdown_markers(self):
+        self.codex.result = {
+            "answer": (
+                "Use **config** with `uv run app`. "
+                "Native <b>Telegram</b> works, but <script>unsafe</script> does not."
+            ),
+            "sources": ["src/app.py"],
+        }
+        ask_id = await self.service.submit(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            message_id=40,
+            repo="owner/repo",
+            branch="main",
+            source_path="/cache/repo.git",
+            question="How do I run it?",
+        )
+        await wait_for_messages(self.bot, 2)
+        await wait_for_completion(self.service, ask_id)
+
+        answer = self.bot.sent[1][1]
+        self.assertIn("<b>config</b>", answer)
+        self.assertIn("<code>uv run app</code>", answer)
+        self.assertIn("<b>Telegram</b>", answer)
+        self.assertIn("&lt;script&gt;unsafe&lt;/script&gt;", answer)
+        self.assertIn("• <code>src/app.py</code>", answer)
+        self.assertNotIn("**", answer)
+        self.assertNotIn("`", answer)
+        self.assertEqual(self.bot.sent[1][3]["parse_mode"], "HTML")
+
     async def test_images_are_attached_to_codex_filtered_from_sources_and_cleaned(self):
         png = bytes.fromhex("89504e470d0a1a0a") + b"png"
         gif = bytes.fromhex("474946383961") + b"gif"
