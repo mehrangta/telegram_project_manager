@@ -124,14 +124,17 @@ class IssueManagerTests(unittest.TestCase):
                 message_id=41,
             )
             response = manager.create(message, "button broken")
-            self.assertIn("Draft ID: i-12345678", response)
-            self.assertIn("Actual behavior: Clicking Save has no effect.", response)
-            self.assertIn("Expected behavior: Clicking Save persists the form.", response)
-            self.assertIn("Codebase context: The form handler owns the save flow.", response)
-            self.assertIn("Relevant files: 1", response)
-            self.assertIn("Possible causes: 1", response)
-            self.assertIn("Context commit: abcdef123456", response)
-            self.assertIn("Images: 1", response)
+            self.assertIsInstance(response, OutgoingMessage)
+            assert isinstance(response, OutgoingMessage)
+            self.assertIn("<code>i-12345678</code>", response.text)
+            self.assertIn("Clicking Save has no effect.", response.text)
+            self.assertIn("Clicking Save persists the form.", response.text)
+            self.assertIn("The form handler owns the save flow.", response.text)
+            self.assertIn("<b>Relevant files:</b> 1", response.text)
+            self.assertIn("<b>Possible causes:</b> 1", response.text)
+            self.assertIn("<code>abcdef123456</code>", response.text)
+            self.assertIn("<b>Images:</b> 1", response.text)
+            self.assertEqual(response.reply_to_message_id, 41)
             self.assertEqual(
                 manager.planner.create_calls[0]["telegram_reply_to_message_id"],
                 41,
@@ -166,7 +169,9 @@ class IssueManagerTests(unittest.TestCase):
             )
 
             self.assertIn("No active repo for this topic", missing)
-            self.assertIn("Draft ID", created)
+            self.assertIsInstance(created, OutgoingMessage)
+            assert isinstance(created, OutgoingMessage)
+            self.assertIn("Draft ID", created.text)
             self.assertEqual(planner.create_calls[0]["thread_id"], 101)
             self.assertEqual(planner.create_calls[0]["repo"], "owner/topic")
             self.assertEqual(planner.create_calls[0]["default_branch"], "develop")

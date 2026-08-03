@@ -69,7 +69,7 @@ class IssueManager:
             return self.revise(message, message.reply_to_draft_id, message.text.strip())
         return None
 
-    def create(self, message: IncomingMessage, request_text: str) -> str:
+    def create(self, message: IncomingMessage, request_text: str) -> str | OutgoingMessage:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -104,13 +104,16 @@ class IssueManager:
         except (LlmError, IssueDraftValidationError, ValueError) as exc:
             self.db.audit("issue.plan", "failed", {"repo": repo, "error": str(exc)})
             return f"Issue draft not created.\nReason: {exc}"
-        return self._format_preview(
-            heading="Issue draft created.",
-            draft_id=draft_id,
-            repo=repo,
-            issue=issue,
-            revision=1,
-            image_count=len(message.attachments),
+        return outgoing_message(
+            self._format_preview(
+                heading="Issue draft created.",
+                draft_id=draft_id,
+                repo=repo,
+                issue=issue,
+                revision=1,
+                image_count=len(message.attachments),
+            ),
+            reply_to_message_id=message.message_id,
         )
 
     def revise(self, message: IncomingMessage, draft_id: str, feedback_text: str) -> str:
