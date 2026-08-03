@@ -126,6 +126,7 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
                     20,
                     "admin",
                     "/code --skip-plan owner/repo#12",
+                    message_id=41,
                     thread_id=30,
                 )
             )
@@ -142,6 +143,7 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["base_branch"], "develop")
             self.assertEqual(call["source_path"], "/cache/owner-repo.git")
             self.assertTrue(call["skip_plan"])
+            self.assertEqual(call["reply_to_message_id"], 41)
 
     async def test_status_and_controls_are_limited_to_current_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -560,6 +562,39 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.service.shutdown()
         self.temp.cleanup()
+
+    async def test_tracked_message_replies_to_original_request(self):
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=True,
+            reply_to_message_id=41,
+        )
+
+        job = self.db.get_code_job(job_id)
+        assert job is not None
+        self.assertEqual(job["telegram_reply_to_message_id"], 41)
+        self.assertEqual(job["telegram_message_id"], 77)
+        self.assertEqual(self.bot.sent[0][0], 10)
+        self.assertEqual(self.bot.sent[0][2], 30)
+        self.assertEqual(self.bot.sent_options[0]["reply_to_message_id"], 41)
+
+    async def test_tracked_message_without_request_target_is_standalone(self):
+        await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=None,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=True,
+        )
+
+        self.assertIsNone(self.bot.sent_options[0]["reply_to_message_id"])
 
     async def test_default_allows_four_concurrent_code_jobs(self):
         class BlockingCodex(FakeCodex):

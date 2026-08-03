@@ -51,6 +51,7 @@ class IssuePlanner:
         local_repo_path: str,
         attachments: tuple[IncomingAttachment, ...],
         thread_id: int | None = None,
+        telegram_reply_to_message_id: int | None = None,
     ) -> tuple[str, IssueDraft]:
         if self.db.get_setting("issue_body_llm_enabled", "true") == "false":
             raw = self.llm.chat_json(
@@ -97,6 +98,7 @@ class IssuePlanner:
                 "id": draft_id,
                 "telegram_chat_id": chat_id,
                 "telegram_thread_id": thread_id,
+                "telegram_reply_to_message_id": telegram_reply_to_message_id,
                 "telegram_user_id": user_id,
                 "repo": repo,
                 "default_branch": default_branch,

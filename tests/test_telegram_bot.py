@@ -246,6 +246,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(action.message.chat_id, 40)
         self.assertEqual(action.message.user_id, 30)
         self.assertEqual(action.message.thread_id, 7)
+        self.assertEqual(action.message.reply_target_message_id, 20)
 
     def test_group_reply_to_draft_is_routed_without_command_or_mention(self):
         class Handler:
@@ -341,6 +342,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
     class Router:
         def __init__(self, admin_ids=None):
             self.commands = []
+            self.messages = []
             self.bot_username = ""
             self.admin_ids = {30} if admin_ids is None else set(admin_ids)
 
@@ -352,16 +354,27 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
 
         async def handle_message(self, message):
             self.commands.append(message.text)
+            self.messages.append(message)
             return "Action queued"
 
     @staticmethod
-    def callback(update_id, query_id, data, message_id=20, user_id=30, thread_id=None):
+    def callback(
+        update_id,
+        query_id,
+        data,
+        message_id=20,
+        user_id=30,
+        thread_id=None,
+        reply_to_message_id=None,
+    ):
         message = {
             "message_id": message_id,
             "chat": {"id": 40, "type": "supergroup"},
         }
         if thread_id is not None:
             message["message_thread_id"] = thread_id
+        if reply_to_message_id is not None:
+            message["reply_to_message"] = {"message_id": reply_to_message_id}
         return {
             "update_id": update_id,
             "callback_query": {
@@ -411,6 +424,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
                 f"query-{index}",
                 f"command:{command}",
                 message_id=20 + index,
+                reply_to_message_id=11,
             )
             for index, command in enumerate(commands, start=1)
         ])
@@ -420,6 +434,10 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, commands)
+        self.assertEqual(
+            [message.reply_target_message_id for message in router.messages],
+            [11, 11, 11, 11],
+        )
         self.assertEqual(
             bot.answers,
             [(f"query-{index}", "Action requested") for index in range(1, 5)],
