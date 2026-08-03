@@ -23,6 +23,7 @@ from telegram_project_manager.bots.pull_request_manager.service import (
 )
 from telegram_project_manager.platform.router import IncomingMessage
 from telegram_project_manager.platform.storage.db import Database
+from telegram_project_manager.platform.telegram_bot import TelegramBotApiError
 
 
 def check(bucket="pass", state="success"):
@@ -90,6 +91,7 @@ class FakeReporter:
         self.refreshed = []
         self.notified = []
         self.merge_notified = []
+        self.deployment_messages = []
 
     async def refresh(self, job_id, force=False):
         self.refreshed.append((job_id, force))
@@ -99,6 +101,14 @@ class FakeReporter:
 
     async def notify_merge(self, job_id):
         self.merge_notified.append(job_id)
+
+    async def ensure_deployment_message(
+        self, job_id, *, message_id=None, reply_to_message_id=None
+    ):
+        self.deployment_messages.append(
+            (job_id, message_id, reply_to_message_id)
+        )
+        return True
 
 
 async def wait_for_deployment(db, job_id, expected):
@@ -196,6 +206,20 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
             [{"repo": "owner/repo", "workflow": "deploy.yml", "commit_sha": "merge-sha"}],
         )
         self.assertEqual(self.reporter.notified, ["c-abcdef12"])
+
+    async def test_deploy_confirmation_becomes_live_status_message(self):
+        response = await self.service.start_deploy(
+            "c-abcdef12", status_message_id=88
+        )
+
+        self.assertIsNone(response)
+        self.assertEqual(
+            self.reporter.deployment_messages,
+            [("c-abcdef12", 88, None)],
+        )
+        job = self.db.get_code_job("c-abcdef12")
+        self.assertEqual(job["latest_activity"], "Merge and deployment queued")
+        await wait_for_deployment(self.db, "c-abcdef12", "succeeded")
 
     async def test_merge_only_accepts_checked_non_main_base_without_deploy_config(self):
         self.db.set_repo_deploy_enabled("owner/repo", False)
@@ -627,6 +651,125 @@ class MergeDeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.github.dispatches, [])
 
 
+class DeploymentProgressReporterTests(unittest.IsolatedAsyncioTestCase):
+    class Bot:
+        def __init__(self):
+            self.sent = []
+            self.edited = []
+            self.edit_error = None
+
+        def send_message(self, chat_id, text, thread_id=None, **options):
+            self.sent.append((chat_id, text, thread_id, options))
+            return {"message_id": 99}
+
+        def edit_message_text(self, chat_id, message_id, text, **options):
+            if self.edit_error:
+                raise self.edit_error
+            self.edited.append((chat_id, message_id, text, options))
+            return {"message_id": message_id}
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp.name) / "bot.db")
+        self.db.initialize()
+        self.db.create_code_job(
+            {
+                "id": "c-abcdef12",
+                "telegram_chat_id": 10,
+                "telegram_user_id": 20,
+                "telegram_thread_id": 30,
+                "repo": "owner/repo",
+                "issue_number": 12,
+                "issue_title": "Issue",
+                "issue_url": "https://github.com/owner/repo/issues/12",
+                "issue_context_json": {},
+                "base_branch": "main",
+                "target_branch": "codex/issue-12-c-abcdef12",
+                "workspace_path": "/tmp/job",
+                "source_repo_path": "/tmp/repo.git",
+                "status": "ready",
+                "resume_phase": "checks",
+                "skip_plan": True,
+            }
+        )
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "deployment_mode": "deploy",
+                "deployment_status": "queued",
+                "deployment_started_at": int(time.time()),
+                "latest_activity": "Merge and deployment queued",
+            },
+        )
+        self.bot = self.Bot()
+        self.reporter = CodeProgressReporter(self.db, self.bot, min_interval=0)
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    async def test_confirmation_is_updated_through_terminal_status_without_duplicate(self):
+        created = await self.reporter.ensure_deployment_message(
+            "c-abcdef12", message_id=88
+        )
+        self.db.update_code_job(
+            "c-abcdef12",
+            {
+                "deployment_status": "succeeded",
+                "deployment_merge_sha": "abcdef1234567890",
+                "deployment_run_url": "https://run/91",
+                "latest_activity": "Deployment succeeded",
+            },
+        )
+
+        await self.reporter.notify_deployment("c-abcdef12")
+
+        self.assertTrue(created)
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual([item[1] for item in self.bot.edited], [88, 88])
+        self.assertIn("Deployment in progress", self.bot.edited[0][2])
+        self.assertIn("<b>QUEUED</b>", self.bot.edited[0][2])
+        self.assertIn("Deployment succeeded", self.bot.edited[-1][2])
+        self.assertIn("https://run/91", self.bot.edited[-1][2])
+        job = self.db.get_code_job("c-abcdef12")
+        self.assertEqual(job["telegram_deployment_message_id"], 88)
+
+    async def test_typed_command_creates_reply_owned_by_bot(self):
+        created = await self.reporter.ensure_deployment_message(
+            "c-abcdef12", reply_to_message_id=41
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(self.bot.sent[0][3]["reply_to_message_id"], 41)
+        job = self.db.get_code_job("c-abcdef12")
+        self.assertEqual(job["telegram_deployment_message_id"], 99)
+
+    async def test_missing_message_is_replaced_and_transient_failure_is_audited(self):
+        self.db.update_code_job(
+            "c-abcdef12", {"telegram_deployment_message_id": 88}
+        )
+        self.bot.edit_error = TelegramBotApiError("message to edit not found")
+
+        await self.reporter.refresh("c-abcdef12", force=True)
+
+        job = self.db.get_code_job("c-abcdef12")
+        self.assertEqual(job["telegram_deployment_message_id"], 99)
+        self.assertEqual(len(self.bot.sent), 1)
+
+        self.bot.edit_error = TelegramBotApiError("Temporary failure in name resolution")
+        self.db.update_code_job(
+            "c-abcdef12", {"latest_activity": "Waiting for deployment workflow"}
+        )
+        with self.assertLogs(level="WARNING"):
+            await self.reporter.refresh("c-abcdef12", force=True)
+        with self.db.session() as conn:
+            audit = conn.execute(
+                "SELECT action, status FROM audit_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(audit["action"], "deploy.progress")
+        self.assertEqual(audit["status"], "failed")
+
+
 class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
     class PullRequestLists:
         def __init__(self, error=None):
@@ -654,7 +797,7 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
             )
 
             class Service:
-                async def start_deploy(self, job_id):
+                async def start_deploy(self, job_id, **kwargs):
                     return f"deployed {job_id}"
 
                 async def start_merge(self, job_id):
@@ -696,7 +839,7 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
             )
 
             class Service:
-                async def start_deploy(self, job_id):
+                async def start_deploy(self, job_id, **kwargs):
                     return f"started {job_id}"
 
                 async def start_merge(self, job_id):
@@ -720,6 +863,70 @@ class PullRequestCommandTests(unittest.IsolatedAsyncioTestCase):
                 10, 99, "admin", "/merge", reply_to_code_job_id="c-abcdef12"
             )
             self.assertEqual(await manager.handle(merge_message), "merged c-abcdef12")
+
+    async def test_deploy_command_passes_message_ownership_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(99, "admin", "admin")
+            db.create_code_job(
+                {
+                    "id": "c-abcdef12", "telegram_chat_id": 10,
+                    "telegram_user_id": 20, "telegram_thread_id": None,
+                    "repo": "owner/repo", "issue_number": 1,
+                    "issue_title": "Issue", "issue_url": "url",
+                    "issue_context_json": {}, "base_branch": "main",
+                    "target_branch": "branch", "workspace_path": "/tmp/job",
+                    "source_repo_path": "/tmp/repo", "status": "ready",
+                    "resume_phase": "checks", "skip_plan": True,
+                }
+            )
+
+            class Service:
+                def __init__(self):
+                    self.calls = []
+
+                async def start_deploy(self, job_id, **kwargs):
+                    self.calls.append((job_id, kwargs))
+                    return None
+
+                async def start_merge(self, job_id):
+                    raise AssertionError("merge should not run")
+
+            service = Service()
+            manager = PullRequestManager(
+                db=db, service=service, pull_request_lists=object()
+            )
+
+            await manager.handle(
+                IncomingMessage(
+                    10, 99, "admin", "/deploy c-abcdef12", message_id=41
+                )
+            )
+            await manager.handle(
+                IncomingMessage(
+                    10,
+                    99,
+                    "admin",
+                    "/deploy c-abcdef12",
+                    message_id=88,
+                    callback_source_message_id=88,
+                )
+            )
+
+            self.assertEqual(
+                service.calls,
+                [
+                    (
+                        "c-abcdef12",
+                        {"status_message_id": None, "reply_to_message_id": 41},
+                    ),
+                    (
+                        "c-abcdef12",
+                        {"status_message_id": 88, "reply_to_message_id": None},
+                    ),
+                ],
+            )
 
 
     async def test_prs_command_uses_active_topic_repository_and_bot_mention(self):

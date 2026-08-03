@@ -115,6 +115,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("deploy_enabled", allowed_repo_columns)
             self.assertFalse(db.is_repo_deploy_enabled("owner/repo"))
             self.assertIn("telegram_plan_message_id", code_job_columns)
+            self.assertIn("telegram_deployment_message_id", code_job_columns)
             self.assertIn("github_plan_question_comment_id", code_job_columns)
             self.assertIn("github_plan_question_revision", code_job_columns)
             self.assertIn("github_plan_comment_cursor", code_job_columns)

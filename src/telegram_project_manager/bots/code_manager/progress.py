@@ -19,8 +19,10 @@ class CodeProgressReporter:
         self.min_interval = min_interval
         self._last_update: dict[str, float] = defaultdict(float)
         self._last_message: dict[str, OutgoingMessage] = {}
+        self._last_deployment_message: dict[str, OutgoingMessage] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._plan_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._deployment_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def create(self, job_id: str) -> None:
         job = self.db.get_code_job(job_id)
@@ -55,26 +57,149 @@ class CodeProgressReporter:
             if not force and now - self._last_update[job_id] < self.min_interval:
                 return
             job = self.db.get_code_job(job_id)
-            if not job or not job.get("telegram_message_id"):
+            if not job:
                 return
-            outgoing = self.render_message(job)
-            if outgoing == self._last_message.get(job_id):
-                return
-            try:
-                await asyncio.to_thread(
-                    self.bot.edit_message_text,
-                    int(job["telegram_chat_id"]),
-                    int(job["telegram_message_id"]),
-                    outgoing.text,
-                    parse_mode=outgoing.parse_mode,
-                    reply_markup=outgoing.reply_markup(include_empty=True),
-                    disable_link_preview=outgoing.disable_link_preview,
+            attempted = False
+            if job.get("telegram_message_id"):
+                attempted = True
+                try:
+                    await self._refresh_code_message(job)
+                except TelegramBotApiError as exc:
+                    self._report_progress_failure("code.progress", job_id, exc)
+            if (
+                job.get("deployment_mode") == "deploy"
+                and job.get("telegram_deployment_message_id")
+            ):
+                attempted = True
+                try:
+                    async with self._deployment_locks[job_id]:
+                        await self._refresh_deployment_message(job)
+                except TelegramBotApiError as exc:
+                    self._report_progress_failure("deploy.progress", job_id, exc)
+            if attempted:
+                self._last_update[job_id] = now
+
+    async def _refresh_code_message(self, job: dict[str, Any]) -> None:
+        job_id = str(job["id"])
+        outgoing = self.render_message(job)
+        if outgoing == self._last_message.get(job_id):
+            return
+        try:
+            await asyncio.to_thread(
+                self.bot.edit_message_text,
+                int(job["telegram_chat_id"]),
+                int(job["telegram_message_id"]),
+                outgoing.text,
+                parse_mode=outgoing.parse_mode,
+                reply_markup=outgoing.reply_markup(include_empty=True),
+                disable_link_preview=outgoing.disable_link_preview,
+            )
+        except TelegramBotApiError as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+        self._last_message[job_id] = outgoing
+
+    async def ensure_deployment_message(
+        self,
+        job_id: str,
+        *,
+        message_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        async with self._deployment_locks[job_id]:
+            job = self.db.get_code_job(job_id)
+            if (
+                not job
+                or job.get("deployment_mode") != "deploy"
+                or not job.get("deployment_status")
+            ):
+                return False
+            outgoing = self.render_deployment_message(job)
+            target_id = message_id
+            if target_id is None and reply_to_message_id is None:
+                stored_id = job.get("telegram_deployment_message_id")
+                target_id = int(stored_id) if stored_id is not None else None
+            if target_id is not None:
+                try:
+                    await self._edit_deployment_message(job, target_id, outgoing)
+                except TelegramBotApiError as exc:
+                    if not _is_uneditable_message_error(exc):
+                        raise
+                    target_id = None
+            if target_id is None:
+                target_id = await self._send_deployment_message(
+                    job,
+                    outgoing,
+                    reply_to_message_id=reply_to_message_id,
                 )
-            except TelegramBotApiError as exc:
-                if "message is not modified" not in str(exc).lower():
-                    raise
-            self._last_message[job_id] = outgoing
-            self._last_update[job_id] = now
+            self.db.update_code_job(
+                job_id, {"telegram_deployment_message_id": target_id}
+            )
+            self._last_deployment_message[job_id] = outgoing
+            return True
+
+    async def _refresh_deployment_message(self, job: dict[str, Any]) -> None:
+        job_id = str(job["id"])
+        outgoing = self.render_deployment_message(job)
+        if outgoing == self._last_deployment_message.get(job_id):
+            return
+        message_id = int(job["telegram_deployment_message_id"])
+        try:
+            await self._edit_deployment_message(job, message_id, outgoing)
+        except TelegramBotApiError as exc:
+            if not _is_uneditable_message_error(exc):
+                raise
+            message_id = await self._send_deployment_message(job, outgoing)
+            self.db.update_code_job(
+                job_id, {"telegram_deployment_message_id": message_id}
+            )
+        self._last_deployment_message[job_id] = outgoing
+
+    async def _edit_deployment_message(
+        self,
+        job: dict[str, Any],
+        message_id: int,
+        outgoing: OutgoingMessage,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self.bot.edit_message_text,
+                int(job["telegram_chat_id"]),
+                message_id,
+                outgoing.text,
+                parse_mode=outgoing.parse_mode,
+                reply_markup=outgoing.reply_markup(include_empty=True),
+                disable_link_preview=outgoing.disable_link_preview,
+            )
+        except TelegramBotApiError as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    async def _send_deployment_message(
+        self,
+        job: dict[str, Any],
+        outgoing: OutgoingMessage,
+        *,
+        reply_to_message_id: int | None = None,
+    ) -> int:
+        result = await asyncio.to_thread(
+            self.bot.send_message,
+            int(job["telegram_chat_id"]),
+            outgoing.text,
+            job.get("telegram_thread_id"),
+            parse_mode=outgoing.parse_mode,
+            reply_markup=outgoing.reply_markup(),
+            disable_link_preview=outgoing.disable_link_preview,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return int(result["message_id"])
+
+    def _report_progress_failure(
+        self, action: str, job_id: str, exc: TelegramBotApiError
+    ) -> None:
+        label = "code job" if action == "code.progress" else "deployment message"
+        logging.warning("Failed to refresh %s %s: %s", label, job_id, exc)
+        self.db.audit(action, "failed", {"error": _safe_error(exc)}, job_id)
 
     async def notify_terminal(self, job_id: str) -> None:
         job = self.db.get_code_job(job_id)
@@ -212,33 +337,11 @@ class CodeProgressReporter:
         job = self.db.get_code_job(job_id)
         if not job or job.get("deployment_status") not in {"succeeded", "failed"}:
             return
-        succeeded = job["deployment_status"] == "succeeded"
-        lines = [
-            "✅ Deployment succeeded" if succeeded else "❌ Deployment failed",
-            f"Code Job ID: {job['id']}",
-            f"Repo: {job['repo']}",
-        ]
-        if job.get("deployment_merge_sha"):
-            lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
-        if job.get("deployment_run_url"):
-            lines.append(f"Deployment: {job['deployment_run_url']}")
-        if job.get("deployment_error"):
-            lines.append(f"Error: {job['deployment_error']}")
-        recovery_actions = _conflict_recovery_failure_actions(job)
-        if not succeeded and recovery_actions:
-            lines.extend(recovery_actions)
-            lines.append(f"Deploy after the code job is ready: /deploy {job['id']}")
-        lines.append(f"Status command: /code status {job['id']}")
-        outgoing = outgoing_message("\n".join(lines), expandable_prefixes=("Error:",))
-        await asyncio.to_thread(
-            self.bot.send_message,
-            int(job["telegram_chat_id"]),
-            outgoing.text,
-            job.get("telegram_thread_id"),
-            parse_mode=outgoing.parse_mode,
-            reply_markup=outgoing.reply_markup(),
-            disable_link_preview=outgoing.disable_link_preview,
-        )
+        if job.get("telegram_deployment_message_id"):
+            async with self._deployment_locks[job_id]:
+                await self._refresh_deployment_message(job)
+            return
+        await self.ensure_deployment_message(job_id)
 
     async def notify_merge(self, job_id: str) -> None:
         job = self.db.get_code_job(job_id)
@@ -293,6 +396,43 @@ class CodeProgressReporter:
                 "Deployment error:", "Error:"
             ),
         )
+
+    def render_deployment_message(self, job: dict[str, Any]) -> OutgoingMessage:
+        return outgoing_message(
+            CodeProgressReporter.render_deployment(job),
+            expandable_prefixes=("Error:",),
+        )
+
+    @staticmethod
+    def render_deployment(job: dict[str, Any]) -> str:
+        status = str(job.get("deployment_status") or "unknown")
+        heading = {
+            "succeeded": "✅ Deployment succeeded",
+            "failed": "❌ Deployment failed",
+        }.get(status, "⚙️ Deployment in progress")
+        started = int(job.get("deployment_started_at") or time.time())
+        elapsed = max(0, int(time.time()) - started)
+        lines = [
+            heading,
+            f"Code Job ID: {job['id']}",
+            f"Repo: {job['repo']}",
+            f"Status: {status.replace('_', ' ')}",
+            f"Elapsed: {_duration(elapsed)}",
+        ]
+        if job.get("latest_activity"):
+            lines.append(f"Activity: {job['latest_activity']}")
+        if job.get("deployment_merge_sha"):
+            lines.append(f"Merge commit: {str(job['deployment_merge_sha'])[:12]}")
+        if job.get("deployment_run_url"):
+            lines.append(f"Deployment: {job['deployment_run_url']}")
+        if job.get("deployment_error"):
+            lines.extend(["", f"Error: {job['deployment_error']}"])
+        recovery_actions = _conflict_recovery_failure_actions(job)
+        if status == "failed" and recovery_actions:
+            lines.extend(recovery_actions)
+            lines.append(f"Deploy after the code job is ready: /deploy {job['id']}")
+        lines.extend(["", f"Status command: /code status {job['id']}"])
+        return truncate("\n".join(lines), 4096)
 
     @staticmethod
     def render(
@@ -482,6 +622,18 @@ def _event_summary(event: dict[str, Any]) -> str:
 
 def _safe_error(exc: BaseException) -> str:
     return " ".join(str(exc).split())[:1000] or exc.__class__.__name__
+
+
+def _is_uneditable_message_error(exc: TelegramBotApiError) -> bool:
+    error = str(exc).lower()
+    return any(
+        marker in error
+        for marker in (
+            "message to edit not found",
+            "message can't be edited",
+            "message can not be edited",
+        )
+    )
 
 
 def _recent_activity(events: list[dict[str, Any]], created_at: int) -> list[str]:

@@ -241,7 +241,10 @@ replies without an explicit job ID.
   deploying. Deployment is disabled per repository until an admin configures a
   workflow and enables it. `/deploy` requires a ready pull request targeting
   `main` and dispatches the configured `workflow_dispatch` workflow at the
-  accepted merge SHA. If GitHub reports conflicts, the bot merges the latest
+  accepted merge SHA. After deployment is confirmed, the bot updates that
+  Telegram message in place with the current merge, conflict-resolution,
+  workflow, success, or failure status; typed deployment commands receive an
+  equivalent live reply. If GitHub reports conflicts, the bot merges the latest
   base into the pull-request branch, asks Codex to resolve guarded content
   conflicts, reruns CI, and then resumes the requested merge or deployment.
 - **Recovery:** Interrupted code jobs require `/code retry` or `/code discard`.

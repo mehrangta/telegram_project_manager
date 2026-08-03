@@ -242,6 +242,7 @@ class Database:
                     telegram_thread_id INTEGER,
                     telegram_message_id INTEGER,
                     telegram_plan_message_id INTEGER,
+                    telegram_deployment_message_id INTEGER,
                     repo TEXT NOT NULL,
                     issue_number INTEGER NOT NULL,
                     issue_title TEXT NOT NULL,
@@ -424,6 +425,9 @@ class Database:
             )
             self._ensure_column(conn, "code_jobs", "source_repo_path", "TEXT")
             self._ensure_column(conn, "code_jobs", "telegram_plan_message_id", "INTEGER")
+            self._ensure_column(
+                conn, "code_jobs", "telegram_deployment_message_id", "INTEGER"
+            )
             self._ensure_column(conn, "code_jobs", "ci_head_sha", "TEXT")
             self._ensure_column(conn, "code_jobs", "ci_wait_started_at", "INTEGER")
             self._ensure_column(
@@ -2102,6 +2106,7 @@ class Database:
         allowed_columns = {
             "telegram_message_id",
             "telegram_plan_message_id",
+            "telegram_deployment_message_id",
             "base_sha",
             "source_repo_path",
             "status",

@@ -341,6 +341,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
     class Router:
         def __init__(self, admin_ids=None):
             self.commands = []
+            self.messages = []
             self.bot_username = ""
             self.admin_ids = {30} if admin_ids is None else set(admin_ids)
 
@@ -352,6 +353,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
 
         async def handle_message(self, message):
             self.commands.append(message.text)
+            self.messages.append(message)
             return "Action queued"
 
     @staticmethod
@@ -562,6 +564,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             await run_polling(bot, router)
 
         self.assertEqual(router.commands, ["/deploy c-abcdef12"])
+        self.assertEqual(router.messages[0].callback_source_message_id, 21)
         confirmation_markup = bot.sent[0][3]["reply_markup"]
         self.assertEqual(
             confirmation_markup["inline_keyboard"][0][0]["callback_data"],

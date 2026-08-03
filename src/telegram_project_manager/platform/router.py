@@ -30,6 +30,7 @@ class IncomingMessage:
     reply_to_draft_id: str | None = None
     reply_to_issue_ref: str | None = None
     reply_to_code_job_id: str | None = None
+    callback_source_message_id: int | None = None
 
 
 class BotHandler(Protocol):
@@ -69,6 +70,7 @@ class TelegramRouter:
             reply_to_draft_id=message.reply_to_draft_id,
             reply_to_issue_ref=message.reply_to_issue_ref,
             reply_to_code_job_id=message.reply_to_code_job_id,
+            callback_source_message_id=message.callback_source_message_id,
         )
         for handler in self.handlers:
             response = await handler.handle(message)
