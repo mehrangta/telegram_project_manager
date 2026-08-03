@@ -34,8 +34,8 @@ MAX_IMAGE_BYTES = 10_000_000
 MAX_TOTAL_IMAGE_BYTES = 20_000_000
 
 
-def _code_callback(repo: str, number: int, *, skip_plan: bool) -> str:
-    command = "/code --skip-plan" if skip_plan else "/code"
+def _code_callback(repo: str, number: int, *, flag: str = "") -> str:
+    command = f"/code {flag}".rstrip()
     callback = f"command:{command} {repo}#{number}"
     if len(callback.encode("utf-8")) > CALLBACK_DATA_LIMIT:
         callback = f"command:{command} #{number}"
@@ -229,14 +229,18 @@ class IssueManager:
                 f"Link: {result.url}",
             ]
         )
-        plan_callback = _code_callback(result.repo, result.number, skip_plan=False)
-        code_callback = _code_callback(result.repo, result.number, skip_plan=True)
+        plan_callback = _code_callback(result.repo, result.number)
+        code_callback = _code_callback(result.repo, result.number, flag="--skip-plan")
+        plan_and_code_callback = _code_callback(
+            result.repo, result.number, flag="--plan-and-code"
+        )
         return outgoing_message(
             text,
             keyboard=(
                 (
                     callback_button("📝 Plan", plan_callback),
                     callback_button("💻 Code", code_callback),
+                    callback_button("📝💻 Plan & Code", plan_and_code_callback),
                     url_button("↗ Issue", result.url),
                 ),
                 (callback_button("✖️ Close", f"command:/close {draft_id}"),),

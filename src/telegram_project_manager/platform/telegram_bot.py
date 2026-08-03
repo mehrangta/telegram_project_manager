@@ -22,7 +22,8 @@ CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
 CALLBACK_DRAFT_PATTERN = re.compile(r"^i-[0-9a-f]{8}$")
 ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel|close) i-[0-9a-f]{8}$")
 ISSUE_CODE_ACTION_PATTERN = re.compile(
-    r"^/code(?: --skip-plan)? (?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$"
+    r"^/code(?: --(?:skip-plan|plan-and-code))? "
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$"
 )
 
 

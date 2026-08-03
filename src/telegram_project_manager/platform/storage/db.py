@@ -258,6 +258,8 @@ class Database:
                     status TEXT NOT NULL,
                     resume_phase TEXT NOT NULL,
                     skip_plan INTEGER NOT NULL DEFAULT 0,
+                    plan_and_code INTEGER NOT NULL DEFAULT 0,
+                    auto_answered_questions INTEGER NOT NULL DEFAULT 0,
                     plan_json TEXT,
                     plan_revision INTEGER NOT NULL DEFAULT 0,
                     feedback_json TEXT NOT NULL DEFAULT '[]',
@@ -433,6 +435,15 @@ class Database:
                 conn, "code_jobs", "telegram_reply_to_message_id", "INTEGER"
             )
             self._ensure_column(conn, "code_jobs", "telegram_plan_message_id", "INTEGER")
+            self._ensure_column(
+                conn, "code_jobs", "plan_and_code", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(
+                conn,
+                "code_jobs",
+                "auto_answered_questions",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             self._ensure_column(
                 conn, "code_jobs", "telegram_deployment_message_id", "INTEGER"
             )
@@ -1954,8 +1965,9 @@ class Database:
                     telegram_reply_to_message_id,
                     repo, issue_number, issue_title, issue_url, issue_context_json,
                     base_branch, target_branch, workspace_path, source_repo_path, status, resume_phase,
-                    skip_plan, feedback_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+                    skip_plan, plan_and_code, auto_answered_questions,
+                    feedback_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
                 """,
                 (
                     job["id"],
@@ -1975,6 +1987,8 @@ class Database:
                     job["status"],
                     job["resume_phase"],
                     int(bool(job.get("skip_plan"))),
+                    int(bool(job.get("plan_and_code"))),
+                    int(bool(job.get("auto_answered_questions"))),
                     now,
                     now,
                 ),
@@ -2123,6 +2137,7 @@ class Database:
             "source_repo_path",
             "status",
             "resume_phase",
+            "auto_answered_questions",
             "plan_json",
             "plan_revision",
             "feedback_json",
@@ -2233,6 +2248,78 @@ class Database:
                 (json.dumps(history, separators=(",", ":")), now, job_id),
             )
         return "queued" if queued else "pending"
+
+    def queue_automatic_plan_feedback(
+        self,
+        job_id: str,
+        *,
+        source_id: str,
+        body: str,
+    ) -> bool:
+        text = body.strip()[:8192]
+        if not text:
+            raise ValueError("Plan feedback is required.")
+        now = int(time.time())
+        with self.session() as conn:
+            job = conn.execute(
+                """
+                SELECT status, feedback_json, plan_and_code, auto_answered_questions
+                FROM code_jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if (
+                not job
+                or str(job["status"]) != "awaiting_clarification"
+                or not bool(job["plan_and_code"])
+                or bool(job["auto_answered_questions"])
+            ):
+                return False
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO code_plan_feedback (
+                    job_id, source, source_id, author, body, created_at
+                ) VALUES (?, 'automatic', ?, 'Plan & Code', ?, ?)
+                """,
+                (job_id, source_id, text, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            try:
+                history = json.loads(str(job["feedback_json"] or "[]"))
+            except json.JSONDecodeError:
+                history = []
+            if not isinstance(history, list):
+                history = []
+            history.append(text)
+            updated = conn.execute(
+                """
+                UPDATE code_jobs
+                SET feedback_json = ?, auto_answered_questions = 1,
+                    status = 'queued_plan_edit', resume_phase = 'plan',
+                    latest_activity = 'Applying recommended plan answers', updated_at = ?
+                WHERE id = ? AND status = 'awaiting_clarification'
+                  AND plan_and_code = 1 AND auto_answered_questions = 0
+                """,
+                (json.dumps(history, separators=(",", ":")), now, job_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("automatic plan feedback state changed unexpectedly")
+        return True
+
+    def queue_plan_and_code(self, job_id: str) -> bool:
+        now = int(time.time())
+        with self.session() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE code_jobs
+                SET status = 'queued_code', resume_phase = 'code', error = NULL,
+                    latest_activity = 'Plan approved automatically', updated_at = ?
+                WHERE id = ? AND status = 'awaiting_approval' AND plan_and_code = 1
+                """,
+                (now, job_id),
+            )
+        return cursor.rowcount == 1
 
     def list_pending_code_plan_feedback(self, job_id: str) -> list[dict[str, Any]]:
         with self.session() as conn:
@@ -2430,4 +2517,6 @@ class Database:
             value = job.get(key)
             job[key] = json.loads(str(value)) if value else default
         job["skip_plan"] = bool(job["skip_plan"])
+        job["plan_and_code"] = bool(job.get("plan_and_code"))
+        job["auto_answered_questions"] = bool(job.get("auto_answered_questions"))
         return job

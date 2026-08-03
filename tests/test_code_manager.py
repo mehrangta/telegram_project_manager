@@ -143,7 +143,83 @@ class CodeManagerTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["base_branch"], "develop")
             self.assertEqual(call["source_path"], "/cache/owner-repo.git")
             self.assertTrue(call["skip_plan"])
+            self.assertFalse(call["plan_and_code"])
             self.assertEqual(call["reply_to_message_id"], 41)
+
+    async def test_plan_and_code_command_starts_automatic_plan_in_current_topic(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            async def create_job(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class GitHub:
+            @staticmethod
+            def get_issue(repo, number):
+                return IssueContext(
+                    repo=repo,
+                    number=number,
+                    title="Issue",
+                    body="Body",
+                    url=f"https://github.com/{repo}/issues/{number}",
+                    comments=(),
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(20, "admin", "admin")
+            db.allow_repo("owner/repo", 20)
+            db.set_scope_repo(10, 30, "owner/repo", 20, "develop")
+            db.set_scope_local_repo(10, 30, "/cache/owner-repo.git", 20)
+            service = Service()
+            manager = CodeManager(
+                db=db, service=service, github=GitHub(), reporter=object()
+            )
+
+            response = await manager.handle(
+                IncomingMessage(
+                    10,
+                    20,
+                    "admin",
+                    "/code --plan-and-code owner/repo#12",
+                    thread_id=30,
+                )
+            )
+
+            self.assertIsNone(response)
+            self.assertEqual(len(service.calls), 1)
+            call = service.calls[0]
+            self.assertFalse(call["skip_plan"])
+            self.assertTrue(call["plan_and_code"])
+            self.assertEqual(call["thread_id"], 30)
+            self.assertEqual(call["base_branch"], "develop")
+            self.assertEqual(call["source_path"], "/cache/owner-repo.git")
+
+    async def test_skip_plan_and_plan_and_code_are_mutually_exclusive(self):
+        class Service:
+            async def create_job(self, **kwargs):
+                raise AssertionError("job should not be created")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(20, "admin", "admin")
+            manager = CodeManager(
+                db=db, service=Service(), github=object(), reporter=object()
+            )
+
+            response = await manager.handle(
+                IncomingMessage(
+                    10,
+                    20,
+                    "admin",
+                    "/code --skip-plan --plan-and-code owner/repo#12",
+                )
+            )
+
+            self.assertIn("not both", response)
 
     async def test_status_and_controls_are_limited_to_current_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -783,6 +859,199 @@ class CodeJobServiceTests(unittest.IsolatedAsyncioTestCase):
             f"confirm_deploy:{job_id}",
             str(self.bot.sent_options[-1]["reply_markup"]),
         )
+
+    async def test_plan_and_code_automatically_codes_decision_complete_plan(self):
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=30,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=False,
+            plan_and_code=True,
+        )
+
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertTrue(ready["plan_and_code"])
+        self.assertFalse(ready["auto_answered_questions"])
+        self.assertEqual(ready["plan_revision"], 1)
+        self.assertEqual(
+            [call["model_role"] for call in self.codex.calls],
+            ["plan", "code"],
+        )
+        self.assertFalse(
+            any("ready for approval" in message[1] for message in self.bot.sent)
+        )
+        self.assertFalse(
+            any("needs your answers" in message[1] for message in self.bot.sent)
+        )
+
+    async def test_plan_and_code_applies_recommended_answers_then_codes(self):
+        self.codex.results = [QUESTION_PLAN, PLAN, RESULT]
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=None,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=False,
+            plan_and_code=True,
+        )
+
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertTrue(ready["auto_answered_questions"])
+        self.assertEqual(ready["plan_revision"], 2)
+        self.assertEqual(
+            [call["model_role"] for call in self.codex.calls],
+            ["plan", "plan", "code"],
+        )
+        self.assertIn("Preserve the current API", self.codex.calls[1]["prompt"])
+        with self.db.session() as conn:
+            feedback = conn.execute(
+                """
+                SELECT source, source_id, author, body, state, applied_revision
+                FROM code_plan_feedback WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        self.assertEqual(feedback["source"], "automatic")
+        self.assertEqual(feedback["source_id"], f"plan-and-code:{job_id}:1")
+        self.assertEqual(feedback["author"], "Plan & Code")
+        self.assertIn("Answer: Preserve the current API", feedback["body"])
+        self.assertEqual((feedback["state"], feedback["applied_revision"]), ("applied", 2))
+        self.assertFalse(
+            any("needs your answers" in message[1] for message in self.bot.sent)
+        )
+        self.assertFalse(
+            any("ready for approval" in message[1] for message in self.bot.sent)
+        )
+
+    async def test_plan_and_code_pauses_when_question_has_no_recommendation(self):
+        unresolved = {
+            **QUESTION_PLAN,
+            "questions": [
+                {
+                    **QUESTION_PLAN["questions"][0],
+                    "recommended_option": "",
+                }
+            ],
+        }
+        self.codex.results = [unresolved]
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=None,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=False,
+            plan_and_code=True,
+        )
+
+        waiting = await wait_for_status(self.db, job_id, "awaiting_clarification")
+        await wait_for_send_count(self.bot, 2)
+
+        self.assertFalse(waiting["auto_answered_questions"])
+        self.assertEqual(len(self.codex.calls), 1)
+        self.assertIn("needs your answers", self.bot.sent[-1][1])
+
+        self.codex.results = [PLAN, RESULT]
+        await self.service.edit_plan(
+            job_id,
+            "Preserve the current API.",
+            source="telegram",
+            source_id="10:manual-answer",
+            author="20",
+        )
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["plan_revision"], 2)
+        self.assertFalse(ready["auto_answered_questions"])
+        self.assertEqual(
+            [call["model_role"] for call in self.codex.calls],
+            ["plan", "plan", "code"],
+        )
+
+    async def test_plan_and_code_does_not_repeat_automatic_answers(self):
+        self.codex.results = [QUESTION_PLAN, QUESTION_PLAN]
+        job_id = await self.service.create_job(
+            chat_id=10,
+            user_id=20,
+            thread_id=None,
+            issue=self.issue,
+            base_branch="main",
+            source_path="/cache/owner-repo.git",
+            skip_plan=False,
+            plan_and_code=True,
+        )
+
+        for _ in range(200):
+            waiting = self.db.get_code_job(job_id)
+            if (
+                waiting
+                and waiting["status"] == "awaiting_clarification"
+                and waiting["plan_revision"] == 2
+            ):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.fail("repeated questions did not pause after one automatic revision")
+        await wait_for_send_count(self.bot, 2)
+
+        self.assertTrue(waiting["auto_answered_questions"])
+        self.assertEqual(len(self.codex.calls), 2)
+        with self.db.session() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM code_plan_feedback WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+        self.assertIn("needs your answers", self.bot.sent[-1][1])
+
+    async def test_recover_continues_decision_complete_plan_and_code_job(self):
+        job_id = "c-recover1"
+        workspace = Path(self.temp.name) / "code-jobs" / job_id / "repo"
+        self.db.create_code_job(
+            {
+                "id": job_id,
+                "telegram_chat_id": 10,
+                "telegram_user_id": 20,
+                "telegram_thread_id": None,
+                "repo": "owner/repo",
+                "issue_number": 12,
+                "issue_title": "Broken handler",
+                "issue_url": "https://github.com/owner/repo/issues/12",
+                "issue_context_json": self.issue.to_json(),
+                "base_branch": "main",
+                "target_branch": "codex/issue-12-c-recover1",
+                "workspace_path": str(workspace),
+                "source_repo_path": "/cache/owner-repo.git",
+                "status": "awaiting_approval",
+                "resume_phase": "plan",
+                "skip_plan": False,
+                "plan_and_code": True,
+            }
+        )
+        self.db.update_code_job(
+            job_id,
+            {
+                "plan_json": PLAN,
+                "plan_revision": 1,
+                "pull_request_number": 42,
+                "pull_request_url": "https://github.com/owner/repo/pull/42",
+            },
+        )
+
+        await self.service.recover()
+        ready = await wait_for_status(self.db, job_id, "ready")
+
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual([call["model_role"] for call in self.codex.calls], ["code"])
+        self.assertEqual(self.github.ready, ["https://github.com/owner/repo/pull/42"])
 
     async def test_issue_images_are_attached_to_codex_and_cleaned(self):
         image_path = str(Path(self.temp.name) / "repo" / ".codex" / "issue-images" / "1.png")

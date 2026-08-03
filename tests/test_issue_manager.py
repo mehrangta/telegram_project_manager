@@ -204,7 +204,7 @@ class IssueManagerTests(unittest.TestCase):
             self.assertIn("Issue draft revised", accepted)
             self.assertEqual(planner.revise_calls[0]["local_repo_path"], "/cache/original.git")
 
-    def test_created_issue_has_plan_code_and_issue_buttons(self):
+    def test_created_issue_has_plan_code_plan_and_code_and_issue_buttons(self):
         class SuccessfulExecution:
             @staticmethod
             def execute(draft_id, user_id, chat_id, thread_id):
@@ -237,8 +237,13 @@ class IssueManagerTests(unittest.TestCase):
                 buttons[1]["callback_data"],
                 "command:/code --skip-plan owner/repo#12",
             )
-            self.assertEqual(buttons[2]["text"], "↗ Issue")
-            self.assertEqual(buttons[2]["url"], "https://github.com/owner/repo/issues/12")
+            self.assertEqual(buttons[2]["text"], "📝💻 Plan & Code")
+            self.assertEqual(
+                buttons[2]["callback_data"],
+                "command:/code --plan-and-code owner/repo#12",
+            )
+            self.assertEqual(buttons[3]["text"], "↗ Issue")
+            self.assertEqual(buttons[3]["url"], "https://github.com/owner/repo/issues/12")
             close_button = response.reply_markup()["inline_keyboard"][1][0]
             self.assertEqual(close_button["text"], "✖️ Close")
             self.assertEqual(close_button["callback_data"], "command:/close i-abcdef12")
@@ -354,8 +359,12 @@ class IssueManagerTests(unittest.TestCase):
                 buttons[1]["callback_data"],
                 "command:/code --skip-plan #12",
             )
-            self.assertLessEqual(len(buttons[0]["callback_data"].encode("utf-8")), 64)
-            self.assertLessEqual(len(buttons[1]["callback_data"].encode("utf-8")), 64)
+            self.assertEqual(
+                buttons[2]["callback_data"],
+                "command:/code --plan-and-code #12",
+            )
+            for button in buttons[:3]:
+                self.assertLessEqual(len(button["callback_data"].encode("utf-8")), 64)
 
     def test_issue_draft_round_trip_with_attachment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
