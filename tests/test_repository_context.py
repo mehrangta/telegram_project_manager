@@ -190,6 +190,7 @@ class IssuePlannerContextTests(unittest.TestCase):
                 default_branch="main",
                 local_repo_path="/cache/repo.git",
                 attachments=(),
+                telegram_reply_to_message_id=41,
             )
 
             self.assertEqual(context.calls, [])
@@ -202,6 +203,7 @@ class IssuePlannerContextTests(unittest.TestCase):
             self.assertIn('field named "title"', llm.calls[0][1])
             stored = db.get_issue_draft(draft_id)
             assert stored is not None
+            self.assertEqual(stored["telegram_reply_to_message_id"], 41)
             self.assertEqual(stored["issue_json"]["raw_body"], request)
 
     def test_original_body_revision_retitles_without_context_or_body_change(self):

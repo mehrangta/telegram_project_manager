@@ -25,6 +25,7 @@ class IncomingMessage:
     is_private: bool = False
     attachments: tuple[IncomingAttachment, ...] = ()
     message_id: int | None = None
+    reply_target_message_id: int | None = None
     media_group_id: str | None = None
     thread_id: int | None = None
     reply_to_draft_id: str | None = None
@@ -64,6 +65,7 @@ class TelegramRouter:
             is_private=message.is_private,
             attachments=message.attachments,
             message_id=message.message_id,
+            reply_target_message_id=message.reply_target_message_id,
             media_group_id=message.media_group_id,
             thread_id=message.thread_id,
             reply_to_draft_id=message.reply_to_draft_id,

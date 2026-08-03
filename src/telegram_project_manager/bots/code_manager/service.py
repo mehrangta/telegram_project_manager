@@ -211,6 +211,7 @@ class CodeJobService:
         base_branch: str,
         source_path: str,
         skip_plan: bool,
+        reply_to_message_id: int | None = None,
     ) -> str:
         resolved_source = await asyncio.to_thread(
             self.workspaces.validate_source,
@@ -233,6 +234,7 @@ class CodeJobService:
                 "telegram_chat_id": chat_id,
                 "telegram_user_id": user_id,
                 "telegram_thread_id": thread_id,
+                "telegram_reply_to_message_id": reply_to_message_id,
                 "repo": issue.repo,
                 "issue_number": issue.number,
                 "issue_title": issue.title,

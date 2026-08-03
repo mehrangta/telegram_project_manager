@@ -206,11 +206,13 @@ replies without an explicit job ID.
   periodically. Ready statuses link to the code job's tracked Telegram message
   in channels and supergroups; unsupported chats retain the plain status text.
   `/issue` creates a reviewable issue draft. After creation, choose Plan for the
-  plan-and-approval workflow or Code to skip directly to implementation. `/code`
-  works on an existing issue in an isolated worktree and opens a draft pull
-  request. Approve the plan before implementation unless `--skip-plan` was used.
-  A job becomes ready only after repository validation and GitHub checks pass;
-  its ready notification replies to the tracked code-job message.
+  plan-and-approval workflow or Code to skip directly to implementation. The
+  tracked code-job message replies to the original `/issue` request; jobs started
+  directly with `/code` reply to that command instead. `/code` works on an
+  existing issue in an isolated worktree and opens a draft pull request. Approve
+  the plan before implementation unless `--skip-plan` was used. A job becomes
+  ready only after repository validation and GitHub checks pass; its ready
+  notification replies to the tracked code-job message.
 - **Questions and jobs:** `/ask` performs a read-only repository inspection.
   `/brainstorm` returns three ranked ideas for new capabilities or meaningful
   extensions when brainstorming is enabled for the current chat or topic's

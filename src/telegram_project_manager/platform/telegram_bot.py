@@ -201,6 +201,7 @@ def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | No
     attachments = _attachments_from_message(message)
     if not text and not attachments:
         return None
+    message_id = message.get("message_id") if isinstance(message.get("message_id"), int) else None
     return IncomingMessage(
         chat_id=chat["id"],
         user_id=sender["id"],
@@ -208,7 +209,8 @@ def incoming_message_from_update(update: dict[str, Any]) -> IncomingMessage | No
         text=text.strip(),
         is_private=chat.get("type") == "private",
         attachments=attachments,
-        message_id=message.get("message_id") if isinstance(message.get("message_id"), int) else None,
+        message_id=message_id,
+        reply_target_message_id=message_id,
         media_group_id=str(message["media_group_id"]) if message.get("media_group_id") is not None else None,
         thread_id=message.get("message_thread_id") if isinstance(message.get("message_thread_id"), int) else None,
         reply_to_draft_id=_reply_to_draft_id(message),
@@ -232,6 +234,7 @@ def incoming_message_from_updates(updates: list[dict[str, Any]]) -> IncomingMess
         is_private=base.is_private,
         attachments=attachments,
         message_id=base.message_id,
+        reply_target_message_id=base.reply_target_message_id,
         media_group_id=base.media_group_id,
         thread_id=base.thread_id,
         reply_to_draft_id=next(
@@ -277,6 +280,7 @@ def callback_action_from_update(update: dict[str, Any]) -> CallbackAction | None
             text="",
             is_private=chat.get("type") == "private",
             message_id=message_id,
+            reply_target_message_id=_reply_target_message_id(source) or message_id,
             thread_id=(
                 source.get("message_thread_id")
                 if isinstance(source.get("message_thread_id"), int)
@@ -293,6 +297,13 @@ def _reply_to_draft_id(message: dict[str, Any]) -> str | None:
         return None
     match = DRAFT_ID_PATTERN.search(text)
     return match.group(1) if match else None
+
+def _reply_target_message_id(message: dict[str, Any]) -> int | None:
+    replied = message.get("reply_to_message")
+    if not isinstance(replied, dict):
+        return None
+    message_id = replied.get("message_id")
+    return message_id if isinstance(message_id, int) else None
 
 
 def _reply_to_code_job_id(message: dict[str, Any]) -> str | None:
@@ -539,6 +550,7 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             text=command,
             is_private=incoming.is_private,
             message_id=incoming.message_id,
+            reply_target_message_id=incoming.reply_target_message_id,
             thread_id=incoming.thread_id,
         )
         update_id = update.get("update_id")
