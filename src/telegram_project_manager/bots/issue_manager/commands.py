@@ -63,6 +63,8 @@ class IssueManager:
             return self.confirm(message, rest.strip())
         if command == "/cancel" and rest.strip().startswith("i-"):
             return self.cancel(message, rest.strip())
+        if command == "/close" and rest.strip().startswith("i-"):
+            return self.close(message, rest.strip())
         if command.startswith("/"):
             return None
         if message.reply_to_draft_id:
@@ -228,14 +230,38 @@ class IssueManager:
         code_callback = _code_callback(result.repo, result.number, skip_plan=True)
         return outgoing_message(
             text,
-            keyboard=((
-                callback_button("📝 Plan", plan_callback),
-                callback_button("💻 Code", code_callback),
-                url_button("↗ Issue", result.url),
-            ),),
+            keyboard=(
+                (
+                    callback_button("📝 Plan", plan_callback),
+                    callback_button("💻 Code", code_callback),
+                    url_button("↗ Issue", result.url),
+                ),
+                (callback_button("✖️ Close", f"command:/close {draft_id}"),),
+            ),
             reply_to_message_id=(
                 draft.get("telegram_reply_to_message_id") if draft else None
             ),
+        )
+
+    def close(self, message: IncomingMessage, draft_id: str) -> str:
+        admin_error = self.permissions.require_admin(message.user_id)
+        if admin_error:
+            return admin_error
+        try:
+            result = self.execution.close(
+                draft_id, message.chat_id, message.thread_id
+            )
+        except (ValueError, GhError) as exc:
+            self.db.audit("issue.close", "failed", {"error": str(exc)}, draft_id)
+            return f"Issue not closed.\nReason: {exc}"
+        return "\n".join(
+            [
+                "Issue closed.",
+                f"Repo: {result.repo}",
+                f"Issue: #{result.number}",
+                f"Title: {result.title}",
+                f"Link: {result.url}",
+            ]
         )
 
     def cancel(self, message: IncomingMessage, draft_id: str) -> str:

@@ -122,6 +122,13 @@ class GhIssueExecutor:
         )
         return self._result(repo, created, issue.title), paths
 
+    def close_issue(self, repo: str, number: int) -> None:
+        self.gh.api_json(
+            f"repos/{repo}/issues/{number}",
+            method="PATCH",
+            body={"state": "closed"},
+        )
+
     def _find_existing_issue(self, repo: str, marker: str) -> dict[str, Any] | None:
         value = self.gh.api_value(f"repos/{repo}/issues?state=all&per_page=100")
         if not isinstance(value, list):

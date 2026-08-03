@@ -48,3 +48,38 @@ class IssueExecutionService:
             draft_id,
         )
         return result
+
+    def close(
+        self,
+        draft_id: str,
+        chat_id: int,
+        thread_id: int | None,
+    ) -> IssueResult:
+        record = self.db.get_issue_draft(draft_id)
+        if not record:
+            raise ValueError("Issue draft not found.")
+        if int(record["telegram_chat_id"]) != chat_id or record.get("telegram_thread_id") != thread_id:
+            raise ValueError("Issue belongs to a different chat or topic.")
+        if record["status"] == "closed":
+            return self._result_from_record(record)
+        if record["status"] != "created" or not record.get("github_issue_number"):
+            raise ValueError("Issue has not been created.")
+        result = self._result_from_record(record)
+        self.executor.close_issue(result.repo, result.number)
+        self.db.update_issue_draft_status(draft_id, "closed")
+        self.db.audit(
+            "issue.close",
+            "ok",
+            {"repo": result.repo, "number": result.number, "url": result.url},
+            draft_id,
+        )
+        return result
+
+    @staticmethod
+    def _result_from_record(record: dict) -> IssueResult:
+        return IssueResult(
+            repo=str(record["repo"]),
+            number=int(record["github_issue_number"]),
+            url=str(record["github_issue_url"]),
+            title=str(record["issue_json"]["title"]),
+        )
