@@ -20,7 +20,9 @@ ISSUE_REPO_PATTERN = re.compile(r"(?m)^Repo:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)
 ISSUE_NUMBER_PATTERN = re.compile(r"(?m)^Issue:\s*#(\d+)\s*$")
 CALLBACK_JOB_PATTERN = re.compile(r"^c-[0-9a-f]{8}$")
 CALLBACK_DRAFT_PATTERN = re.compile(r"^i-[0-9a-f]{8}$")
-ISSUE_DRAFT_ACTION_PATTERN = re.compile(r"^/(?:confirm|cancel|close) i-[0-9a-f]{8}$")
+ISSUE_DRAFT_DELETE_ACTION_PATTERN = re.compile(
+    r"^/(?:confirm|cancel) i-[0-9a-f]{8}$"
+)
 ISSUE_CODE_ACTION_PATTERN = re.compile(
     r"^/code(?: --(?:skip-plan|plan-and-code))? "
     r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$"
@@ -389,6 +391,27 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
         if not response:
             return
         outgoing = outgoing_message(response)
+        if outgoing.edit_message_id is not None:
+            try:
+                await asyncio.to_thread(
+                    bot.edit_message_text,
+                    incoming.chat_id,
+                    outgoing.edit_message_id,
+                    outgoing.text,
+                    parse_mode=outgoing.parse_mode,
+                    reply_markup=outgoing.reply_markup(include_empty=True),
+                    disable_link_preview=outgoing.disable_link_preview,
+                )
+            except TelegramBotApiError as exc:
+                if "message is not modified" in str(exc).lower():
+                    return
+                logging.warning(
+                    "Telegram response edit failed: chat_id=%s message_id=%s",
+                    incoming.chat_id,
+                    outgoing.edit_message_id,
+                )
+                raise
+            return
         await asyncio.to_thread(
             bot.send_message,
             incoming.chat_id,
@@ -530,10 +553,9 @@ async def run_polling(bot: TelegramBotApi, router: TelegramRouter) -> None:
             await answer_callback(callback.query_id, "Button expired")
             return
         await answer_callback(callback.query_id, "Action requested")
-        if (
-            ISSUE_DRAFT_ACTION_PATTERN.fullmatch(command)
-            or ISSUE_CODE_ACTION_PATTERN.fullmatch(command)
-        ):
+        if ISSUE_DRAFT_DELETE_ACTION_PATTERN.fullmatch(
+            command
+        ) or ISSUE_CODE_ACTION_PATTERN.fullmatch(command):
             await delete_callback_source(callback)
         if command.lower().startswith("/merge "):
             await delete_callback_source(callback)

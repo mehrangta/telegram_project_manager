@@ -250,7 +250,7 @@ class IssueManager:
             ),
         )
 
-    def close(self, message: IncomingMessage, draft_id: str) -> str:
+    def close(self, message: IncomingMessage, draft_id: str) -> str | OutgoingMessage:
         admin_error = self.permissions.require_admin(message.user_id)
         if admin_error:
             return admin_error
@@ -261,14 +261,18 @@ class IssueManager:
         except (ValueError, GhError) as exc:
             self.db.audit("issue.close", "failed", {"error": str(exc)}, draft_id)
             return f"Issue not closed.\nReason: {exc}"
-        return "\n".join(
-            [
-                "Issue closed.",
-                f"Repo: {result.repo}",
-                f"Issue: #{result.number}",
-                f"Title: {result.title}",
-                f"Link: {result.url}",
-            ]
+        return outgoing_message(
+            "\n".join(
+                [
+                    "Issue closed.",
+                    f"Repo: {result.repo}",
+                    f"Issue: #{result.number}",
+                    f"Title: {result.title}",
+                    f"Link: {result.url}",
+                ]
+            ),
+            keyboard=(),
+            edit_message_id=message.callback_source_message_id,
         )
 
     def cancel(self, message: IncomingMessage, draft_id: str) -> str:

@@ -148,6 +148,11 @@ class ResponsePresentationTests(unittest.TestCase):
         self.assertIsNone(outgoing.reply_markup())
         self.assertEqual(outgoing.reply_markup(include_empty=True), {"inline_keyboard": []})
 
+    def test_edit_target_is_preserved(self):
+        outgoing = outgoing_message("Status", edit_message_id=42)
+
+        self.assertEqual(outgoing.edit_message_id, 42)
+
     def test_do_job_id_gets_copy_and_status_controls(self):
         outgoing = outgoing_message(
             "⚙️ Codex do job\n"
