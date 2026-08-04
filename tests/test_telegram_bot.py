@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from unittest import mock
 
+from telegram_project_manager.platform.responses import outgoing_message
 from telegram_project_manager.platform.router import IncomingMessage, TelegramRouter
 from telegram_project_manager.platform.telegram_bot import (
     TelegramBotApi,
@@ -310,6 +311,8 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             self.updates = updates
             self.answers = []
             self.sent = []
+            self.edited = []
+            self.edit_error = None
             self.deleted = []
             self.markup_edits = []
             self.polls = 0
@@ -332,6 +335,11 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         def send_message(self, chat_id, text, thread_id=None, **kwargs):
             self.sent.append((chat_id, text, thread_id, kwargs))
             return {"message_id": 100 + len(self.sent)}
+
+        def edit_message_text(self, chat_id, message_id, text, **kwargs):
+            self.edited.append((chat_id, message_id, text, kwargs))
+            if self.edit_error:
+                raise self.edit_error
 
         def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
             self.markup_edits.append((chat_id, message_id, reply_markup))
@@ -438,7 +446,7 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.commands, commands)
         self.assertEqual(
             [message.reply_target_message_id for message in router.messages],
-            [11, 11, 11, 11],
+            [11, 11, 11, 11, 11, 11],
         )
         self.assertEqual(
             bot.answers,
@@ -545,6 +553,63 @@ class TelegramCallbackPollingTests(unittest.IsolatedAsyncioTestCase):
             bot.answers,
             [("query-1", "Action requested"), ("query-2", "Action requested")],
         )
+
+    async def test_issue_close_edits_created_message_without_sending_or_deleting(self):
+        class CloseRouter(self.Router):
+            async def handle_message(self, message):
+                self.commands.append(message.text)
+                self.messages.append(message)
+                return outgoing_message(
+                    "Issue closed.\nIssue: #12",
+                    keyboard=(),
+                    edit_message_id=message.callback_source_message_id,
+                )
+
+        bot = self.Bot([
+            self.callback(
+                1,
+                "query-1",
+                "command:/close i-abcdef12",
+                message_id=22,
+                thread_id=7,
+            )
+        ])
+        router = CloseRouter()
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, router)
+
+        self.assertEqual(router.commands, ["/close i-abcdef12"])
+        self.assertEqual(router.messages[0].callback_source_message_id, 22)
+        self.assertEqual(bot.answers, [("query-1", "Action requested")])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.deleted, [])
+        self.assertEqual(len(bot.edited), 1)
+        chat_id, message_id, text, options = bot.edited[0]
+        self.assertEqual((chat_id, message_id), (40, 22))
+        self.assertIn("Issue closed.", text)
+        self.assertEqual(options["reply_markup"], {"inline_keyboard": []})
+        self.assertTrue(options["disable_link_preview"])
+
+    async def test_issue_close_message_not_modified_is_idempotent(self):
+        class CloseRouter(self.Router):
+            async def handle_message(self, message):
+                return outgoing_message(
+                    "Issue closed.\nIssue: #12",
+                    edit_message_id=message.callback_source_message_id,
+                )
+
+        bot = self.Bot([
+            self.callback(1, "query-1", "command:/close i-abcdef12", message_id=22)
+        ])
+        bot.edit_error = TelegramBotApiError("Bad Request: message is not modified")
+
+        with self.assertRaises(PollingStopped):
+            await run_polling(bot, CloseRouter())
+
+        self.assertEqual(len(bot.edited), 1)
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(bot.deleted, [])
 
     async def test_delete_failure_does_not_block_edit_confirm_or_issue_code(self):
         class DeleteFailingBot(self.Bot):

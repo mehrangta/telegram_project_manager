@@ -53,6 +53,7 @@ class OutgoingMessage:
     keyboard: tuple[tuple[InlineButton, ...], ...] = ()
     disable_link_preview: bool = True
     reply_to_message_id: int | None = None
+    edit_message_id: int | None = None
 
     def reply_markup(self, *, include_empty: bool = False) -> dict[str, object] | None:
         if not self.keyboard and not include_empty:
@@ -82,6 +83,7 @@ def outgoing_message(
     expandable_prefixes: Sequence[str] = (),
     preformatted_prefixes: Sequence[str] = (),
     reply_to_message_id: int | None = None,
+    edit_message_id: int | None = None,
 ) -> OutgoingMessage:
     if isinstance(value, OutgoingMessage):
         return value
@@ -99,6 +101,7 @@ def outgoing_message(
         ),
         keyboard=resolved_keyboard,
         reply_to_message_id=reply_to_message_id,
+        edit_message_id=edit_message_id,
     )
 
 

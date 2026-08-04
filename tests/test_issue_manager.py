@@ -275,9 +275,49 @@ class IssueManagerTests(unittest.TestCase):
                 "i-abcdef12",
             )
 
-            self.assertIn("Issue closed.", response)
-            self.assertIn("Issue: #12", response)
+            self.assertIsInstance(response, OutgoingMessage)
+            assert isinstance(response, OutgoingMessage)
+            self.assertIn("Issue closed.", response.text)
+            self.assertIn("<b>Issue:</b> #12", response.text)
+            self.assertIsNone(response.edit_message_id)
             self.assertEqual(execution.calls, [("i-abcdef12", 20, 4)])
+
+    def test_close_callback_edits_created_issue_message_and_clears_buttons(self):
+        class SuccessfulExecution:
+            @staticmethod
+            def close(draft_id, chat_id, thread_id):
+                return IssueResult(
+                    repo="owner/repo",
+                    number=12,
+                    url="https://github.com/owner/repo/issues/12",
+                    title="Broken button",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "bot.db")
+            db.initialize()
+            db.upsert_user(10, "admin", "admin")
+            manager = IssueManager(db, FakePlanner(), SuccessfulExecution())
+
+            response = manager.close(
+                IncomingMessage(
+                    20,
+                    10,
+                    "admin",
+                    "/close i-abcdef12",
+                    thread_id=4,
+                    callback_source_message_id=77,
+                ),
+                "i-abcdef12",
+            )
+
+            self.assertIsInstance(response, OutgoingMessage)
+            assert isinstance(response, OutgoingMessage)
+            self.assertEqual(response.edit_message_id, 77)
+            self.assertEqual(
+                response.reply_markup(include_empty=True),
+                {"inline_keyboard": []},
+            )
 
     def test_close_service_persists_status_and_is_idempotent(self):
         class Executor:
